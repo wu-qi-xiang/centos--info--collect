@@ -12,3 +12,4 @@
 ##### 3. 创建数据库表：python manage.py makemigrations , python manage.py migrate 
 ##### 4  然后 cd PyLinux && python manage.py runserver 启动服务器
 ##### 5. 页面进入 ip+8000 访问。 
+##### 6. 邮件告警需要执行：python manage.py crontab add
