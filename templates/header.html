@@ -1,0 +1,29 @@
+<!DOCTYPE html>
+<html lang="zh-cn">
+<head>
+    <meta charset="UTF-8">
+    <title>首页的头部</title>
+</head>
+{% load staticfiles %}
+<body style="background-image: url({% static "images/maomao.jpg"%});">
+    <div class="nav-pills navbar navbar-default navbar-expand-lg navbar-light bg-success">
+        <div class="navbar-header">
+            <a href="{% url 'linux' %}" class="navbar-brand"><b><i>LINUX首页</i></b></a>
+        </div>
+        <ul class="nav navbar-nav navbar-default">
+            <li class="navbar-nav">
+                <a class="nav-link" href="{% url 'linux' %}"><button class="btn btn-info" type="button">本地linux</button></a>
+            </li>
+            <li class="navbar-nav">
+                <a class="nav-link" href="{% url 'linux_detail' %}"><button class="btn btn-info">linux列表</button></a>
+            </li>
+            <li class="navbar-nav">
+                <a class="nav-link" href="{% url 'linux_create' %}"><button class="btn btn-info">添加linux主机</button></a>
+            </li>
+            <li class="navbar-nav">
+                <a class="nav-link" href="{% url 'monitor:monitor_index' %}"><button class="btn btn-info">监控设置</button></a>
+            </li>
+        </ul>
+    </div>
+</body>
+</html>

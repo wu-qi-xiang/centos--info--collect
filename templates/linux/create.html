@@ -1,0 +1,71 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <title>添加linux主机</title>
+    <script src="http://code.jquery.com/jquery-2.1.1.min.js"></script>
+</head>
+{% extends "base.html" %}
+{% load staticfiles %}
+{% block content %}
+<body>
+<div class="container">
+    <div class="row">
+        <div class="col-3">
+        <br>
+            <!-- 提交文章的表单 -->
+            <form id="testform" method="post" action="#" enctype="multipart/form-data">
+            <!-- Django中需要POST数据的地方都必须有csrf_token -->
+                {% csrf_token %}
+            <div class="form-group">
+                <label><b>服务器名称</b></label>
+                <input type="text" class="form-control" id="linux_name" name="linux_name" placeholder="请输入服务器名称">
+            </div>
+            <div class="form-group">
+                <label><b>主机IP地址</b></label>
+                <input type="text" class="form-control" id="linux_ip" name="linux_ip" placeholder="请输入服务器IP地址">
+            </div>
+            <div class="form-group">
+                <label><b>SSH端口</b></label>
+                <input type="text" class="form-control" id="linux_port" name="linux_port" placeholder="请输入服务器SSH端口">
+            </div>
+            <div class="form-group">
+                <label><b>用户名</b></label>
+                <input type="text" class="form-control" id="linux_user" name="linux_user" placeholder="请输入服务器登录用户名">
+            </div>
+            <div class="form-group">
+                <label><b>密码</b></label>
+                <input type="password" class="form-control" id="linux_passwd" name="linux_passwd" placeholder="请输入服务器登录密码">
+            </div>
+            <!-- 测试按钮 -->
+{#                <input type="button" class="ajax_test" value="测试连接"></input>#}
+                <button type="button" class="btn btn-success" id="ajax_test">测试连接</button>
+{#                <span id="test"></span>#}
+            <!-- 提交按钮 -->
+                <br>
+                <br>
+                <button type="submit" class="btn btn-success">完成</button>
+            </form>
+        </div>
+    </div>
+</div>
+
+<script>
+    $('#ajax_test').click(function () {
+        $.ajax({
+            url:'/test/',
+            type:'POST',
+            data:$('#testform').serialize(),
+            async:true,
+            success:function (data) {
+                alert(data);
+                console.info(data);
+                {#$('#ajax_test').html(data)#}
+            }
+            })
+    })
+</script>
+
+</body>
+{% endblock content %}
+</html>

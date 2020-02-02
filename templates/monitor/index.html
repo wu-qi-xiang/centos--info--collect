@@ -1,0 +1,56 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <title>监控首页</title>
+</head>
+{% extends "base.html" %}
+{% load staticfiles %}
+{% block content %}
+<body>
+<div class="table table-hover table-bordered">
+    <thred>
+        <th>
+            <h2 class="text-center"><b>邮箱告警设置</b></h2>
+        </th>
+    </thred>
+</div>
+<div class="container">
+    <div class="row">
+        <div class="col-md-6">
+            <form method="post" enctype="multipart/form-data">
+                {% csrf_token %}
+                <div class="form-group">
+                    <label><b>接收告警邮箱：</b></label>
+                    <span class="col-md-1"></span>
+                    <input type="text" class="form-control" id="monitor_email" name="monitor_email" style="width: 50%;display: inline-block" placeholder="填写告警接收邮箱">
+                    {% for a in monitor %}
+                    <a href="{% url 'monitor:monitor_update' a.id %}" type="button" class="btn btn-success" style="width: 20%;position: relative;left: 20%">更新</a>
+                    {% endfor %}
+                </div>
+                <div class="form-group">
+                    <label><b>CPU占用告警：</b></label>
+                    <span class="col-md-1"></span>
+                    <input type="text" class="form-control" id="monitor_cpu" name="monitor_cpu" style="width: 50%;display: inline-block" placeholder="填写cpu占用百分比">
+                </div>
+                <div class="form-group">
+                    <label><b>内存占用告警：</b></label>
+                    <span class="col-md-1"></span>
+                    <input type="text" class="form-control" id="monitor_men" name="monitor_men" style="width: 50%;display: inline-block" placeholder="填写内存占用百分比">
+                </div>
+                <div class="form-group">
+                    <label><b>磁盘占用告警：</b></label>
+                    <span class="col-md-1"></span>
+                    <input type="text" class="form-control" id="monitor_disk" name="monitor_disk" style="width: 50%;display: inline-block" placeholder="填写磁盘占用百分比">
+                </div>
+                <div class="col-md-4">
+                    <div class="col-md-4"></div>
+                    <button type="submit" class="btn btn-success" style="width: 180%;position: relative;left: 90%">提交</button>
+                </div>
+            </form>
+        </div>
+    </div>
+</div>
+</body>
+{% endblock content %}
+</html>

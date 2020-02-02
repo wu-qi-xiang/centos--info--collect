@@ -1,0 +1,43 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <title>linux详细信息页面</title>
+</head>
+{% extends "base.html" %}
+{% load staticfiles %}
+{% block content %}
+<body>
+<table class="table table-hover table-bordered">
+    <thred>
+        <th class="text-center h2"><b>服务器信息</b></th>
+        <th class="text-center">
+            <a href="{% url 'linux_create' %}"  class="btn btn-success">添加linux主机</a>
+        </th>
+    </thred>
+</table>
+<table class="table table-hover table-bordered">
+    <thred>
+        <th class="text-center">序号</th>
+        <th class="text-center">服务器名称</th>
+        <th class="text-center">服务器外网IP</th>
+        <th class="text-center">详细信息</th>
+        <th class="text-center">编辑</th>
+        <th class="text-center">删除</th>
+    </thred>
+    {% for a in newlinux %}
+    <tr class="text-center">
+        <td>{{ forloop.counter }}</td>
+        <td>{{ a.linux_name }}</td>
+        <td>{{ a.linux_ip }}</td>
+        <td><a href="{% url 'linux_list_detail' a.id %}" class="btn btn-success btn-sm">详细信息</a></td>
+        <td><a href="{% url 'linux_update' a.id %}" class="btn btn-success btn-sm">编辑</a></td>
+        <td><a href="{% url 'linux_delete' a.id %}" class="btn btn-success btn-sm">删除</a></td>
+    </tr>
+    {% endfor %}
+</table>
+</body>
+{% endblock content %}
+</html>
+
+

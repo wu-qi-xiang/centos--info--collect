@@ -1,0 +1,57 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <title>linux基础数据首页</title>
+</head>
+{% extends "base.html" %}
+{% load staticfiles %}
+{#获取views中的参数#}
+{% block content %}
+<body>
+<table class="table table-bordered table-hover">
+    <thred>
+        <th class="text-center h2"><b>服务器详细信息</b></th>
+    </thred>
+</table>
+    <table class="table table-bordered table-hover">
+        <thred>
+            <th class="text-center">系统的内网IP</th>
+            <th class="text-center">系统外网IP</th>
+            <th class="text-center">系统版本</th>
+            <th class="text-center">系统内核版本</th>
+        </thred>
+        <tr class="text-center">
+            <td>{{ intranet_ip }}</td>
+            <td>{{ outside_ip }}</td>
+            <td>{{ release }}</td>
+            <td>{{ kernel }}</td>
+        </tr>
+        <tr class="text-center">
+            <td><b>cpu个数</b></td>
+            <td><b>总内存</b></td>
+            <td><b>已使用内存</b></td>
+            <td><b>剩余内存</b></td>
+        </tr>
+        <tr class="text-center">
+            <td>{{ cpu }}</td>
+            <td>{{ total_mem }}</td>
+            <td>{{ used_mem}}</td>
+            <td>{{ free_mem }}</td>
+        </tr>
+         <tr class="text-center">
+            <td><b>可用内存</b></td>
+            <td><b>磁盘总量</b></td>
+            <td><b>磁盘已使用</b></td>
+            <td><b>磁盘可用</b></td>
+        </tr>
+        <tr class="text-center">
+            <td>{{ available_mem }}</td>
+            <td>{{ total_disk }}</td>
+            <td>{{ used_disk }}</td>
+            <td>{{ available_disk }}</td>
+        </tr>
+    </table>
+</body>
+{% endblock content %}
+</html>
