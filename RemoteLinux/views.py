@@ -1,3 +1,4 @@
+#coding-utf-8
 import paramiko
 import subprocess
 
@@ -38,11 +39,17 @@ def linux_create(request):
 def linux_update(request, id):
     # 获取需要修改的具体文章对象
     linux = NewLinux.objects.get(id=id)
+    print (request.method)
     if request.method == "POST":
         # 将提交的数据赋值到表单实例中
         linux_info = LinuxPostForm(request.POST)
         if linux_info.is_valid():
             # 将更改的数据保存到数据库
+            linux.linux_name = request.POST["linux_name"]
+            linux.linux_ip = request.POST["linux_ip"]
+            linux.linux_port = request.POST["linux_port"]
+            linux.linux_user = request.POST["linux_user"]
+            linux.linux_passwd = request.POST["linux_passwd"]
             linux.save()
             return redirect("linux_detail")
         else:
@@ -77,6 +84,7 @@ def linux_list_detail(request, id):
     REMOTE_PWD = newlinux.linux_passwd
     ssh = paramiko.SSHClient()
     ssh.load_system_host_keys()
+    print(REMOTE_HOST)
     try:
         # 账号密码登录选项，避免服务器拒绝连接
         ssh.set_missing_host_key_policy(paramiko.AutoAddPolicy())
@@ -146,6 +154,7 @@ def linux_list_detail(request, id):
         # decode()去掉多余的双引号和\n
         available_disk = stdout.read().decode()
     except Exception as e:
+        print ("123")
         pass
     finally:
         ssh.close()
@@ -180,7 +189,7 @@ def connect_test(request):
                 ssh.connect(hostname=ip, port=port, username=user, password=passwd, compress=True)
             except Exception as e:
                 # return HttpResponse('{"status": "fail"}, {"message": "测试连接失败，请检查账号or密码orIPor端口"}')
-                return HttpResponse("测试连接失败，请检查账号or密码orIPor端口")
+                return HttpResponse("测试连接失败，请检查账号,密码,IP,端口")
             else:
                 # return HttpResponse('{"status": "success"},{"message":"测试连接成功"}')
                 return HttpResponse("测试连接成功")

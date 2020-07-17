@@ -38,9 +38,7 @@
                 <input type="password" class="form-control" id="linux_passwd" name="linux_passwd" placeholder="请输入服务器登录密码">
             </div>
             <!-- 测试按钮 -->
-{#                <input type="button" class="ajax_test" value="测试连接"></input>#}
                 <button type="button" class="btn btn-success" id="ajax_test">测试连接</button>
-{#                <span id="test"></span>#}
             <!-- 提交按钮 -->
                 <br>
                 <br>
@@ -60,7 +58,6 @@
             success:function (data) {
                 alert(data);
                 console.info(data);
-                {#$('#ajax_test').html(data)#}
             }
             })
     })

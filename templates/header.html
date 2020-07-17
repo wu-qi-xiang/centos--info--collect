@@ -5,25 +5,33 @@
     <title>首页的头部</title>
 </head>
 {% load staticfiles %}
-<body style="background-image: url({% static "images/maomao.jpg"%});">
-    <div class="nav-pills navbar navbar-default navbar-expand-lg navbar-light bg-success">
-        <div class="navbar-header">
-            <a href="{% url 'linux' %}" class="navbar-brand"><b><i>LINUX首页</i></b></a>
-        </div>
-        <ul class="nav navbar-nav navbar-default">
-            <li class="navbar-nav">
-                <a class="nav-link" href="{% url 'linux' %}"><button class="btn btn-info" type="button">本地linux</button></a>
-            </li>
-            <li class="navbar-nav">
-                <a class="nav-link" href="{% url 'linux_detail' %}"><button class="btn btn-info">linux列表</button></a>
-            </li>
-            <li class="navbar-nav">
-                <a class="nav-link" href="{% url 'linux_create' %}"><button class="btn btn-info">添加linux主机</button></a>
-            </li>
-            <li class="navbar-nav">
-                <a class="nav-link" href="{% url 'monitor:monitor_index' %}"><button class="btn btn-info">监控设置</button></a>
-            </li>
-        </ul>
-    </div>
+<body style="background-image: url({% static "images/maomao.jpg"%})">
+  <nav class="navbar navbar-expand-lg navbar-light" style="background-color: #e3f2fd;">
+  <a class="navbar-brand" href="{% url 'linux' %}">LINUX首页</a>
+  <button class="navbar-toggler" type="button" data-toggle="collapse" data-target="#navbarTogglerDemo02" aria-controls="navbarTogglerDemo02" aria-expanded="false" aria-label="Toggle navigation">
+    <span class="navbar-toggler-icon"></span>
+  </button>
+
+  <div class="collapse navbar-collapse" id="navbarTogglerDemo02">
+    <ul class="navbar-nav mr-auto mt-2 mt-lg-0">
+      <li class="nav-item">
+        <a class="nav-link" href="{% url 'linux' %}">本地linux</a>
+      </li>
+      <li class="nav-item">
+        <a class="nav-link" href="{% url 'linux_detail' %}">linux列表</a>
+      </li>
+      <li class="nav-item">
+        <a class="nav-link" href="{% url 'linux_create' %}">添加linux主机</a>
+      </li>
+      <li class="nav-item">
+        <a class="nav-link" href="{% url 'monitor:monitor_index' %}">监控设置</a>
+      </li>
+    </ul>
+    <form class="form-inline my-2 my-lg-0">
+      <input class="form-control mr-sm-2" type="search" placeholder="Search">
+      <button class="btn btn-outline-success my-2 my-sm-0" type="submit">Search</button>
+    </form>
+  </div>
+</nav>
 </body>
 </html>
