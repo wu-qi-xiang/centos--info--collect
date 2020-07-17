@@ -8,24 +8,13 @@
     <title>linux首页</title>
 </head>
 <body>
-<table class="table table-bordered">
-    <thred>
-        <th class="text-center h3"><strong>服务器信息</strong></th>
-        <th class="text-center">
-            <a class="btn btn-success" type="button" href="{% url 'linux_local' %}" title="服务器详细信息">详细信息</a>
-        </th>
-    </thred>
-</table>
-<table class="table table-bordered">
-    <thred>
-        <th class="text-center">本地服务器外网IP</th>
-        <th class="text-center">本地服务器内网IP</th>
-    </thred>
-    <tr class="text-center">
-        <td>{{ outside_ip }}</td>
-        <td>{{ intranet_ip }}</td>
-    </tr>
-</table>
+<div class="jumbotron">
+  <h1 class="display-4">服务器的简单监控系统</h1>
+  <p class="lead">当你支撑不了自己的野心，就安静的学习吧</p>
+  <hr class="my-2">
+  <p>系统使用的django2.1+python3.6写的，看着有点low，但是会慢慢改善。</p>
+  <a class="btn btn-primary btn-lg" href="#" role="button">Learn more</a>
+</div>
 </div>
 </body>
 {% endblock content %}
