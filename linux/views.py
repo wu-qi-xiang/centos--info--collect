@@ -1,5 +1,5 @@
 from django.shortcuts import render
-
+from django.db.models import Q
 from django.http import HttpResponse
 import subprocess
 import re
@@ -13,6 +13,10 @@ from RemoteLinux.models import NewLinux
 
 # Create your views here.
 
+def index(request):
+	return render(request, 'linux/index.html')
+
+
 def linux(request):
 	# 系统IP
 	# outside_cmd = "curl ifconfig.me"
@@ -24,7 +28,7 @@ def linux(request):
 	intranet_ip = subprocess.getoutput(intranet_cmd)
 
 	content = {'outside_ip': outside_ip, 'intranet_ip': intranet_ip, }
-	return render(request, 'linux/index.html', content)
+	return render(request, 'linux/start.html', content)
 
 
 def linux_local(request):
@@ -75,3 +79,13 @@ def linux_local(request):
 			   'available_disk': available_disk}
 
 	return render(request, 'linux/local.html', content)
+
+
+def search(request):
+	if request.method == "GET":
+		keyword = request.GET.get('search')
+		newlinux = NewLinux.objects.filter(Q(linux_name__icontains=keyword) | Q(linux_ip__icontains=keyword))
+		content = {'newlinux': newlinux, }
+		return render(request, 'linux/detail.html', content)
+	else:
+		return HttpResponse("非GET请求")

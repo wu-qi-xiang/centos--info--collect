@@ -27,11 +27,27 @@
         <a class="nav-link" href="{% url 'monitor:monitor_index' %}">监控设置</a>
       </li>
     </ul>
-    <form class="form-inline my-2 my-lg-0">
-      <input class="form-control mr-sm-2" type="search" placeholder="Search">
-      <button class="btn btn-outline-success my-2 my-sm-0" type="submit">Search</button>
+    <form class="form-inline my-2 my-lg-0" id="search_data" method="get" action="/search/">
+      <input class="form-control mr-sm-2" type="search" placeholder="Search" name="search">
+      <button class="btn btn-outline-success my-2 my-sm-0" type="submit" id="search">Search</button>
     </form>
   </div>
 </nav>
+
+<!--<script>-->
+<!--  $('#search').click(function () {-->
+<!--            $.ajax({-->
+<!--              url:'#',-->
+<!--              type:'POST',-->
+<!--              data:$('#search_data').serialize(),-->
+<!--              async:true,-->
+<!--              success:function () {-->
+<!--                alert("123");-->
+<!--                console.log("123")-->
+<!--              }-->
+<!--            })-->
+<!--          }-->
+<!--  )-->
+<!--</script>-->
 </body>
 </html>

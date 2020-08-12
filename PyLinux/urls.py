@@ -15,20 +15,22 @@ Including another URLconf
 """
 from django.contrib import admin
 from django.urls import path, include
-from linux.views import linux, linux_local  # url导入views
+from linux.views import index, linux, linux_local, search  # url导入views
 from RemoteLinux.views import linux_create, linux_detail, linux_list_detail, linux_update, linux_delete, connect_test
 
 import monitor
 
 urlpatterns = [
-    path('', linux, name='linux'),
+    path('', index, name='index'),
+    path('linux/', linux, name='linux'),
     path('admin/', admin.site.urls),
     path('local/', linux_local, name='linux_local'),
+    path('search/', search, name='search'),
     path('create/', linux_create, name='linux_create'),
     path('detail/', linux_detail, name='linux_detail'),
     path('list_detail/<int:id>/', linux_list_detail, name='linux_list_detail'),
     path('linux_update/<int:id>/', linux_update, name='linux_update'),
     path('linux_delete/<int:id>/', linux_delete, name='linux_delete'),
-    path('test/', connect_test, name='connect_test'),
+    path('connect_test/', connect_test, name='connect_test'),
     path('monitor/', include('monitor.urls', namespace='monitor')),
 ]
