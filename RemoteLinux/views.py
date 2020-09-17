@@ -20,14 +20,9 @@ def linux_create(request):
         linux_form = LinuxPostForm(request.POST)
         # 判断提交的数据是否满足模型的要求
         if linux_form.is_valid():
-            print(request.POST.get('linux_ip'))
-            print(request.POST.get('linux_name'))
             linux_form.save()
             return redirect("linux")
         else:
-        # try:
-            send_mail('你好', '你好2020', '774727549@qq.com', ['1306833742@qq.com'], fail_silently=False,)
-        # except Exception as e:
             return HttpResponse("输入有误，请重新输入")
     else:
         form = NewLinux()
@@ -47,9 +42,11 @@ def linux_update(request, id):
             # 将更改的数据保存到数据库
             linux.linux_name = request.POST["linux_name"]
             linux.linux_ip = request.POST["linux_ip"]
+            linux.linux_hostname = request.POST["linux_hostname"]
             linux.linux_port = request.POST["linux_port"]
             linux.linux_user = request.POST["linux_user"]
             linux.linux_passwd = request.POST["linux_passwd"]
+            linux.linux_app = request.POST["linux_app"]
             linux.save()
             return redirect("linux_detail")
         else:
@@ -66,6 +63,12 @@ def linux_delete(request, id):
     # 调用.delete()方法删除文章
     linux.delete()
     return redirect('linux_detail')
+
+
+def linux_list_app(request, id):
+    linux = NewLinux.objects.get(id=id)
+    content = {'linux': linux}
+    return render(request, 'linux/linux_app.html', content)
 
 
 def linux_detail(request):
@@ -154,8 +157,7 @@ def linux_list_detail(request, id):
         # decode()去掉多余的双引号和\n
         available_disk = stdout.read().decode()
     except Exception as e:
-        print ("123")
-        pass
+        return HttpResponse("ssh连接有问题，请检查")
     finally:
         ssh.close()
     content = {'newlinux': newlinux,

@@ -3,51 +3,71 @@
 <head>
     <meta charset="UTF-8">
     <title>添加linux主机</title>
-    <script src="http://code.jquery.com/jquery-2.1.1.min.js"></script>
 </head>
 {% extends "base.html" %}
 {% load staticfiles %}
 {% block content %}
 <body>
 <div class="container">
-    <div class="row">
-        <div class="col-3">
-        <br>
+        </br>
             <!-- 提交文章的表单 -->
-            <form id="testform" method="post" action="#" enctype="multipart/form-data">
+        <form id="testform" method="post" action="." enctype="multipart/form-data">
             <!-- Django中需要POST数据的地方都必须有csrf_token -->
                 {% csrf_token %}
-            <div class="form-group">
-                <label><b>服务器名称</b></label>
-                <input type="text" class="form-control" id="linux_name" name="linux_name" placeholder="请输入服务器名称">
+            <div class="row">
+                <div class="form-group">
+                    <label><b>服务器名称</b></label>
+                    <input type="text" class="form-control" id="linux_name" name="linux_name" placeholder="请输入服务器名称">
+                </div>
+                <div class="col-1"></div>
+                <div class="form-group">
+                    <label><b>主机IP地址</b></label>
+                    <input type="text" class="form-control" id="linux_ip" name="linux_ip" placeholder="请输入服务器IP地址">
+                </div>
             </div>
-            <div class="form-group">
-                <label><b>主机IP地址</b></label>
-                <input type="text" class="form-control" id="linux_ip" name="linux_ip" placeholder="请输入服务器IP地址">
-            </div>
-            <div class="form-group">
-                <label><b>SSH端口</b></label>
-                <input type="text" class="form-control" id="linux_port" name="linux_port" placeholder="请输入服务器SSH端口">
-            </div>
-            <div class="form-group">
-                <label><b>用户名</b></label>
-                <input type="text" class="form-control" id="linux_user" name="linux_user" placeholder="请输入服务器登录用户名">
-            </div>
-            <div class="form-group">
-                <label><b>密码</b></label>
-                <input type="password" class="form-control" id="linux_passwd" name="linux_passwd" placeholder="请输入服务器登录密码">
-            </div>
-            <!-- 测试按钮 -->
-                <button type="button" class="btn btn-success" id="ajax_test">测试连接</button>
-            <!-- 提交按钮 -->
-                <br>
-                <br>
-                <button type="submit" class="btn btn-success">完成</button>
-            </form>
-        </div>
-    </div>
-</div>
 
+            <div class="row">
+                <div class="form-group">
+                    <label><b>主机的主机名</b></label>
+                    <input type="text" class="form-control" id="linux_hostname" name="linux_hostname" placeholder="请输入服务器的主机名">
+                </div>
+                <div class="col-1"></div>
+                <div class="form-group">
+                    <label><b>SSH端口</b></label>
+                    <input type="text" class="form-control" id="linux_port" name="linux_port" placeholder="请输入服务器SSH端口">
+                </div>
+            </div>
+
+            <div class="row">
+                <div class="form-group">
+                    <label><b>用户名</b></label>
+                    <input type="text" class="form-control" id="linux_user" name="linux_user" placeholder="请输入服务器登录用户名">
+                </div>
+                <div class="col-1"></div>
+                <div class="form-group">
+                    <label><b>密码</b></label>
+                    <input type="password" class="form-control" id="linux_passwd" name="linux_passwd" placeholder="请输入服务器登录密码">
+                </div>
+            </div>
+
+            <div class="row">
+                <div class="form-group input-xlarge">
+                    <label><b>主机上的服务</b></label>
+                    <input type="text" class="form-control" style="width: 248%;" id="linux_app" name="linux_app" placeholder="主机上的服务">
+                </div>
+            </div>
+
+            <div class="row">
+            <!-- 测试按钮 -->
+            <button type="button" class="btn btn-success" style="width: 10%;" id="ajax_test">测试连接</button>
+            <!-- 提交按钮 -->
+            <div class="col-2"></div>
+            <button type="submit" class="btn btn-success" style="width: 10%;">完成</button>
+            </div>
+        </form>
+</div>
+{% endblock content %}
+{% block script %}
 <script>
     $('#ajax_test').click(function () {
         $.ajax({
@@ -62,7 +82,6 @@
             })
     })
 </script>
-
+{% endblock script %}
 </body>
-{% endblock content %}
 </html>

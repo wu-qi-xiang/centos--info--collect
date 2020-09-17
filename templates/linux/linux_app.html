@@ -1,0 +1,22 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <title>linux服务器详细信息</title>
+</head>
+{% extends "base.html" %}
+{% load staticfiles %}
+{#获取views中的参数#}
+{% block content %}
+<body>
+<table class="table table-bordered table-hover">
+    <tr>
+        <th class="text-center h2"><b>{{ linux.linux_name }}服务器上的的应用</b></th>
+    </tr>
+    <tr>
+        <th class="text-center h2"><b>{{ linux.linux_app }}</b></th>
+    </tr>
+</table>
+{% endblock content %}
+</body>
+</html>

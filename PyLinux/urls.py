@@ -16,7 +16,8 @@ Including another URLconf
 from django.contrib import admin
 from django.urls import path, include
 from linux.views import index, linux, linux_local, search  # url导入views
-from RemoteLinux.views import linux_create, linux_detail, linux_list_detail, linux_update, linux_delete, connect_test
+# from RemoteLinux.views import linux_create, linux_detail, linux_list_detail, linux_update, linux_delete, connect_test
+from RemoteLinux import views
 
 import monitor
 
@@ -26,11 +27,12 @@ urlpatterns = [
     path('admin/', admin.site.urls),
     path('local/', linux_local, name='linux_local'),
     path('search/', search, name='search'),
-    path('create/', linux_create, name='linux_create'),
-    path('detail/', linux_detail, name='linux_detail'),
-    path('list_detail/<int:id>/', linux_list_detail, name='linux_list_detail'),
-    path('linux_update/<int:id>/', linux_update, name='linux_update'),
-    path('linux_delete/<int:id>/', linux_delete, name='linux_delete'),
-    path('connect_test/', connect_test, name='connect_test'),
+    path('create/', views.linux_create, name='linux_create'),
+    path('detail/', views.linux_detail, name='linux_detail'),
+    path('list_detail/<int:id>/', views.linux_list_detail, name='linux_list_detail'),
+    path('list_app/<int:id>/', views.linux_list_app, name='linux_list_app'),
+    path('linux_update/<int:id>/', views.linux_update, name='linux_update'),
+    path('linux_delete/<int:id>/', views.linux_delete, name='linux_delete'),
+    path('connect_test/', views.connect_test, name='connect_test'),
     path('monitor/', include('monitor.urls', namespace='monitor')),
 ]

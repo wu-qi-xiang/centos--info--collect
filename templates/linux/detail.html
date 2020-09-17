@@ -23,6 +23,7 @@
         <th class="text-center">服务器主机名</th>
         <th class="text-center">服务器外网IP</th>
         <th class="text-center">服务器基础信息</th>
+        <th class="text-center">服务器应用</th>
         <th class="text-center">编辑</th>
         <th class="text-center">删除</th>
     </thred>
@@ -30,9 +31,10 @@
     <tr class="text-center">
         <td>{{ forloop.counter }}</td>
         <td>{{ a.linux_name }}</td>
-        <td>hostname</td>
+        <td>{{ a.linux_hostname }}</td>
         <td>{{ a.linux_ip }}</td>
         <td><a href="{% url 'linux_list_detail' a.id %}" class="btn btn-success btn-sm">详细信息</a></td>
+        <td><a href="{% url 'linux_list_app' a.id %}" class="btn btn-success btn-sm">应用详细</a></td>
         <td><a href="{% url 'linux_update' a.id %}" class="btn btn-success btn-sm">编辑</a></td>
         <td><a href="{% url 'linux_delete' a.id %}" class="btn btn-success btn-sm">删除</a></td>
     </tr>

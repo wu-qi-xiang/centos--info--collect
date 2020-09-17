@@ -84,7 +84,7 @@ def linux_local(request):
 def search(request):
 	if request.method == "GET":
 		keyword = request.GET.get('search')
-		newlinux = NewLinux.objects.filter(Q(linux_name__icontains=keyword) | Q(linux_ip__icontains=keyword))
+		newlinux = NewLinux.objects.filter(Q(linux_name__icontains=keyword) | Q(linux_ip__icontains=keyword) | Q(linux_hostname__icontains=keyword) | Q(linux_app__icontains=keyword))
 		content = {'newlinux': newlinux, }
 		return render(request, 'linux/detail.html', content)
 	else:
