@@ -1,1 +1,3 @@
+centos/
 venv/
+db.sqlite3
