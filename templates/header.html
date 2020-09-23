@@ -5,7 +5,7 @@
     <title>首页的头部</title>
 </head>
 {% load staticfiles %}
-<body style="background-image: url({% static "images/maomao.jpg"%})">
+<body style="background: #b1dfbb">
   <nav class="navbar navbar-expand-lg navbar-light" style="background-color: #e3f2fd;">
   <a class="navbar-brand" href="{% url 'index' %}">LINUX首页</a>
   <button class="navbar-toggler" type="button" data-toggle="collapse" data-target="#navbarTogglerDemo02" aria-controls="navbarTogglerDemo02" aria-expanded="false" aria-label="Toggle navigation">
@@ -28,7 +28,7 @@
       </li>
     </ul>
     <form class="form-inline my-2 my-lg-0" id="search_data" method="get" action="/search/">
-      <input class="form-control mr-sm-2" type="search" placeholder="Search" name="search">
+      <input class="form-control mr-sm-2" type="search" placeholder="Search" name="search" value="{{ keyword }}">
       <button class="btn btn-outline-success my-2 my-sm-0" type="submit" id="search">Search</button>
     </form>
   </div>
