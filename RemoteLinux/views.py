@@ -22,7 +22,7 @@ def linux_create(request):
         # 判断提交的数据是否满足模型的要求
         if linux_form.is_valid():
             linux_form.save()
-            return redirect("linux")
+            return redirect("linux_detail")
         else:
             return HttpResponse("输入有误，请重新输入")
     else:
@@ -56,6 +56,17 @@ def linux_update(request, id):
         # 将数据回填到界面
         content = {'linux': linux, }
         return render(request, 'linux/update.html', content)
+
+
+def linux_copy(request):
+    if request.method == "POST":
+        linux_form = LinuxPostForm(request.POST)
+        if linux_form.is_valid():
+            linux_form.save()
+            return HttpResponse("复制成功")
+        else:
+            return HttpResponse("输入有误，请重新输入")
+
 
 
 def linux_delete(request, id):

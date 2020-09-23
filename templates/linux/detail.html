@@ -45,7 +45,7 @@
 <div>
 <center>
     {% if pages.has_previous %}
-    <button class="btn"><a href="?page={{ pages.previous_page_number }}"> 上一页</a></button>
+    <button class="btn"><a href="?page={{ pages.previous_page_number }}">上一页</a></button>
 {% endif %}
  <span>
     {% for p in pages.paginator.page_range %}
@@ -57,7 +57,7 @@
      {% endfor %}
  </span>
  {% if pages.has_next %}
-        <button class="btn"><a href="?page={{ pages.next_page_number }}">下一页 > </a></button>
+        <button class="btn"><a href="?page={{ pages.next_page_number }}">下一页</a></button>
  {% endif %}
     <button class="btn" style="background: blueviolet"><b>[{{ pages.number }}/{{ pages.paginator.num_pages }}]</b></button>
 </center>

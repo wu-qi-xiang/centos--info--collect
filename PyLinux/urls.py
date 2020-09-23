@@ -34,5 +34,6 @@ urlpatterns = [
     path('linux_update/<int:id>/', views.linux_update, name='linux_update'),
     path('linux_delete/<int:id>/', views.linux_delete, name='linux_delete'),
     path('connect_test/', views.connect_test, name='connect_test'),
+    path('linux_copy/', views.linux_copy, name='copy_form'),
     path('monitor/', include('monitor.urls', namespace='monitor')),
 ]
