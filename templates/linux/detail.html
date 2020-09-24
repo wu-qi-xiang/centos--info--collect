@@ -29,7 +29,7 @@
     </thred>
     {% for a in pages %}
     <tr class="text-center">
-        <td>{{ forloop.counter }}</td>
+        <td>{{ forloop.counter|add:pagenum }}</td>
         <td>{{ a.linux_name }}</td>
         <td>{{ a.linux_hostname }}</td>
         <td>{{ a.linux_ip }}</td>
@@ -42,7 +42,7 @@
 </table>
 
 
-<div>
+<div style="position: fixed ! important;left: 50%;top: 90%;transform:translateX(-50%)">
 <center>
     {% if pages.has_previous %}
     <button class="btn"><a href="?page={{ pages.previous_page_number }}">上一页</a></button>

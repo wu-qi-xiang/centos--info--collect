@@ -102,7 +102,8 @@ def linux_detail(request):
         except EmptyPage:
             # 如果请求的页数不在合法的页数范围内，返回结果的最后一页。
             pages = paginator.page(paginator.num_pages)
-    content = {'newlinux': newlinux, "pages": pages}
+    pagenum = (pages.number - 1) * 8
+    content = {'newlinux': newlinux, "pages": pages, "pagenum": pagenum}
     return render(request, 'linux/detail.html', content)
 
 
