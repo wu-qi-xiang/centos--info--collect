@@ -18,20 +18,6 @@ def index(request):
 
 
 def linux(request):
-	# 系统IP
-	# outside_cmd = "curl ifconfig.me"
-	url = urllib.request.urlopen("http://txt.go.sohu.com/ip/soip")
-	text = url.read()
-	intranet_cmd = "ip addr |grep eth0 |awk -F '/' 'NR == 2 {print $1}'|awk '{print $2}'"
-	# outside_ip1 = subprocess.getoutput(outside_cmd)
-	outside_ip = re.findall(r'\d+.\d+.\d+.\d+', text.decode('utf-8'))
-	intranet_ip = subprocess.getoutput(intranet_cmd)
-
-	content = {'outside_ip': outside_ip, 'intranet_ip': intranet_ip, }
-	return render(request, 'linux/start.html', content)
-
-
-def linux_local(request):
 	# 系统cpu
 	cpu_cmd = "lscpu |grep '^CPU(s)' |awk '{print $2}'"
 	cpu = subprocess.getoutput(cpu_cmd)

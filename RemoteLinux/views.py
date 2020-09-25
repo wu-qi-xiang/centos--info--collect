@@ -103,7 +103,11 @@ def linux_detail(request):
             # 如果请求的页数不在合法的页数范围内，返回结果的最后一页。
             pages = paginator.page(paginator.num_pages)
     pagenum = (pages.number - 1) * 8
-    content = {'newlinux': newlinux, "pages": pages, "pagenum": pagenum}
+    # 增加主机总数
+    sum = 0
+    for list in newlinux:
+        sum = sum + 1
+    content = {'newlinux': newlinux, "pages": pages, "pagenum": pagenum,"sum": sum}
     return render(request, 'linux/detail.html', content)
 
 
