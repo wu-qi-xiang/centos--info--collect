@@ -4,6 +4,7 @@ from django.http import HttpResponse
 import subprocess
 import re
 import urllib.request
+from django.core.paginator import Paginator, PageNotAnInteger, EmptyPage, InvalidPage
 from RemoteLinux.forms import LinuxPostForm
 from RemoteLinux.models import NewLinux
 
@@ -68,10 +69,36 @@ def linux(request):
 
 
 def search(request):
-	if request.method == "GET":
-		keyword = request.GET.get('search')
+	global search
+	keyword = request.GET.get('search')
+	if keyword:
+		search = keyword
 		newlinux = NewLinux.objects.filter(Q(linux_name__icontains=keyword) | Q(linux_ip__icontains=keyword) | Q(linux_hostname__icontains=keyword) | Q(linux_app__icontains=keyword))
-		content = {'newlinux': newlinux, 'keyword': keyword}
+	else:
+		keyword = search
+		newlinux = NewLinux.objects.filter(Q(linux_name__icontains=keyword) | Q(linux_ip__icontains=keyword) | Q(linux_hostname__icontains=keyword) | Q(linux_app__icontains=keyword))
+	paginator = Paginator(newlinux, 8)
+	if request.method == "GET":
+		page = request.GET.get('page')
+		try:
+			pages = paginator.page(page)
+		# todo: 注意捕获异常
+		except PageNotAnInteger:
+			# 如果请求的页数不是整数, 返回第一页。
+			pages = paginator.page(1)
+		except InvalidPage:
+			# 如果请求的页数不存在, 重定向页面
+			return HttpResponse('找不到页面的内容')
+		except EmptyPage:
+			# 如果请求的页数不在合法的页数范围内，返回结果的最后一页。
+			pages = paginator.page(paginator.num_pages)
+		pagenum = (pages.number - 1) * 8
+		# 增加主机总数
+		sum = 0
+		for list in newlinux:
+			sum = sum + 1
+
+		content = {'newlinux': newlinux, 'keyword': keyword, "pages": pages, "pagenum": pagenum,"sum": sum}
 		return render(request, 'linux/detail.html', content)
 	else:
 		return HttpResponse("非GET请求")
