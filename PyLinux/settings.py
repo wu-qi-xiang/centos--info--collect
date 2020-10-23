@@ -39,6 +39,7 @@ INSTALLED_APPS = [
 	'linux',
 	'RemoteLinux',
 	'monitor',
+	'userprofile',
 ]
 
 MIDDLEWARE = [
