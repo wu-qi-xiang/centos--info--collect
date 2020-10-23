@@ -14,7 +14,7 @@
         <form id="testform" method="post" action="." enctype="multipart/form-data">
             <!-- Django中需要POST数据的地方都必须有csrf_token -->
                 {% csrf_token %}
-            <div class="row">
+            <div class="row" style="margin-left: 300px">
                 <div class="form-group">
                     <label><b>服务器名称</b></label>
                     <input type="text" class="form-control" id="linux_name" name="linux_name" placeholder="请输入服务器名称">
@@ -26,7 +26,7 @@
                 </div>
             </div>
 
-            <div class="row">
+            <div class="row" style="margin-left: 300px">
                 <div class="form-group">
                     <label><b>主机的主机名</b></label>
                     <input type="text" class="form-control" id="linux_hostname" name="linux_hostname" placeholder="请输入服务器的主机名">
@@ -38,7 +38,7 @@
                 </div>
             </div>
 
-            <div class="row">
+            <div class="row" style="margin-left: 300px">
                 <div class="form-group">
                     <label><b>用户名</b></label>
                     <input type="text" class="form-control" id="linux_user" name="linux_user" placeholder="请输入服务器登录用户名">
@@ -50,19 +50,19 @@
                 </div>
             </div>
 
-            <div class="row">
+            <div class="row" style="margin-left: 300px">
                 <div class="form-group input-xlarge">
                     <label><b>主机上的服务</b></label>
-                    <textarea type="text" class="form-control" style="width: 248%;" id="linux_app" name="linux_app" placeholder="主机上的服务"></textarea>
+                    <textarea type="text" class="form-control" style="width: 260%;line-height: 4" id="linux_app" name="linux_app" placeholder="主机上的服务"></textarea>
                 </div>
             </div>
 
-            <div class="row">
+            <div class="row" style="margin-left: 300px">
             <!-- 测试按钮 -->
-            <button type="button" class="btn btn-success" style="width: 10%;" id="ajax_test">测试连接</button>
+            <button type="button" class="btn btn-success" style="width: 15%;" id="ajax_test">测试连接</button>
             <!-- 提交按钮 -->
-            <div class="col-2"></div>
-            <button type="submit" class="btn btn-success" style="width: 10%;">完成</button>
+<!--            <div class="col-3"></div>-->
+            <button type="submit" class="btn btn-success" style="width: 15%;margin-left: 230px">完成</button>
             </div>
         </form>
 </div>

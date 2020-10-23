@@ -22,7 +22,11 @@
     {% include 'header.html' %}
     <div>
     <!-- 预留具体页面的位置 -->
-        {% block content %}{% endblock content %}
+        {% if request.session.is_login %}
+            {% block content %}{% endblock content %}
+        {% else %}
+             <h1 class="text-center text" style="margin: 300px auto;">你尚未登录，需要登录才能查看</h1>
+        {% endif %}
     </div>
     <!-- 引入注脚 -->
 <!--    {#    {% include 'footer.html' %}#}-->

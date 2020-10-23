@@ -14,3 +14,13 @@ class NewLinux(models.Model):
 
 	class Meta:
 		db_table = "linux-info"
+
+
+class User(models.Model):
+	user = models.CharField(max_length=100)
+	email = models.EmailField(max_length=100)
+	password = models.CharField(max_length=100)
+	confirm_pwd = models.CharField(max_length=100, default=None)
+
+	class Meta:
+		db_table = "user"

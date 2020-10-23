@@ -31,6 +31,19 @@
       <input class="form-control mr-sm-2" type="search" placeholder="Search" name="search" value="{{ keyword }}">
       <button class="btn btn-outline-success my-2 my-sm-0" type="submit" id="search">Search</button>
     </form>
+    <ul  class="nav navbar-nav navbar-right">
+      {% if request.session.is_login %}
+        <li class="nav-item">
+          <a class="nav-link" href="#">当前在线：{{ request.session.user_name }}</a></li>
+        <li class="nav-item">
+          <a class="nav-link" href="{% url 'userprofile:logout' %}">退出</a></li>
+      {% else %}
+        <li class="nav-item">
+          <a class="nav-link" href="{% url 'userprofile:login' %}">登录</a></li>
+        <li class="nav-item">
+          <a class="nav-link" href="{% url 'userprofile:register' %}">注册</a></li>
+      {% endif %}
+    </ul>
   </div>
 </nav>
 

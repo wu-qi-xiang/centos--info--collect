@@ -1,0 +1,70 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta http-equiv="x-ua-compatible" content="IE=edge">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <link rel="stylesheet" href="https://cdn.bootcss.com/bootstrap/3.3.7/css/bootstrap.min.css">
+    <link rel="stylesheet" href="http://libs.baidu.com/fontawesome/4.0.3/css/font-awesome.min.css">
+    <title>登录页面</title>
+    <style>
+        body {
+            background-color: #eee;
+        }
+    </style>
+</head>
+<body>
+
+<div class="container">
+    <div class="row">
+        <div class="col-md-4 col-md-offset-4" style="margin-top: 100px">
+            <h2 class="text-center">请注册</h2>
+            </br>
+            </br>
+            <form class="form-horizontal" action="/register/" method="post">
+                {% csrf_token %}
+                <div class="form-group">
+                    <label for="user" class="col-sm-2 control-label"></label>
+                    <div class="input-group col-sm-8">
+                         <span class="input-group-addon"><i class="fa fa-user fa-fw"></i></span>
+                        <input type="user" name="user" class="form-control" id="user" placeholder="User">
+                    </div>
+                </div>
+                <div class="form-group">
+                    <label for="email" class="col-sm-2 control-label"></label>
+                    <div class="input-group col-sm-8">
+                        <span class="input-group-addon"><i class="fa  fa-envelope fa-fw"></i></span>
+                        <input type="email" name="email" class="form-control" id="email" placeholder="Email">
+                    </div>
+                </div>
+                <div class="form-group">
+                    <label for="password" class="col-sm-2 control-label"></label>
+                    <div class="input-group col-sm-8">
+                        <span class="input-group-addon"><i class="fa fa-key fa-fw"></i></span>
+                        <input type="password" name="password" class="form-control" id="password" placeholder="Password">
+                    </div>
+                </div>
+                <div class="form-group">
+                    <label for="confirm_pwd" class="col-sm-2 control-label"></label>
+                    <div class="input-group col-sm-8">
+                        <span class="input-group-addon"><i class="fa fa-key fa-fw"></i></span>
+                        <input type="password" name="confirm_pwd" class="form-control" id="confirm_pwd" placeholder="confirm Password">
+                    </div>
+                </div>
+                <div class="form-group">
+                    <div class="input-group col-sm-offset-2 col-sm-8">
+                        <button type="submit" class="btn btn-primary btn-block">注册</button>
+                    </div>
+                </div>
+                <div class="form-group">
+                    <div class="input-group col-sm-offset-2 col-sm-8">
+                        <a href="{% url 'userprofile:login' %}">注册成功之后，点此登录</a>
+                    </div>
+                </div>
+                <p class="text-danger text-center">{{ error }}</p>
+            </form>
+        </div>
+    </div>
+</div>
+</body>
+</html>

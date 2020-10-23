@@ -22,7 +22,8 @@ from RemoteLinux import views
 import monitor
 
 urlpatterns = [
-    path('', index, name='index'),
+    path('', include('userprofile.urls', namespace='login')),
+    path('index/', index, name='index'),
     path('linux/', linux, name='linux'),
     path('admin/', admin.site.urls),
     path('search/', search, name='search'),
@@ -34,5 +35,6 @@ urlpatterns = [
     path('linux_delete/<int:id>/', views.linux_delete, name='linux_delete'),
     path('connect_test/', views.connect_test, name='connect_test'),
     path('linux_copy/', views.linux_copy, name='copy_form'),
+    path('userprofile/', include('userprofile.urls', namespace='userprofile')),
     path('monitor/', include('monitor.urls', namespace='monitor')),
 ]

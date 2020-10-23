@@ -35,7 +35,6 @@ def linux_create(request):
 def linux_update(request, id):
     # 获取需要修改的具体文章对象
     linux = NewLinux.objects.get(id=id)
-    print (request.method)
     if request.method == "POST":
         # 将提交的数据赋值到表单实例中
         linux_info = LinuxPostForm(request.POST)
