@@ -3,6 +3,11 @@
 <head>
     <meta charset="UTF-8">
     <title>linux详细信息页面</title>
+    <style type="text/css">
+        td {
+            font-size: 18px !important;
+        }
+    </style>
 </head>
 {% extends "base.html" %}
 {% load staticfiles %}
@@ -35,16 +40,16 @@
         <td>{{ a.linux_name }}</td>
         <td>{{ a.linux_hostname }}</td>
         <td>{{ a.linux_ip }}</td>
-        <td><a href="{% url 'linux_list_detail' a.id %}" class="btn btn-success btn-sm">详细信息</a></td>
-        <td><a href="{% url 'linux_list_app' a.id %}" class="btn btn-success btn-sm">应用详细</a></td>
-        <td><a href="{% url 'linux_update' a.id %}" class="btn btn-success btn-sm">编辑</a></td>
-        <td><a href="{% url 'linux_delete' a.id %}" class="btn btn-success btn-sm">删除</a></td>
+        <td><a href="{% url 'linux_list_detail' a.id %}" class="btn btn-success btn-sm" style="width: 50%;font-size: 15px;font-weight: bold;">详细信息</a></td>
+        <td><a href="{% url 'linux_list_app' a.id %}" class="btn btn-success btn-sm" style="width: 50%;font-size: 15px;font-weight: bold;">应用详细</a></td>
+        <td><a href="{% url 'linux_update' a.id %}" class="btn btn-success btn-sm" style="width: 80%;font-size: 15px;font-weight: bold;">编辑</a></td>
+        <td><a href="{% url 'linux_delete' a.id %}" class="btn btn-success btn-sm" style="width: 80%;font-size: 15px;font-weight: bold;">删除</a></td>
     </tr>
     {% endfor %}
 </table>
 
 
-<div style="position: fixed ! important;left: 50%;top: 90%;transform:translateX(-50%)">
+<div style="position: fixed ! important;left: 50%;top: 92%;transform:translateX(-50%)">
 <center>
     {% if pages.has_previous %}
     <button class="btn"><a href="?page={{ pages.previous_page_number }}">上一页</a></button>

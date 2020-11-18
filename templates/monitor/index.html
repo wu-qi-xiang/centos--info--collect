@@ -25,7 +25,7 @@
                     <span class="col-md-1"></span>
                     <input type="text" class="form-control" id="monitor_email" name="monitor_email" style="width: 50%;display: inline-block" placeholder="填写告警接收邮箱">
                     {% for a in monitor %}
-                    <a href="{% url 'monitor:monitor_update' a.id %}" type="button" class="btn btn-success" style="width: 20%;position: relative;left: 20%">更新</a>
+                    <a href="{% url 'monitor:monitor_update' a.id %}" type="button" class="btn btn-success" style="width: 20%;position: relative;left: 20%;font-size: 15px;font-weight: bold;">更新</a>
                     {% endfor %}
                 </div>
                 <div class="form-group">
@@ -45,7 +45,7 @@
                 </div>
                 <div class="col-md-4">
                     <div class="col-md-4"></div>
-                    <button type="submit" class="btn btn-success" style="width: 180%;position: relative;left: 90%">提交</button>
+                    <button type="submit" class="btn btn-success" style="width: 180%;position: relative;left: 90%;font-size: 15px;font-weight: bold;">提交</button>
                 </div>
             </form>
         </div>
