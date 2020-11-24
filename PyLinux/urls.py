@@ -19,6 +19,7 @@ from linux.views import index, linux, search  # url导入views
 # from RemoteLinux.views import linux_create, linux_detail, linux_list_detail, linux_update, linux_delete, connect_test
 from RemoteLinux import views
 
+
 import monitor
 
 urlpatterns = [
@@ -37,4 +38,5 @@ urlpatterns = [
     path('linux_copy/', views.linux_copy, name='copy_form'),
     path('userprofile/', include('userprofile.urls', namespace='userprofile')),
     path('monitor/', include('monitor.urls', namespace='monitor')),
+    path('password/', include('password.urls', namespace='password')),
 ]

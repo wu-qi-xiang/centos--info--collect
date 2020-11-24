@@ -19,7 +19,7 @@
         <th class="text-center h3"><b>主机总数</b></th>
         <th class="text-center h3" style="color: red"><b>{{ sum }}</b></th>
         <th class="text-center">
-            <a href="{% url 'linux_create' %}"  class="btn btn-success">添加linux主机</a>
+            <a href="{% url 'linux_create' %}"  class="btn btn-success" style="font-weight: bold">添加linux主机</a>
         </th>
     </thred>
 </table>
@@ -41,7 +41,7 @@
         <td>{{ a.linux_hostname }}</td>
         <td>{{ a.linux_ip }}</td>
         <td><a href="{% url 'linux_list_detail' a.id %}" class="btn btn-success btn-sm" style="width: 50%;font-size: 15px;font-weight: bold;">详细信息</a></td>
-        <td><a href="{% url 'linux_list_app' a.id %}" class="btn btn-success btn-sm" style="width: 50%;font-size: 15px;font-weight: bold;">应用详细</a></td>
+        <td><a href="{% url 'linux_list_app' a.id %}" class="btn btn-success btn-sm" style="width: 60%;font-size: 15px;font-weight: bold;">应用详细</a></td>
         <td><a href="{% url 'linux_update' a.id %}" class="btn btn-success btn-sm" style="width: 80%;font-size: 15px;font-weight: bold;">编辑</a></td>
         <td><a href="{% url 'linux_delete' a.id %}" class="btn btn-success btn-sm" style="width: 80%;font-size: 15px;font-weight: bold;">删除</a></td>
     </tr>
