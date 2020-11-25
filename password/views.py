@@ -12,7 +12,8 @@ from .forms import Password_manage
 
 
 def password_manage(request):
-	password = Password.objects.all()
+	# 只显示当前用户管理的账号密码。
+	password = Password.objects.filter(auther=request.session.get('user_name'))
 	paginator = Paginator(password, 8)
 	if request.method == "GET":
 		page = request.GET.get('page')
