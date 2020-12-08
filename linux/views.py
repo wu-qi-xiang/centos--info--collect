@@ -5,8 +5,10 @@ import subprocess
 import re
 import urllib.request
 from django.core.paginator import Paginator, PageNotAnInteger, EmptyPage, InvalidPage
-from RemoteLinux.forms import LinuxPostForm, UserForm
-from RemoteLinux.models import NewLinux, User
+# 增加柱状图
+import matplotlib.pyplot as plt
+from RemoteLinux.models import NewLinux
+from password.models import Password
 
 
 # from . import models
@@ -14,6 +16,34 @@ from RemoteLinux.models import NewLinux, User
 
 
 def index(request):
+	# 增加柱状图
+	pwd = Password.objects.filter(auther=request.session.get('user_name')).count()
+	passwd = Password.objects.all().count()
+	nwl = NewLinux.objects.all().count()
+	plt.switch_backend('agg')
+	plt.figure(figsize=(5, 3.38))
+	width = 0.3
+	rects1 = plt.bar("当前用户密码列表", pwd, width=width, label='当前用户密码列表')
+	rects2 = plt.bar("所以的密码列表", passwd, width=width, label='所以的密码列表')
+	rects3 = plt.bar('服务器列表', nwl, width=width, label='服务器列表')
+	plt.legend()
+	plt.style.use('seaborn')
+	plt.rcParams['font.sans-serif'] = ['SimHei'] # 显示中文格式
+	plt.rcParams['axes.unicode_minus'] = False  # 这两行需要手动设置
+
+	def add_labels(rects):
+		for rect in rects:
+			height = rect.get_height()
+			plt.text(rect.get_x() + rect.get_width() / 2, height, height, ha='center', va='bottom')
+			rect.set_edgecolor('white')
+	add_labels(rects1)
+	add_labels(rects2)
+	add_labels(rects3)
+	plt.title("服务器信息")
+	plt.xlabel('名称')
+	plt.ylabel('数量')
+	plt.savefig('./static/images/rectangle.jpg', bbox_inches='tight', edgecolor='#c4e3f3')
+	plt.close()
 	return render(request, "linux/index.html")
 
 
