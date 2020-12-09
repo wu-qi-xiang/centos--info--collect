@@ -23,32 +23,26 @@ def index(request):
 	nwl = NewLinux.objects.all().count()
 	plt.switch_backend('agg')
 	plt.figure(figsize=(5, 3.37))
+	plt.style.use('seaborn')
 	myfont = FontProperties(fname='./static/Font/simhei.ttf')
-	print(myfont)
 	width = 0.3
-	# font1 = plt.text(None, None, u'当前用户密码列表', fontproperties=myfont)
-	# print(font1)
-	plt.rcParams['font.family'] =  myfont._family
 	rects1 = plt.bar('1', pwd, width=width)
 	rects2 = plt.bar('2', passwd, width=width)
 	rects3 = plt.bar('3', nwl, width=width)
-	plt.legend((u"当前用户密码列表", u"所以的密码列表", u"服务器列表"), loc='best', prop=myfont)
-	plt.style.use('seaborn')
-	# plt.rcParams['font.sans-serif'] = myfont._family # 显示中文格式
-	# plt.rcParams['axes.unicode_minus'] = False  # 这两行需要手动设置
 
 	def add_labels(rects):
 		for rect in rects:
 			height = rect.get_height()
 			plt.text(rect.get_x() + rect.get_width() / 2, height, height, ha='center', va='bottom')
-			rect.set_edgecolor('white')
+			# rect.set_edgecolor('white')
 	add_labels(rects1)
 	add_labels(rects2)
 	add_labels(rects3)
 	plt.title(u'服务器信息', fontproperties=myfont)
 	plt.xlabel(u'名称', fontproperties=myfont)
 	plt.ylabel(u'数量', fontproperties=myfont)
-	plt.savefig('./static/images/rectangle.jpg', bbox_inches='tight', edgecolor='#c4e3f3')
+	plt.legend((u"当前用户密码列表", u"所以的密码列表", u"服务器列表"), loc='best', prop=myfont)
+	plt.savefig('./static/images/rectangle.jpg', bbox_inches='tight')
 	plt.close()
 	return render(request, "linux/index.html")
 
