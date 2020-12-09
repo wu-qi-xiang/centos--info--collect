@@ -103,9 +103,7 @@ def linux_detail(request):
             pages = paginator.page(paginator.num_pages)
     pagenum = (pages.number - 1) * 8
     # 增加主机总数
-    sum = 0
-    for list in newlinux:
-        sum = sum + 1
+    sum = NewLinux.objects.all().count()
     content = {'newlinux': newlinux, "pages": pages, "pagenum": pagenum,"sum": sum}
     return render(request, 'linux/detail.html', content)
 

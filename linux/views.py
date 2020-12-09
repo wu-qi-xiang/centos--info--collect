@@ -7,6 +7,7 @@ import urllib.request
 from django.core.paginator import Paginator, PageNotAnInteger, EmptyPage, InvalidPage
 # 增加柱状图
 import matplotlib.pyplot as plt
+from matplotlib.font_manager import *
 from RemoteLinux.models import NewLinux
 from password.models import Password
 
@@ -21,15 +22,20 @@ def index(request):
 	passwd = Password.objects.all().count()
 	nwl = NewLinux.objects.all().count()
 	plt.switch_backend('agg')
-	plt.figure(figsize=(5, 3.38))
+	plt.figure(figsize=(5, 3.37))
+	myfont = FontProperties(fname='./static/Font/simhei.ttf')
+	print(myfont)
 	width = 0.3
-	rects1 = plt.bar("当前用户密码列表", pwd, width=width, label='当前用户密码列表')
-	rects2 = plt.bar("所以的密码列表", passwd, width=width, label='所以的密码列表')
-	rects3 = plt.bar('服务器列表', nwl, width=width, label='服务器列表')
-	plt.legend()
+	# font1 = plt.text(None, None, u'当前用户密码列表', fontproperties=myfont)
+	# print(font1)
+	plt.rcParams['font.family'] =  myfont._family
+	rects1 = plt.bar('1', pwd, width=width)
+	rects2 = plt.bar('2', passwd, width=width)
+	rects3 = plt.bar('3', nwl, width=width)
+	plt.legend((u"当前用户密码列表", u"所以的密码列表", u"服务器列表"), loc='best', prop=myfont)
 	plt.style.use('seaborn')
-	plt.rcParams['font.sans-serif'] = ['SimHei'] # 显示中文格式
-	plt.rcParams['axes.unicode_minus'] = False  # 这两行需要手动设置
+	# plt.rcParams['font.sans-serif'] = myfont._family # 显示中文格式
+	# plt.rcParams['axes.unicode_minus'] = False  # 这两行需要手动设置
 
 	def add_labels(rects):
 		for rect in rects:
@@ -39,9 +45,9 @@ def index(request):
 	add_labels(rects1)
 	add_labels(rects2)
 	add_labels(rects3)
-	plt.title("服务器信息")
-	plt.xlabel('名称')
-	plt.ylabel('数量')
+	plt.title(u'服务器信息', fontproperties=myfont)
+	plt.xlabel(u'名称', fontproperties=myfont)
+	plt.ylabel(u'数量', fontproperties=myfont)
 	plt.savefig('./static/images/rectangle.jpg', bbox_inches='tight', edgecolor='#c4e3f3')
 	plt.close()
 	return render(request, "linux/index.html")
