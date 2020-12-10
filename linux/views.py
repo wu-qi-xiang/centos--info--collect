@@ -26,9 +26,11 @@ def index(request):
 	plt.style.use('seaborn')
 	myfont = FontProperties(fname='./static/Font/simhei.ttf')
 	width = 0.3
+	# 增加矩形图
 	rects1 = plt.bar('1', pwd, width=width)
 	rects2 = plt.bar('2', passwd, width=width)
 	rects3 = plt.bar('3', nwl, width=width)
+	# 增加矩形上的数字
 
 	def add_labels(rects):
 		for rect in rects:
@@ -41,6 +43,7 @@ def index(request):
 	plt.title(u'服务器信息', fontproperties=myfont)
 	plt.xlabel(u'名称', fontproperties=myfont)
 	plt.ylabel(u'数量', fontproperties=myfont)
+	# 增加图例
 	plt.legend((u"当前用户密码列表", u"所以的密码列表", u"服务器列表"), loc='best', prop=myfont)
 	plt.savefig('./static/images/rectangle.jpg', bbox_inches='tight')
 	plt.close()

@@ -15,7 +15,7 @@
 <body>
 <table class="table table-hover table-bordered">
     <thred>
-        <th class="text-center h3"><b>服务器信息</b></th>
+        <th class="text-center h3"><b>服务器列表</b></th>
         <th class="text-center h3"><b>主机总数</b></th>
         <th class="text-center h3" style="color: red"><b>{{ sum }}</b></th>
         <th class="text-center">
@@ -30,6 +30,7 @@
         <th class="text-center">服务器主机名</th>
         <th class="text-center">服务器外网IP</th>
         <th class="text-center">服务器基础信息</th>
+        <th class="text-center">Webssh</th>
         <th class="text-center">服务器应用</th>
         <th class="text-center">编辑</th>
         <th class="text-center">删除</th>
@@ -41,6 +42,7 @@
         <td>{{ a.linux_hostname }}</td>
         <td>{{ a.linux_ip }}</td>
         <td><a href="{% url 'linux_list_detail' a.id %}" class="btn btn-success btn-sm" style="width: 50%;font-size: 15px;font-weight: bold;">详细信息</a></td>
+        <td><a href="{% url 'linux_list_detail' a.id %}" class="btn btn-success btn-sm" style="width: 60%;font-size: 15px;font-weight: bold;">连接Linux</a></td>
         <td><a href="{% url 'linux_list_app' a.id %}" class="btn btn-success btn-sm" style="width: 60%;font-size: 15px;font-weight: bold;">应用详细</a></td>
         <td><a href="{% url 'linux_update' a.id %}" class="btn btn-success btn-sm" style="width: 80%;font-size: 15px;font-weight: bold;">编辑</a></td>
         <td><a href="{% url 'linux_delete' a.id %}" class="btn btn-success btn-sm" style="width: 80%;font-size: 15px;font-weight: bold;">删除</a></td>
