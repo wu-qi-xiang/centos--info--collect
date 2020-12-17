@@ -118,11 +118,11 @@ def linux_list_detail(request, id):
     REMOTE_PWD = newlinux.linux_passwd
     ssh = paramiko.SSHClient()
     ssh.load_system_host_keys()
-    print(REMOTE_HOST)
     try:
         # 账号密码登录选项，避免服务器拒绝连接
+        # 当远程服务器没有本地主机的密钥时自动添加到本地，这样不用在建立连接的时候输入yes或no进行确认
         ssh.set_missing_host_key_policy(paramiko.AutoAddPolicy())
-        ssh.connect(hostname=REMOTE_HOST, port=REMOTE_PORT, username=REMOTE_USER, password=REMOTE_PWD, compress=True)
+        ssh.connect(hostname=REMOTE_HOST, port=REMOTE_PORT, username=REMOTE_USER, password=REMOTE_PWD, compress=True, timeout=8)
         # 系统版本
         re_cmd = 'cat /etc/redhat-release'
         ke_cmd = "uname -a |awk '{print $3}'"
@@ -233,4 +233,63 @@ def connect_test(request):
     else:
         return HttpResponse("请求非post")
 
+from dwebsocket.decorators import accept_websocket
+from dwebsocket import  require_websocket
+from threading import Thread
 
+
+@accept_websocket  #用于websocket连接的修饰器
+def linux_connect(request, id):
+    newlinux = NewLinux.objects.get(id=id)
+    if request.is_websocket():#判断websocket连接
+        # 打开ssh通道，建立长连接
+        # 如果是websocket连接就创建ssh连接，使用paramiko模块创建
+        Host = newlinux.linux_ip
+        Prot = newlinux.linux_port
+        User = newlinux.linux_user
+        Pwd = newlinux.linux_passwd
+        print(Host, Prot, User, Pwd)
+        client = paramiko.SSHClient()   #创建连接对象
+        client.set_missing_host_key_policy(paramiko.AutoAddPolicy)  #设置自动添加主机名及主机密钥到本地HostKeys对象，不依赖load_system_host_key的配置。即新建立ssh连接时不需要再输入yes或no进行确认
+        try:   #用异常抛出判定主机是否成功连接ssh
+            client.connect(hostname=Host, port=Prot, username=User, password=Pwd)  #connetc为连接函数
+            print(f'主机{Prot}连接成功！')
+            mess = f'主机{Prot}连接成功！'
+        except:
+            print(f'主机{Prot}连接失败，请确认输入信息！')
+            mess = f'主机{Prot}连接失败！'
+
+        sshsession = client.get_transport().open_session() #成功连接后获取ssh通道
+        sshsession.get_pty() #获取一个终端
+        sshsession.invoke_shell() #激活终端
+        for i in range(2):   #激活终端后会有信息流，一般都是lastlogin与bath目录，并获取其数据
+            messa = sshsession.recv(1024)
+            request.websocket.send(messa)
+        print(request.websocket)
+    else:
+        print("你是不是傻")
+        return render(request, 'linux/connect.html', {'newlinux': newlinux})
+
+    def srecv():  #从ssh通道获取输出data，并发送到前端
+        while True:
+            sshmess = sshsession.recv(2048)
+            if not len(sshmess):
+                print('退出监听发送循环')
+                return
+            request.websocket.send(sshmess)
+            print('ssh回复的信息：' + sshmess.decode('utf-8'))
+            print(len(sshmess))
+
+    for shell in request.websocket:   #获取前端的shelldata并且发送到服务器执行
+        deshell = shell.decode('utf-8')
+        print('deshell:'+deshell)
+        # stdin,stdout,stderr = client.exec_command(deshell)
+        # request.websocket.send(stdout.read())
+        # request.websocket.send(stderr.read())
+        sshsession.send(deshell)
+        # while True:
+        #     sshmess = sshsession.recv(2048)
+        #     request.websocket.send(sshmess)
+        #     print('ssh回复的信息：'+sshmess.decode('utf-8'))
+        #     print(len(sshmess))
+        sshrecvthre = Thread(target=srecv, args=()).start()  #启用线程监听ssh通道获取输出data，并发送到前端

@@ -8,6 +8,7 @@
             font-size: 18px !important;
         }
     </style>
+
 </head>
 {% extends "base.html" %}
 {% load staticfiles %}
@@ -42,14 +43,13 @@
         <td>{{ a.linux_hostname }}</td>
         <td>{{ a.linux_ip }}</td>
         <td><a href="{% url 'linux_list_detail' a.id %}" class="btn btn-success btn-sm" style="width: 50%;font-size: 15px;font-weight: bold;">详细信息</a></td>
-        <td><a href="{% url 'linux_list_detail' a.id %}" class="btn btn-success btn-sm" style="width: 60%;font-size: 15px;font-weight: bold;">连接Linux</a></td>
+        <td><a href="{% url 'linux_connect' a.id %}" class="btn btn-success btn-sm" style="width: 60%;font-size: 15px;font-weight: bold;">连接Linux</a></td>
         <td><a href="{% url 'linux_list_app' a.id %}" class="btn btn-success btn-sm" style="width: 60%;font-size: 15px;font-weight: bold;">应用详细</a></td>
         <td><a href="{% url 'linux_update' a.id %}" class="btn btn-success btn-sm" style="width: 80%;font-size: 15px;font-weight: bold;">编辑</a></td>
         <td><a href="{% url 'linux_delete' a.id %}" class="btn btn-success btn-sm" style="width: 80%;font-size: 15px;font-weight: bold;">删除</a></td>
     </tr>
     {% endfor %}
 </table>
-
 
 <div style="position: fixed ! important;left: 50%;top: 92%;transform:translateX(-50%)">
 <center>
@@ -71,7 +71,6 @@
     <button class="btn" style="background: blueviolet"><b>[{{ pages.number }}/{{ pages.paginator.num_pages }}]</b></button>
 </center>
 </div>
-
 </body>
 {% endblock content %}
 </html>

@@ -53,6 +53,7 @@ MIDDLEWARE = [
 	'django.middleware.clickjacking.XFrameOptionsMiddleware',
 ]
 
+WEBSOCKET_ACCEPT_ALL=True   # 可以允许每一个单独的视图实用websockets
 ROOT_URLCONF = 'PyLinux.urls'
 
 TEMPLATES = [

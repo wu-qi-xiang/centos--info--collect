@@ -30,6 +30,7 @@ urlpatterns = [
     path('search/', search, name='search'),
     path('create/', views.linux_create, name='linux_create'),
     path('detail/', views.linux_detail, name='linux_detail'),
+    path('connect/<int:id>/', views.linux_connect, name='linux_connect'),
     path('list_detail/<int:id>/', views.linux_list_detail, name='linux_list_detail'),
     path('list_app/<int:id>/', views.linux_list_app, name='linux_list_app'),
     path('linux_update/<int:id>/', views.linux_update, name='linux_update'),
