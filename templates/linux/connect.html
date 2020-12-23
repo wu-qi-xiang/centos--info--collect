@@ -5,6 +5,10 @@
         <link rel="stylesheet" href="/static/bootstrap/css/bootstrap.css"  />
     </head>
     <body>
+{#        <div>#}
+{#            <botton class="btn btn-success">重新连接</botton>#}
+{#            <botton class="btn btn-success">退出连接</botton>#}
+{#        </div>#}
         <div id="terminal"></div>
     </body>
 <script src="/static/xterm/js/xterm.js"></script>
@@ -15,11 +19,19 @@
     var window_height = $(window).height();
     var term = new Terminal(
     {
-        cols : Math.floor(window_width/9),     //列数
-        rows : Math.floor(window_height/19),   //行数
+        {#cols : Math.floor(window_width/9),     //列数#}
+        {#rows : Math.floor(window_height/14),   //行数#}
+        cols : 90,
+        rows : 33,
         convertEol : true,  //启用时，光标将设置为下一行的开头
-        cursorBlink: true, //光标闪烁
-        rendererType: "canvas",  //渲染类型
+        cursorBlink : true, //光标闪烁
+        fontSize : 18,
+        rendererType : "canvas",  //渲染类型
+        theme : {
+          foreground : 'yellow', //字体
+          background : '#060101', //背景色
+          cursor : 'help',//设置光标
+        }
     }
           );
 $(function () {
@@ -27,7 +39,9 @@ $(function () {
     // 打开webssh页面就打开web终端，并且打开websocket通道
     sock.addEventListener("open",function () {
         term.open(document.getElementById('terminal'));
-        term.writeln('等待10s，出现命令行表示连接成功，没有出现则表示连接失败（检查参数跟网络）。');//这里连接失败是表示ssh连接失败.
+        term.writeln('等待10s，出现命令行表示连接成功，没有出现则表示连接失败,然后去检查配置吧。');
+        term.writeln('webssh终端使用完之后，使用exit退出终端');
+        term.writeln('auther: wuqixiang');    //这里连接失败是表示ssh连接失败.
     });
     //获取从ssh通道获取的outdata
     sock.addEventListener("message",function (recv) {
