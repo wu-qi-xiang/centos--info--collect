@@ -19,10 +19,8 @@
     var window_height = $(window).height();
     var term = new Terminal(
     {
-        {#cols : Math.floor(window_width/9),     //列数#}
-        {#rows : Math.floor(window_height/14),   //行数#}
-        cols : 145,
-        rows : 33,
+        cols : Math.floor(window_width/10.6),     //列数
+        rows : Math.floor(window_height/21.5),   //行数
         convertEol : true,  //启用时，光标将设置为下一行的开头
         cursorBlink : true, //光标闪烁
         fontSize : 18,

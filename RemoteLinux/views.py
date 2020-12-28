@@ -239,6 +239,7 @@ def connect_test(request):
 
 @accept_websocket  # 用于websocket连接的修饰器
 def linux_connect(request, id):
+    print(id)
     newlinux = NewLinux.objects.get(id=id)
     if request.is_websocket():  # 判断websocket连接
         # 打开ssh通道，建立长连接
@@ -250,7 +251,7 @@ def linux_connect(request, id):
         client = paramiko.SSHClient()   # 创建连接对象
         client.set_missing_host_key_policy(paramiko.AutoAddPolicy)  # 设置自动添加主机名及主机密钥到本地HostKeys对象，不依赖load_system_host_key的配置。即新建立ssh连接时不需要再输入yes或no进行确认
         try:   # 用异常抛出判定主机是否成功连接ssh
-            client.connect(hostname=Host, port=Prot, username=User, password=Pwd)  # connetc为连接函数
+            client.connect(hostname=Host, port=Prot, username=User, password=Pwd)  # connect为连接函数
             mess = f'主机{Prot}连接成功！'
         except:
             mess = f'主机{Prot}连接失败！'
@@ -272,12 +273,12 @@ def linux_connect(request, id):
                 # print('退出监听发送循环')
                 return
             request.websocket.send(sshmess)
-            print('ssh回复的信息：' + sshmess.decode('utf-8'))
+            # print('ssh回复的信息：' + sshmess.decode('utf-8'))
 
     # 获取前端的shelldata并且发送到服务器执行
     for shell in request.websocket:
         deshell = shell.decode('utf-8')
-        print('deshell:'+deshell)
+        # print('deshell:'+deshell)
         # stdin,stdout,stderr = client.exec_command(deshell)
         # request.websocket.send(stdout.read())
         # request.websocket.send(stderr.read())

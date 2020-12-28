@@ -37,19 +37,13 @@
         <th class="text-center">删除</th>
     </thred>
     {% for a in pages %}
-     <script>
-        function myFunction(){
-        connect_url = ("http://" + window.location.host + "{% url 'linux_connect' a.id  %}")
-        window.open(connect_url)
-        }
-    </script>
     <tr class="text-center">
         <td>{{ forloop.counter|add:pagenum }}</td>
         <td>{{ a.linux_name }}</td>
-        <td>{{ a.linux_hostname }}</td>
+        <td>{{ a.id }}</td>
         <td>{{ a.linux_ip }}</td>
         <td><a href="{% url 'linux_list_detail' a.id %}" class="btn btn-success btn-sm" style="width: 50%;font-size: 15px;font-weight: bold;">详细信息</a></td>
-        <td><button class="btn btn-success btn-sm"  onclick="myFunction()" style="width: 60%;font-size: 15px;font-weight: bold;">连接Linux</button></td>
+        <td><a href="{% url 'linux_connect' a.id %}" target="_blank" class="btn btn-success btn-sm" style="width: 60%;font-size: 15px;font-weight: bold;">连接Linux</a></td>
         <td><a href="{% url 'linux_list_app' a.id %}" class="btn btn-success btn-sm" style="width: 60%;font-size: 15px;font-weight: bold;">应用详细</a></td>
         <td><a href="{% url 'linux_update' a.id %}" class="btn btn-success btn-sm" style="width: 80%;font-size: 15px;font-weight: bold;">编辑</a></td>
         <td><a href="{% url 'linux_delete' a.id %}" class="btn btn-success btn-sm" style="width: 80%;font-size: 15px;font-weight: bold;">删除</a></td>

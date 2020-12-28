@@ -36,3 +36,4 @@ virtualenv==16.7.5
 django-crontab==0.7.1
 matplotlib==3.3.3
 channels==2.1.5
+dwebsocket==0.5.12
