@@ -14,6 +14,12 @@
   </component>
   <component name="NewModuleRootManager">
     <content url="file://$MODULE_DIR$" />
+    <content url="file://$MODULE_DIR$/../element--linux" />
+    <content url="file://$MODULE_DIR$/../layui-linux" />
+    <content url="file://$MODULE_DIR$/../node_modules">
+      <excludeFolder url="file://$MODULE_DIR$/../node_modules/my-project/node_modules" />
+    </content>
+    <content url="file://$MODULE_DIR$/../vue-element-admin" />
     <orderEntry type="inheritedJdk" />
     <orderEntry type="sourceFolder" forTests="false" />
   </component>

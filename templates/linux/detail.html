@@ -14,13 +14,22 @@
 {% load staticfiles %}
 {% block content %}
 <body>
+{% comment %}<div>
+    <iframe id="bodyframe" src="{% url 'linux_create' %} " scrolling="no" height="510px" width="500px"
+            style="VISIBILITY: hidden;float:left;position: absolute;right: 500px" ></iframe>
+</div>{% endcomment %}
 <table class="table table-hover table-bordered">
     <thred>
         <th class="text-center h3"><b>服务器列表</b></th>
         <th class="text-center h3"><b>主机总数</b></th>
         <th class="text-center h3" style="color: red"><b>{{ sum }}</b></th>
-        <th class="text-center">
-            <a href="{% url 'linux_create' %}"  class="btn btn-success" style="font-weight: bold">添加linux主机</a>
+        <th class="text-center" style="right: 80%">       
+            <form class="form-inline my-lg-0" id="search_data" method="get" action="/search/">
+                 <input class="form-control mr-sm-2" type="search" placeholder="Search" name="search" value="{{ keyword }}">
+                 <button class="btn btn-outline-success my-2 my-sm-0" type="submit" id="search">Search</button>
+                 &emsp;&emsp;
+                 <a href="{% url 'linux_create' %}"  class="btn btn-success" style="font-weight: bold">新增</a>
+            </form>
         </th>
     </thred>
 </table>
@@ -40,7 +49,7 @@
     <tr class="text-center">
         <td>{{ forloop.counter|add:pagenum }}</td>
         <td>{{ a.linux_name }}</td>
-        <td>{{ a.id }}</td>
+        <td>{{ a.linux_hostname }}</td>
         <td>{{ a.linux_ip }}</td>
         <td><a href="{% url 'linux_list_detail' a.id %}" class="btn btn-success btn-sm" style="width: 50%;font-size: 15px;font-weight: bold;">详细信息</a></td>
         <td><a href="{% url 'linux_connect' a.id %}" target="_blank" class="btn btn-success btn-sm" style="width: 60%;font-size: 15px;font-weight: bold;">连接Linux</a></td>

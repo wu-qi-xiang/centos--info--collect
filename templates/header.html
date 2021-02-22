@@ -15,41 +15,46 @@
   </style>
 </head>
 {% load staticfiles %}
-<body style="background: #b1dfbb">
+<body>
   <nav class="navbar navbar-expand-lg navbar-light" style="background-color: #c4e3f3">
   <a class="navbar-brand" href="{% url 'index' %}">LINUX首页</a>
   <button class="navbar-toggler" type="button" data-toggle="collapse" data-target="#navbarTogglerDemo02" aria-controls="navbarTogglerDemo02" aria-expanded="false" aria-label="Toggle navigation">
     <span class="navbar-toggler-icon"></span>
   </button>
-
+   &emsp;&emsp;
   <div class="collapse navbar-collapse" id="navbarTogglerDemo02">
     <ul class="navbar-nav mr-auto mt-2 mt-lg-0">
       <li class="nav-item">
         <a class="nav-link" href="{% url 'linux' %}">本地linux</a>
       </li>
+        &emsp;&emsp;
       <li class="nav-item">
         <a class="nav-link" href="{% url 'linux_detail' %}">linux列表</a>
       </li>
+        &emsp;&emsp;
       <li class="nav-item">
         <a class="nav-link" href="{% url 'password:password_manage' %}">密码管理</a>
       </li>
+        &emsp;&emsp;
       <li class="nav-item">
         <a class="nav-link" href="{% url 'monitor:monitor_index' %}">监控设置</a>
       </li>
     </ul>
-    <form class="form-inline my-2 my-lg-0" id="search_data" method="get" action="/search/">
-      <input class="form-control mr-sm-2" type="search" placeholder="linux列表Search" name="search" value="{{ keyword }}">
-      <button class="btn btn-outline-success my-2 my-sm-0" type="submit" id="search">Search</button>
-    </form>
+{#    <form class="form-inline my-2 my-lg-0" id="search_data" method="get" action="/search/">#}
+{#      <input class="form-control mr-sm-2" type="search" placeholder="linux列表Search" name="search" value="{{ keyword }}">#}
+{#      <button class="btn btn-outline-success my-2 my-sm-0" type="submit" id="search">Search</button>#}
+{#    </form>#}
     <ul  class="nav navbar-nav navbar-right">
       {% if request.session.is_login %}
         <li class="nav-item">
           <a class="nav-link" href="#">当前在线：{{ request.session.user_name }}</a></li>
+          &emsp;&emsp;
         <li class="nav-item">
           <a class="nav-link" href="{% url 'userprofile:logout' %}">退出</a></li>
       {% else %}
         <li class="nav-item">
           <a class="nav-link" href="{% url 'userprofile:login' %}">登录</a></li>
+          &emsp;&emsp;
         <li class="nav-item">
           <a class="nav-link" href="{% url 'userprofile:register' %}">注册</a></li>
       {% endif %}
