@@ -2,45 +2,10 @@
 <project version="4">
   <component name="ChangeListManager">
     <list default="true" id="a34a5bcd-434d-4cf1-933f-1c1ff810a9c9" name="Default Changelist" comment="">
-      <change afterPath="$PROJECT_DIR$/../test/test/getfile.py" afterDir="false" />
-      <change afterPath="$PROJECT_DIR$/../test/test/movie.py" afterDir="false" />
-      <change afterPath="$PROJECT_DIR$/../test/test/test.py" afterDir="false" />
-      <change afterPath="$PROJECT_DIR$/../test/test/webssh.py" afterDir="false" />
-      <change afterPath="$PROJECT_DIR$/../web/typeidea/__init__.py" afterDir="false" />
-      <change afterPath="$PROJECT_DIR$/../web/typeidea/blog/adminforms.py" afterDir="false" />
-      <change afterPath="$PROJECT_DIR$/../web/typeidea/blog/middleware/__init__.py" afterDir="false" />
-      <change afterPath="$PROJECT_DIR$/../web/typeidea/blog/middleware/user_id.py" afterDir="false" />
-      <change afterPath="$PROJECT_DIR$/../web/typeidea/blog/rss.py" afterDir="false" />
-      <change afterPath="$PROJECT_DIR$/../web/typeidea/blog/sitemap.py" afterDir="false" />
-      <change afterPath="$PROJECT_DIR$/../web/typeidea/comment/forms.py" afterDir="false" />
-      <change afterPath="$PROJECT_DIR$/../web/typeidea/comment/templatetags/__init__.py" afterDir="false" />
-      <change afterPath="$PROJECT_DIR$/../web/typeidea/comment/templatetags/comment_block.py" afterDir="false" />
-      <change afterPath="$PROJECT_DIR$/../web/typeidea/typeidea/base_admin.py" afterDir="false" />
-      <change afterPath="$PROJECT_DIR$/../web/typeidea/typeidea/custom_site.py" afterDir="false" />
-      <change afterPath="$PROJECT_DIR$/../web/typeidea/typeidea/settings/__init__.py" afterDir="false" />
-      <change afterPath="$PROJECT_DIR$/../web/typeidea/typeidea/settings/develop.py" afterDir="false" />
-      <change afterPath="$PROJECT_DIR$/../web/typeidea/typeidea/themes/bootstrap/templates/blog/base.html" afterDir="false" />
-      <change afterPath="$PROJECT_DIR$/../web/typeidea/typeidea/themes/bootstrap/templates/blog/detail.html" afterDir="false" />
-      <change afterPath="$PROJECT_DIR$/../web/typeidea/typeidea/themes/bootstrap/templates/blog/list.html" afterDir="false" />
-      <change afterPath="$PROJECT_DIR$/../web/typeidea/typeidea/themes/bootstrap/templates/comment/block.html" afterDir="false" />
-      <change afterPath="$PROJECT_DIR$/../web/typeidea/typeidea/themes/bootstrap/templates/comment/result.html" afterDir="false" />
-      <change afterPath="$PROJECT_DIR$/../web/typeidea/typeidea/themes/bootstrap/templates/config/blocks/sidebar_comments.html" afterDir="false" />
-      <change afterPath="$PROJECT_DIR$/../web/typeidea/typeidea/themes/bootstrap/templates/config/blocks/sidebar_posts.html" afterDir="false" />
-      <change afterPath="$PROJECT_DIR$/../web/typeidea/typeidea/themes/bootstrap/templates/config/links.html" afterDir="false" />
-      <change afterPath="$PROJECT_DIR$/../web/typeidea/typeidea/themes/bootstrap/templates/sitemap.xml" afterDir="false" />
-      <change afterPath="$PROJECT_DIR$/../web/typeidea/typeidea/themes/default/templates/blog/base.html" afterDir="false" />
-      <change afterPath="$PROJECT_DIR$/../web/typeidea/typeidea/themes/default/templates/blog/detail.html" afterDir="false" />
-      <change afterPath="$PROJECT_DIR$/../web/typeidea/typeidea/themes/default/templates/blog/list.html" afterDir="false" />
-      <change afterPath="$PROJECT_DIR$/../web/typeidea/typeidea/themes/default/templates/config/blocks/sidebar_comments.html" afterDir="false" />
-      <change afterPath="$PROJECT_DIR$/../web/typeidea/typeidea/themes/default/templates/config/blocks/sidebar_posts.html" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/.idea/centos--info--collect.iml" beforeDir="false" afterPath="$PROJECT_DIR$/.idea/centos--info--collect.iml" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/.idea/vcs.xml" beforeDir="false" afterPath="$PROJECT_DIR$/.idea/vcs.xml" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/.idea/dataSources.local.xml" beforeDir="false" afterPath="$PROJECT_DIR$/.idea/dataSources.local.xml" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/.idea/dataSources.xml" beforeDir="false" afterPath="$PROJECT_DIR$/.idea/dataSources.xml" afterDir="false" />
       <change beforePath="$PROJECT_DIR$/.idea/workspace.xml" beforeDir="false" afterPath="$PROJECT_DIR$/.idea/workspace.xml" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/static/images/rectangle.jpg" beforeDir="false" afterPath="$PROJECT_DIR$/static/images/rectangle.jpg" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/templates/header.html" beforeDir="false" afterPath="$PROJECT_DIR$/templates/header.html" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/templates/linux/create.html" beforeDir="false" />
       <change beforePath="$PROJECT_DIR$/templates/linux/detail.html" beforeDir="false" afterPath="$PROJECT_DIR$/templates/linux/detail.html" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/templates/password/password_manage.html" beforeDir="false" afterPath="$PROJECT_DIR$/templates/password/password_manage.html" afterDir="false" />
     </list>
     <option name="EXCLUDED_CONVERTED_TO_IGNORED" value="true" />
     <option name="SHOW_DIALOG" value="false" />
@@ -62,23 +27,7 @@
     <expand>
       <path>
         <item name="Database" type="3277223f:DatabaseStructure$DbRootGroup" />
-        <item name="db.sqlite3" type="feb32156:DbDataSourceImpl" />
-      </path>
-      <path>
-        <item name="Database" type="3277223f:DatabaseStructure$DbRootGroup" />
-        <item name="db.sqlite3" type="feb32156:DbDataSourceImpl" />
-        <item name="schemas" type="d4e8921:DatabaseStructure$FamilyGroup" />
-      </path>
-      <path>
-        <item name="Database" type="3277223f:DatabaseStructure$DbRootGroup" />
-        <item name="db.sqlite3" type="feb32156:DbDataSourceImpl" />
-        <item name="schemas" type="d4e8921:DatabaseStructure$FamilyGroup" />
-        <item name="main: schema" type="981a47c2:SqliteImplModel$Schema" />
-      </path>
-      <path>
-        <item name="Database" type="3277223f:DatabaseStructure$DbRootGroup" />
-        <item name="db.sqlite3" type="feb32156:DbDataSourceImpl" />
-        <item name="collations" type="d4e8921:DatabaseStructure$FamilyGroup" />
+        <item name="MySQL - @utcmysql.db.swirecocacola.com" type="feb32156:DbDataSourceImpl" />
       </path>
     </expand>
     <select />
@@ -111,32 +60,35 @@
           </provider>
         </entry>
       </file>
-      <file pinned="false" current-in-tab="true">
+      <file pinned="false" current-in-tab="false">
         <entry file="file://$PROJECT_DIR$/templates/linux/detail.html">
           <provider selected="true" editor-type-id="text-editor">
-            <state relative-caret-position="308">
-              <caret line="25" column="52" lean-forward="true" selection-start-line="25" selection-start-column="52" selection-end-line="25" selection-end-column="52" />
+            <state relative-caret-position="262">
+              <caret line="25" column="51" lean-forward="true" selection-start-line="25" selection-start-column="51" selection-end-line="25" selection-end-column="51" />
               <folding>
                 <element signature="n#style#0;n#th#2;n#thred#0;n#table#0;n#body#0;n#!!top" expanded="true" />
                 <element signature="n#style#0;n#th#3;n#thred#0;n#table#0;n#body#0;n#!!top" expanded="true" />
-                <element signature="e#1407#1413#0#HTML" expanded="true" />
-                <element signature="e#1413#1419#0#HTML" expanded="true" />
-                <element signature="n#style#0;n#a#0;n#form#0;n#th#3;n#thred#0;n#table#0;n#body#0;n#!!top" expanded="true" />
+                <element signature="n#style#0;n#form#0;n#th#3;n#thred#0;n#table#0;n#body#0;n#!!top" expanded="true" />
               </folding>
             </state>
           </provider>
         </entry>
       </file>
       <file pinned="false" current-in-tab="false">
+        <entry file="file://$PROJECT_DIR$/templates/password/password_create.html">
+          <provider selected="true" editor-type-id="text-editor">
+            <state relative-caret-position="-1262" />
+          </provider>
+        </entry>
+      </file>
+      <file pinned="false" current-in-tab="true">
         <entry file="file://$PROJECT_DIR$/templates/password/password_manage.html">
           <provider selected="true" editor-type-id="text-editor">
-            <state relative-caret-position="326">
-              <caret line="23" column="28" lean-forward="true" selection-start-line="23" selection-start-column="28" selection-end-line="23" selection-end-column="28" />
+            <state relative-caret-position="237">
+              <caret line="23" column="28" selection-start-line="23" selection-start-column="28" selection-end-line="23" selection-end-column="28" />
               <folding>
-                <element signature="n#style#0;n#th#2;n#thred#0;n#table#0;n#body#0;n#html#0;n#!!top" expanded="true" />
                 <element signature="e#905#911#0#HTML" expanded="true" />
                 <element signature="e#911#917#0#HTML" expanded="true" />
-                <element signature="n#style#0;n#a#0;n#form#0;n#th#2;n#thred#0;n#table#0;n#body#0;n#html#0;n#!!top" expanded="true" />
               </folding>
             </state>
           </provider>
@@ -145,7 +97,7 @@
       <file pinned="false" current-in-tab="false">
         <entry file="file://$PROJECT_DIR$/templates/linux/create.html">
           <provider selected="true" editor-type-id="text-editor">
-            <state relative-caret-position="297">
+            <state relative-caret-position="378">
               <caret line="14" column="35" selection-start-line="14" selection-start-column="35" selection-end-line="14" selection-end-column="35" />
             </state>
           </provider>
@@ -211,7 +163,7 @@
       </list>
     </option>
   </component>
-  <component name="ProjectFrameBounds" extendedState="7">
+  <component name="ProjectFrameBounds" extendedState="6">
     <option name="x" value="480" />
     <option name="y" value="20" />
     <option name="width" value="1440" />
@@ -226,7 +178,6 @@
       <foldersAlwaysOnTop value="true" />
     </navigator>
     <panes>
-      <pane id="Scope" />
       <pane id="ProjectPane">
         <subPane>
           <expand>
@@ -263,6 +214,7 @@
           <select />
         </subPane>
       </pane>
+      <pane id="Scope" />
     </panes>
   </component>
   <component name="ProjectViewState">
@@ -270,7 +222,7 @@
     <option name="showLibraryContents" value="true" />
   </component>
   <component name="PropertiesComponent">
-    <property name="DatabaseDriversLRU" value="sqlite" />
+    <property name="DatabaseDriversLRU" value="sqlite&#10;mysql.8" />
     <property name="DefaultHtmlFileTemplate" value="HTML File" />
     <property name="RunOnceActivity.OpenProjectViewOnStart" value="true" />
     <property name="RunOnceActivity.ShowReadmeOnStart" value="true" />
@@ -371,18 +323,28 @@
       <workItem from="1612668855609" duration="14042000" />
       <workItem from="1612753673452" duration="1937000" />
       <workItem from="1613701136483" duration="10739000" />
-      <workItem from="1613957657519" duration="3583000" />
+      <workItem from="1613957657519" duration="4607000" />
+      <workItem from="1616145071493" duration="289000" />
+      <workItem from="1618406186684" duration="2239000" />
     </task>
+    <task id="LOCAL-00001" summary="优化界面">
+      <created>1613977946788</created>
+      <option name="number" value="00001" />
+      <option name="presentableId" value="LOCAL-00001" />
+      <option name="project" value="LOCAL" />
+      <updated>1613977946788</updated>
+    </task>
+    <option name="localTasksCounter" value="2" />
     <servers />
   </component>
   <component name="TimeTrackingManager">
-    <option name="totallyTimeSpent" value="238312000" />
+    <option name="totallyTimeSpent" value="241864000" />
   </component>
   <component name="ToolWindowManager">
-    <frame x="-7" y="-7" width="1550" height="838" extended-state="7" />
+    <frame x="-7" y="-7" width="1550" height="838" extended-state="6" />
     <editor active="true" />
     <layout>
-      <window_info active="true" content_ui="combo" id="Project" order="0" visible="true" weight="0.15482573" />
+      <window_info active="true" content_ui="combo" id="Project" order="0" visible="true" weight="0.23793566" />
       <window_info id="Structure" order="1" side_tool="true" weight="0.25" />
       <window_info id="Favorites" order="2" side_tool="true" />
       <window_info anchor="bottom" id="Message" order="0" />
@@ -395,8 +357,8 @@
       <window_info anchor="bottom" id="Docker" order="7" show_stripe_button="false" />
       <window_info anchor="bottom" id="Version Control" order="8" />
       <window_info anchor="bottom" id="Database Changes" order="9" />
-      <window_info anchor="bottom" id="Event Log" order="10" side_tool="true" />
-      <window_info anchor="bottom" id="Terminal" order="11" visible="true" weight="0.048158642" />
+      <window_info anchor="bottom" id="Event Log" order="10" sideWeight="0.5020107" side_tool="true" weight="0.5304102" />
+      <window_info anchor="bottom" id="Terminal" order="11" sideWeight="0.49798927" visible="true" weight="0.16855524" />
       <window_info anchor="bottom" id="Python Console" order="12" weight="0.3286119" />
       <window_info anchor="bottom" id="TypeScript" order="13" />
       <window_info anchor="bottom" id="Database Console" order="14" weight="0.3286119" />
@@ -404,7 +366,7 @@
       <window_info anchor="right" id="Ant Build" order="1" weight="0.25" />
       <window_info anchor="right" content_ui="combo" id="Hierarchy" order="2" weight="0.25" />
       <window_info anchor="right" id="SciView" order="3" />
-      <window_info anchor="right" id="Database" order="4" weight="0.022117963" />
+      <window_info anchor="right" id="Database" order="4" weight="0.6481233" />
     </layout>
     <layout-to-restore>
       <window_info active="true" content_ui="combo" id="Project" order="0" visible="true" weight="0.24396783" />
@@ -434,6 +396,10 @@
   </component>
   <component name="TypeScriptGeneratedFilesManager">
     <option name="version" value="1" />
+  </component>
+  <component name="VcsManagerConfiguration">
+    <MESSAGE value="优化界面" />
+    <option name="LAST_COMMIT_MESSAGE" value="优化界面" />
   </component>
   <component name="editorHistoryManager">
     <entry file="file://$PROJECT_DIR$/requirements.txt">
@@ -816,34 +782,35 @@
     </entry>
     <entry file="file://$PROJECT_DIR$/templates/linux/create.html">
       <provider selected="true" editor-type-id="text-editor">
-        <state relative-caret-position="297">
+        <state relative-caret-position="378">
           <caret line="14" column="35" selection-start-line="14" selection-start-column="35" selection-end-line="14" selection-end-column="35" />
-        </state>
-      </provider>
-    </entry>
-    <entry file="file://$PROJECT_DIR$/templates/password/password_manage.html">
-      <provider selected="true" editor-type-id="text-editor">
-        <state relative-caret-position="326">
-          <caret line="23" column="28" lean-forward="true" selection-start-line="23" selection-start-column="28" selection-end-line="23" selection-end-column="28" />
-          <folding>
-            <element signature="n#style#0;n#th#2;n#thred#0;n#table#0;n#body#0;n#html#0;n#!!top" expanded="true" />
-            <element signature="e#905#911#0#HTML" expanded="true" />
-            <element signature="e#911#917#0#HTML" expanded="true" />
-            <element signature="n#style#0;n#a#0;n#form#0;n#th#2;n#thred#0;n#table#0;n#body#0;n#html#0;n#!!top" expanded="true" />
-          </folding>
         </state>
       </provider>
     </entry>
     <entry file="file://$PROJECT_DIR$/templates/linux/detail.html">
       <provider selected="true" editor-type-id="text-editor">
-        <state relative-caret-position="308">
-          <caret line="25" column="52" lean-forward="true" selection-start-line="25" selection-start-column="52" selection-end-line="25" selection-end-column="52" />
+        <state relative-caret-position="262">
+          <caret line="25" column="51" lean-forward="true" selection-start-line="25" selection-start-column="51" selection-end-line="25" selection-end-column="51" />
           <folding>
             <element signature="n#style#0;n#th#2;n#thred#0;n#table#0;n#body#0;n#!!top" expanded="true" />
             <element signature="n#style#0;n#th#3;n#thred#0;n#table#0;n#body#0;n#!!top" expanded="true" />
-            <element signature="e#1407#1413#0#HTML" expanded="true" />
-            <element signature="e#1413#1419#0#HTML" expanded="true" />
-            <element signature="n#style#0;n#a#0;n#form#0;n#th#3;n#thred#0;n#table#0;n#body#0;n#!!top" expanded="true" />
+            <element signature="n#style#0;n#form#0;n#th#3;n#thred#0;n#table#0;n#body#0;n#!!top" expanded="true" />
+          </folding>
+        </state>
+      </provider>
+    </entry>
+    <entry file="file://$PROJECT_DIR$/templates/password/password_create.html">
+      <provider selected="true" editor-type-id="text-editor">
+        <state relative-caret-position="-1262" />
+      </provider>
+    </entry>
+    <entry file="file://$PROJECT_DIR$/templates/password/password_manage.html">
+      <provider selected="true" editor-type-id="text-editor">
+        <state relative-caret-position="237">
+          <caret line="23" column="28" selection-start-line="23" selection-start-column="28" selection-end-line="23" selection-end-column="28" />
+          <folding>
+            <element signature="e#905#911#0#HTML" expanded="true" />
+            <element signature="e#911#917#0#HTML" expanded="true" />
           </folding>
         </state>
       </provider>
