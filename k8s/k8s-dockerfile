@@ -1,0 +1,10 @@
+FROM python:3.7
+RUN apt-get update
+RUN apt-get install python3-dev default-libmysqlclient-dev -y
+RUN mkdir /code/
+COPY .  /code/
+WORKDIR /code
+RUN python -m pip install --upgrade pip
+RUN pip install -Ur requirements.txt
+EXPOSE 8000
+

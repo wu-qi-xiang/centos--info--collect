@@ -1,0 +1,43 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: django
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: django
+  template:
+    metadata:
+      name: django
+      labels:
+        app: django
+    spec:
+      containers:
+      - command: 
+        - sh
+        - -c
+        - "python manage.py makemigrations; python manage.py migrate; python manage.py runserver 0.0.0.0:8000"
+        image: k8s-django
+        imagePullPolicy: Never
+        name: k8s-django
+        ports: 
+          - name: k8s-django
+            containerPort: 8000
+            protocol: TCP
+             
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: k8s-django
+spec:
+  type: NodePort
+  selector:
+    app: django
+  ports:
+    - name: k8s-django
+      nodePort: 30800
+      port: 8000
+      targetPort: 8000
+      protocol: TCP  
