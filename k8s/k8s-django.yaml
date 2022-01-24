@@ -13,6 +13,8 @@ spec:
       labels:
         app: django
     spec:
+      nodeSelector: 
+        app: django
       containers:
       - command: 
         - sh
