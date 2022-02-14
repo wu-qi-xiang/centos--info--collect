@@ -44,7 +44,7 @@ def index(request):
 	plt.xlabel(u'名称', fontproperties=myfont)
 	plt.ylabel(u'数量', fontproperties=myfont)
 	# 增加图例
-	plt.legend((u"当前用户密码列表", u"所以的密码列表", u"服务器列表"), loc='best', prop=myfont)
+	plt.legend((u"当前用户密码列表", u"所有的密码列表", u"服务器列表"), loc='best', prop=myfont)
 	plt.savefig('./static/images/rectangle.jpg', bbox_inches='tight')
 	plt.close()
 	return render(request, "linux/index.html")
