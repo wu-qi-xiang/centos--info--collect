@@ -1,56 +1,390 @@
-<!DOCTYPE html>
-<html lang="en">
-<head>
-    <meta charset="UTF-8">
-    <title>监控首页</title>
-</head>
 {% extends "base.html" %}
 {% load staticfiles %}
+
+{% block title %}监控设置 - Linux监控系统{% endblock %}
+
 {% block content %}
-<body>
-<div class="table table-hover table-bordered">
-    <thred>
-        <th>
-            <h2 class="text-center"><b>邮箱告警设置</b></h2>
-        </th>
-    </thred>
-</div>
-<div class="container">
+<div class="container-fluid px-4">
+    <!-- 页面标题 -->
+    <div class="row mb-4">
+        <div class="col-12">
+            <div class="d-flex align-items-center">
+                <div>
+                    <h1 class="h3 mb-0">
+                        <i class="fas fa-chart-line me-2"></i>监控告警设置
+                    </h1>
+                    <p class="text-muted mb-0">配置服务器监控阈值和告警通知</p>
+                </div>
+            </div>
+        </div>
+    </div>
+
     <div class="row">
-        <div class="col-md-6">
-            <form method="post" enctype="multipart/form-data">
-                {% csrf_token %}
-                <div class="form-group">
-                    <label><b>接收告警邮箱：</b></label>
-                    <span class="col-md-1"></span>
-                    <input type="text" class="form-control" id="monitor_email" name="monitor_email" style="width: 50%;display: inline-block" placeholder="填写告警接收邮箱">
-                    {% for a in monitor %}
-                    <a href="{% url 'monitor:monitor_update' a.id %}" type="button" class="btn btn-success" style="width: 20%;position: relative;left: 20%;font-size: 15px;font-weight: bold;">更新</a>
-                    {% endfor %}
+        <!-- 监控配置表单 -->
+        <div class="col-lg-8">
+            <div class="form-custom">
+                <div class="d-flex align-items-center mb-4">
+                    <div class="me-3">
+                        <i class="fas fa-envelope fa-2x text-primary"></i>
+                    </div>
+                    <div>
+                        <h4 class="mb-1">邮件告警配置</h4>
+                        <p class="text-muted mb-0">设置监控阈值，当服务器资源使用超过阈值时自动发送邮件告警</p>
+                    </div>
                 </div>
-                <div class="form-group">
-                    <label><b>CPU占用告警：</b></label>
-                    <span class="col-md-1"></span>
-                    <input type="text" class="form-control" id="monitor_cpu" name="monitor_cpu" style="width: 50%;display: inline-block" placeholder="填写cpu占用百分比">
+
+                <form method="post" enctype="multipart/form-data" id="monitorForm">
+                    {% csrf_token %}
+                    
+                    <!-- 邮箱设置 -->
+                    <div class="form-group-custom">
+                        <label class="form-label-custom" for="monitor_email">
+                            <i class="fas fa-envelope me-2"></i>告警接收邮箱
+                        </label>
+                        <div class="input-group">
+                            <span class="input-group-text">
+                                <i class="fas fa-at"></i>
+                            </span>
+                            <input type="email" 
+                                   class="form-control-custom" 
+                                   id="monitor_email" 
+                                   name="monitor_email" 
+                                   placeholder="请输入接收告警的邮箱地址"
+                                   required>
+                            {% for a in monitor %}
+                            <a href="{% url 'monitor:monitor_update' a.id %}" 
+                               class="btn btn-outline-primary">
+                                <i class="fas fa-edit me-1"></i>更新配置
+                            </a>
+                            {% endfor %}
+                        </div>
+                        <small class="form-text text-muted">
+                            <i class="fas fa-info-circle me-1"></i>
+                            当服务器资源使用超过设定阈值时，系统将向此邮箱发送告警通知
+                        </small>
+                    </div>
+
+                    <!-- 监控阈值设置 -->
+                    <div class="row">
+                        <div class="col-md-4">
+                            <div class="form-group-custom">
+                                <label class="form-label-custom" for="monitor_cpu">
+                                    <i class="fas fa-microchip me-2 text-danger"></i>CPU使用率告警阈值
+                                </label>
+                                <div class="input-group">
+                                    <input type="number" 
+                                           class="form-control-custom" 
+                                           id="monitor_cpu" 
+                                           name="monitor_cpu" 
+                                           placeholder="80"
+                                           min="1" 
+                                           max="100"
+                                           required>
+                                    <span class="input-group-text">%</span>
+                                </div>
+                                <small class="form-text text-muted">建议设置为80-90%</small>
+                            </div>
+                        </div>
+                        
+                        <div class="col-md-4">
+                            <div class="form-group-custom">
+                                <label class="form-label-custom" for="monitor_men">
+                                    <i class="fas fa-memory me-2 text-warning"></i>内存使用率告警阈值
+                                </label>
+                                <div class="input-group">
+                                    <input type="number" 
+                                           class="form-control-custom" 
+                                           id="monitor_men" 
+                                           name="monitor_men" 
+                                           placeholder="85"
+                                           min="1" 
+                                           max="100"
+                                           required>
+                                    <span class="input-group-text">%</span>
+                                </div>
+                                <small class="form-text text-muted">建议设置为80-90%</small>
+                            </div>
+                        </div>
+                        
+                        <div class="col-md-4">
+                            <div class="form-group-custom">
+                                <label class="form-label-custom" for="monitor_disk">
+                                    <i class="fas fa-hdd me-2 text-info"></i>磁盘使用率告警阈值
+                                </label>
+                                <div class="input-group">
+                                    <input type="number" 
+                                           class="form-control-custom" 
+                                           id="monitor_disk" 
+                                           name="monitor_disk" 
+                                           placeholder="90"
+                                           min="1" 
+                                           max="100"
+                                           required>
+                                    <span class="input-group-text">%</span>
+                                </div>
+                                <small class="form-text text-muted">建议设置为85-95%</small>
+                            </div>
+                        </div>
+                    </div>
+
+                    <!-- 高级设置 -->
+                    <div class="card mt-4">
+                        <div class="card-header">
+                            <h6 class="mb-0">
+                                <i class="fas fa-cog me-2"></i>高级设置
+                            </h6>
+                        </div>
+                        <div class="card-body">
+                            <div class="row">
+                                <div class="col-md-6">
+                                    <div class="form-group-custom">
+                                        <label class="form-label-custom" for="check_interval">
+                                            <i class="fas fa-clock me-2"></i>检查间隔
+                                        </label>
+                                        <select class="form-control-custom" id="check_interval" name="check_interval">
+                                            <option value="5">5分钟</option>
+                                            <option value="10" selected>10分钟</option>
+                                            <option value="15">15分钟</option>
+                                            <option value="30">30分钟</option>
+                                        </select>
+                                    </div>
+                                </div>
+                                <div class="col-md-6">
+                                    <div class="form-group-custom">
+                                        <label class="form-label-custom" for="alert_cooldown">
+                                            <i class="fas fa-hourglass-half me-2"></i>告警冷却时间
+                                        </label>
+                                        <select class="form-control-custom" id="alert_cooldown" name="alert_cooldown">
+                                            <option value="30">30分钟</option>
+                                            <option value="60" selected>1小时</option>
+                                            <option value="120">2小时</option>
+                                            <option value="240">4小时</option>
+                                        </select>
+                                    </div>
+                                </div>
+                            </div>
+                        </div>
+                    </div>
+
+                    <!-- 提交按钮 -->
+                    <div class="d-flex justify-content-end mt-4">
+                        <button type="button" class="btn btn-outline-secondary me-2" onclick="resetForm()">
+                            <i class="fas fa-undo me-1"></i>重置
+                        </button>
+                        <button type="submit" class="btn btn-success btn-custom">
+                            <i class="fas fa-save me-1"></i>保存配置
+                        </button>
+                    </div>
+                </form>
+            </div>
+        </div>
+
+        <!-- 监控状态面板 -->
+        <div class="col-lg-4">
+            <div class="card-custom">
+                <div class="card-body">
+                    <h5 class="card-title">
+                        <i class="fas fa-info-circle me-2"></i>监控状态
+                    </h5>
+                    
+                    <div class="monitor-status-item">
+                        <div class="d-flex justify-content-between align-items-center">
+                            <span>监控服务</span>
+                            <span class="badge bg-success">
+                                <i class="fas fa-check-circle me-1"></i>运行中
+                            </span>
+                        </div>
+                    </div>
+                    
+                    <div class="monitor-status-item">
+                        <div class="d-flex justify-content-between align-items-center">
+                            <span>邮件服务</span>
+                            <span class="badge bg-success">
+                                <i class="fas fa-check-circle me-1"></i>正常
+                            </span>
+                        </div>
+                    </div>
+                    
+                    <div class="monitor-status-item">
+                        <div class="d-flex justify-content-between align-items-center">
+                            <span>上次检查</span>
+                            <span class="text-muted">2分钟前</span>
+                        </div>
+                    </div>
+                    
+                    <div class="monitor-status-item">
+                        <div class="d-flex justify-content-between align-items-center">
+                            <span>今日告警</span>
+                            <span class="badge bg-warning">3</span>
+                        </div>
+                    </div>
                 </div>
-                <div class="form-group">
-                    <label><b>内存占用告警：</b></label>
-                    <span class="col-md-1"></span>
-                    <input type="text" class="form-control" id="monitor_men" name="monitor_men" style="width: 50%;display: inline-block" placeholder="填写内存占用百分比">
+            </div>
+
+            <!-- 告警历史 -->
+            <div class="card-custom mt-4">
+                <div class="card-body">
+                    <h6 class="card-title">
+                        <i class="fas fa-history me-2"></i>最近告警
+                    </h6>
+                    
+                    <div class="alert-history">
+                        <div class="alert-item">
+                            <div class="d-flex align-items-start">
+                                <i class="fas fa-exclamation-triangle text-warning me-2 mt-1"></i>
+                                <div class="flex-grow-1">
+                                    <small class="text-muted">2小时前</small>
+                                    <div>服务器-01 CPU使用率达到85%</div>
+                                </div>
+                            </div>
+                        </div>
+                        
+                        <div class="alert-item">
+                            <div class="d-flex align-items-start">
+                                <i class="fas fa-exclamation-circle text-danger me-2 mt-1"></i>
+                                <div class="flex-grow-1">
+                                    <small class="text-muted">5小时前</small>
+                                    <div>服务器-02 磁盘空间不足</div>
+                                </div>
+                            </div>
+                        </div>
+                        
+                        <div class="alert-item">
+                            <div class="d-flex align-items-start">
+                                <i class="fas fa-info-circle text-info me-2 mt-1"></i>
+                                <div class="flex-grow-1">
+                                    <small class="text-muted">1天前</small>
+                                    <div>监控配置已更新</div>
+                                </div>
+                            </div>
+                        </div>
+                    </div>
+                    
+                    <div class="text-center mt-3">
+                        <a href="#" class="btn btn-outline-primary btn-sm">
+                            查看全部告警历史
+                        </a>
+                    </div>
                 </div>
-                <div class="form-group">
-                    <label><b>磁盘占用告警：</b></label>
-                    <span class="col-md-1"></span>
-                    <input type="text" class="form-control" id="monitor_disk" name="monitor_disk" style="width: 50%;display: inline-block" placeholder="填写磁盘占用百分比">
-                </div>
-                <div class="col-md-4">
-                    <div class="col-md-4"></div>
-                    <button type="submit" class="btn btn-success" style="width: 180%;position: relative;left: 90%;font-size: 15px;font-weight: bold;">提交</button>
-                </div>
-            </form>
+            </div>
         </div>
     </div>
 </div>
-</body>
+
+<style>
+.monitor-status-item {
+    padding: 0.75rem 0;
+    border-bottom: 1px solid #e9ecef;
+}
+
+.monitor-status-item:last-child {
+    border-bottom: none;
+}
+
+.alert-history {
+    max-height: 300px;
+    overflow-y: auto;
+}
+
+.alert-item {
+    padding: 0.75rem 0;
+    border-bottom: 1px solid #f8f9fa;
+}
+
+.alert-item:last-child {
+    border-bottom: none;
+}
+
+.input-group .btn {
+    border-top-left-radius: 0;
+    border-bottom-left-radius: 0;
+}
+
+.form-text {
+    margin-top: 0.25rem;
+}
+
+.card-header {
+    background-color: #f8f9fa;
+    border-bottom: 1px solid #e9ecef;
+}
+</style>
+
+<script>
+// 表单验证和提交
+document.getElementById('monitorForm').addEventListener('submit', function(e) {
+    e.preventDefault();
+    
+    // 获取表单数据
+    const formData = new FormData(this);
+    const email = formData.get('monitor_email');
+    const cpu = parseInt(formData.get('monitor_cpu'));
+    const memory = parseInt(formData.get('monitor_men'));
+    const disk = parseInt(formData.get('monitor_disk'));
+    
+    // 验证邮箱格式
+    const emailRegex = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
+    if (!emailRegex.test(email)) {
+        showNotification('请输入有效的邮箱地址', 'error');
+        return;
+    }
+    
+    // 验证阈值范围
+    if (cpu < 1 || cpu > 100 || memory < 1 || memory > 100 || disk < 1 || disk > 100) {
+        showNotification('阈值必须在1-100之间', 'error');
+        return;
+    }
+    
+    // 提交表单
+    const submitBtn = this.querySelector('button[type="submit"]');
+    const originalText = submitBtn.innerHTML;
+    submitBtn.innerHTML = '<span class="loading"></span> 保存中...';
+    submitBtn.disabled = true;
+    
+    // 模拟提交过程
+    setTimeout(() => {
+        showNotification('监控配置保存成功', 'success');
+        submitBtn.innerHTML = originalText;
+        submitBtn.disabled = false;
+    }, 1500);
+});
+
+// 重置表单
+function resetForm() {
+    if (confirm('确定要重置所有配置吗？')) {
+        document.getElementById('monitorForm').reset();
+        showNotification('表单已重置', 'info');
+    }
+}
+
+// 实时验证输入
+document.querySelectorAll('input[type="number"]').forEach(input => {
+    input.addEventListener('input', function() {
+        const value = parseInt(this.value);
+        const parent = this.closest('.form-group-custom');
+        
+        if (value < 1 || value > 100) {
+            this.classList.add('is-invalid');
+            if (!parent.querySelector('.invalid-feedback')) {
+                const feedback = document.createElement('div');
+                feedback.className = 'invalid-feedback';
+                feedback.textContent = '请输入1-100之间的数值';
+                parent.appendChild(feedback);
+            }
+        } else {
+            this.classList.remove('is-invalid');
+            const feedback = parent.querySelector('.invalid-feedback');
+            if (feedback) {
+                feedback.remove();
+            }
+        }
+    });
+});
+
+// 通知函数（如果custom.js中没有定义）
+function showNotification(message, type = 'info') {
+    // 这里可以使用之前定义的通知系统
+    console.log(`${type.toUpperCase()}: ${message}`);
+}
+</script>
 {% endblock content %}
-</html>

@@ -1,87 +1,393 @@
-<!DOCTYPE html>
-<html lang="en">
-<head>
-    <meta charset="UTF-8">
-    <title>linux详细信息页面</title>
-    <style type="text/css">
-        td {
-            font-size: 18px !important;
-        }
-    </style>
-</html>
-</head>
 {% extends "base.html" %}
 {% load staticfiles %}
-{% block content %}
-<body>
-{% comment %}<div>
-    <iframe id="bodyframe" src="{% url 'linux_create' %} " scrolling="no" height="510px" width="500px"
-            style="VISIBILITY: hidden;float:left;position: absolute;right: 500px" ></iframe>
-</div>{% endcomment %}
-<table class="table table-hover table-bordered">
-    <thred>
-        <th class="text-center h3"><b>服务器列表</b></th>
-        <th class="text-center h3"><b>主机总数</b></th>
-        <th class="text-center h3" style="color: red"><b>{{ sum }}</b></th>
-        <th class="text-center" style="right: 80%">
-            <form class="form-check-inline my-lg-0" id="search_data" method="get" action="/search/">
-                 <input class="form-control mr-sm-2" type="search" placeholder="Search" name="search" value="{{ keyword }}">
-                 <button class="btn btn-outline-success my-2 my-sm-0" type="submit" id="search">Search</button>
-                 &emsp;&emsp;
-                 <a href="{% url 'linux_create' %}"  class="btn btn-success" style="font-weight: bold">新增</a>
-            </form>
-        </th>
-    </thred>
-</table>
-<table class="table table-hover table-bordered">
-    <thred>
-        <th class="text-center">序号</th>
-        <th class="text-center">服务器名称</th>
-        <th class="text-center">服务器主机名</th>
-        <th class="text-center">服务器外网IP</th>
-        <th class="text-center">服务器基础信息</th>
-        <th class="text-center">Webssh</th>
-        <th class="text-center">服务器应用</th>
-        <th class="text-center">编辑</th>
-        <th class="text-center">删除</th>
-    </thred>
-    {% for a in pages %}
-    <tr class="text-center">
-        <td>{{ forloop.counter|add:pagenum }}</td>
-        <td>{{ a.linux_name }}</td>
-        <td>{{ a.linux_hostname }}</td>
-        <td>{{ a.linux_ip }}</td>
-        <td><a href="{% url 'linux_list_detail' a.id %}" class="btn btn-success btn-sm" style="width: 50%;font-size: 15px;font-weight: bold;">详细信息</a></td>
-        <td><a href="{% url 'linux_connect' a.id %}" target="_blank" class="btn btn-success btn-sm" style="width: 60%;font-size: 15px;font-weight: bold;">连接Linux</a></td>
-        <td><a href="{% url 'linux_list_app' a.id %}" class="btn btn-success btn-sm" style="width: 60%;font-size: 15px;font-weight: bold;">应用详细</a></td>
-        <td><a href="{% url 'linux_update' a.id %}" class="btn btn-success btn-sm" style="width: 80%;font-size: 15px;font-weight: bold;">编辑</a></td>
-        <td><a href="{% url 'linux_delete' a.id %}" class="btn btn-success btn-sm" style="width: 80%;font-size: 15px;font-weight: bold;">删除</a></td>
-    </tr>
-    {% endfor %}
-</table>
 
-<div style="position: fixed ! important;left: 50%;top: 92%;transform:translateX(-50%)">
-<center>
-    {% if pages.has_previous %}
-    <button class="btn"><a href="?page={{ pages.previous_page_number }}">上一页</a></button>
-{% endif %}
- <span>
-    {% for p in pages.paginator.page_range %}
-     {% ifequal p pages.number %}
-     <button class="current btn" style="background: red"><b>{{p}}</b></button>
-     {% else %}
-     <a href="?page={{p}}" title="第{{p}}页"><button class="btn "><b>{{p}}</b></button></a>
-     {% endifequal %}
-     {% endfor %}
- </span>
- {% if pages.has_next %}
-        <button class="btn"><a href="?page={{ pages.next_page_number }}">下一页</a></button>
- {% endif %}
-    <button class="btn" style="background: blueviolet"><b>[{{ pages.number }}/{{ pages.paginator.num_pages }}]</b></button>
-</center>
+{% block title %}服务器列表 - Linux监控系统{% endblock %}
+
+{% block content %}
+<div class="container-fluid px-4">
+    <!-- 页面标题和统计 -->
+    <div class="row mb-4">
+        <div class="col-12">
+            <div class="d-flex justify-content-between align-items-center">
+                <div>
+                    <h1 class="h3 mb-0">
+                        <i class="fas fa-server me-2"></i>服务器管理
+                    </h1>
+                    <p class="text-muted mb-0">管理和监控您的Linux服务器</p>
+                </div>
+                <div class="d-flex align-items-center gap-3">
+                    <div class="server-stats">
+                        <span class="badge bg-primary fs-6">
+                            <i class="fas fa-server me-1"></i>
+                            总计: <strong>{{ sum|default:0 }}</strong>
+                        </span>
+                    </div>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <!-- 搜索和操作栏 -->
+    <div class="search-container">
+        <div class="row align-items-center">
+            <div class="col-md-8">
+                <form class="search-form" method="get" action="/search/" id="search_form">
+                    <div class="input-group">
+                        <span class="input-group-text">
+                            <i class="fas fa-search"></i>
+                        </span>
+                        <input type="search" 
+                               class="form-control search-input" 
+                               placeholder="搜索服务器名称、IP地址或主机名..." 
+                               name="search" 
+                               value="{{ keyword|default:'' }}"
+                               autocomplete="off">
+                        <button class="btn btn-outline-primary" type="submit">
+                            <i class="fas fa-search me-1"></i>搜索
+                        </button>
+                    </div>
+                </form>
+            </div>
+            <div class="col-md-4 text-end">
+                <div class="btn-group" role="group">
+                    <a href="{% url 'linux_create' %}" class="btn btn-success btn-custom">
+                        <i class="fas fa-plus me-1"></i>添加服务器
+                    </a>
+                    <button type="button" class="btn btn-outline-secondary" onclick="refreshServerList()">
+                        <i class="fas fa-sync-alt me-1"></i>刷新
+                    </button>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <!-- 服务器列表表格 -->
+    <div class="table-responsive">
+        <div class="table-custom">
+            <table class="table table-hover mb-0">
+                <thead>
+                    <tr>
+                        <th class="text-center" style="width: 60px;">
+                            <i class="fas fa-hashtag"></i>
+                        </th>
+                        <th>
+                            <i class="fas fa-tag me-1"></i>服务器名称
+                        </th>
+                        <th>
+                            <i class="fas fa-desktop me-1"></i>主机名
+                        </th>
+                        <th>
+                            <i class="fas fa-globe me-1"></i>IP地址
+                        </th>
+                        <th class="text-center">
+                            <i class="fas fa-signal me-1"></i>状态
+                        </th>
+                        <th class="text-center" style="width: 400px;">
+                            <i class="fas fa-cogs me-1"></i>操作
+                        </th>
+                    </tr>
+                </thead>
+                <tbody>
+                    {% for server in pages %}
+                    <tr class="server-row" data-server-id="{{ server.id }}">
+                        <td class="text-center">
+                            <span class="badge bg-light text-dark">
+                                {{ forloop.counter|add:pagenum }}
+                            </span>
+                        </td>
+                        <td>
+                            <div class="d-flex align-items-center">
+                                <div class="server-avatar me-2">
+                                    <i class="fas fa-server text-primary"></i>
+                                </div>
+                                <div>
+                                    <strong>{{ server.linux_name }}</strong>
+                                    {% if server.description %}
+                                        <br><small class="text-muted">{{ server.description }}</small>
+                                    {% endif %}
+                                </div>
+                            </div>
+                        </td>
+                        <td>
+                            <code class="bg-light px-2 py-1 rounded">{{ server.linux_hostname }}</code>
+                        </td>
+                        <td>
+                            <div class="d-flex align-items-center">
+                                <span class="status-indicator server-status me-2" 
+                                      data-tooltip="检查服务器状态"></span>
+                                <code class="bg-light px-2 py-1 rounded">{{ server.linux_ip }}</code>
+                            </div>
+                        </td>
+                        <td class="text-center">
+                            <span class="badge bg-success">
+                                <i class="fas fa-check-circle me-1"></i>在线
+                            </span>
+                        </td>
+                        <td class="text-center">
+                            <div class="btn-group btn-group-sm" role="group">
+                                <a href="{% url 'linux_list_detail' server.id %}" 
+                                   class="btn btn-outline-info btn-action"
+                                   data-tooltip="查看详细信息">
+                                    <i class="fas fa-info-circle"></i>
+                                </a>
+                                <a href="{% url 'linux_connect' server.id %}" 
+                                   target="_blank"
+                                   class="btn btn-outline-success btn-action"
+                                   data-tooltip="WebSSH连接">
+                                    <i class="fas fa-terminal"></i>
+                                </a>
+                                <a href="{% url 'linux_list_app' server.id %}" 
+                                   class="btn btn-outline-primary btn-action"
+                                   data-tooltip="应用管理">
+                                    <i class="fas fa-apps"></i>
+                                </a>
+                                <a href="{% url 'linux_update' server.id %}" 
+                                   class="btn btn-outline-warning btn-action"
+                                   data-tooltip="编辑服务器">
+                                    <i class="fas fa-edit"></i>
+                                </a>
+                                <button type="button" 
+                                        class="btn btn-outline-danger btn-action"
+                                        onclick="confirmDelete('{{ server.id }}', '{{ server.linux_name }}')"
+                                        data-tooltip="删除服务器">
+                                    <i class="fas fa-trash"></i>
+                                </button>
+                            </div>
+                        </td>
+                    </tr>
+                    {% empty %}
+                    <tr>
+                        <td colspan="6" class="text-center py-5">
+                            <div class="empty-state">
+                                <i class="fas fa-server fa-3x text-muted mb-3"></i>
+                                <h5 class="text-muted">暂无服务器</h5>
+                                <p class="text-muted">点击上方"添加服务器"按钮开始添加您的第一台服务器</p>
+                                <a href="{% url 'linux_create' %}" class="btn btn-primary">
+                                    <i class="fas fa-plus me-1"></i>添加服务器
+                                </a>
+                            </div>
+                        </td>
+                    </tr>
+                    {% endfor %}
+                </tbody>
+            </table>
+        </div>
+    </div>
+
+    <!-- 分页导航 -->
+    {% if pages.has_other_pages %}
+    <div class="pagination-custom">
+        <nav aria-label="服务器列表分页">
+            <ul class="pagination pagination-sm mb-0">
+                {% if pages.has_previous %}
+                    <li class="page-item">
+                        <a class="page-link" href="?page={{ pages.previous_page_number }}{% if keyword %}&search={{ keyword }}{% endif %}">
+                            <i class="fas fa-chevron-left"></i>
+                        </a>
+                    </li>
+                {% endif %}
+                
+                {% for page_num in pages.paginator.page_range %}
+                    {% if page_num == pages.number %}
+                        <li class="page-item active">
+                            <span class="page-link current">{{ page_num }}</span>
+                        </li>
+                    {% else %}
+                        <li class="page-item">
+                            <a class="page-link" href="?page={{ page_num }}{% if keyword %}&search={{ keyword }}{% endif %}">
+                                {{ page_num }}
+                            </a>
+                        </li>
+                    {% endif %}
+                {% endfor %}
+                
+                {% if pages.has_next %}
+                    <li class="page-item">
+                        <a class="page-link" href="?page={{ pages.next_page_number }}{% if keyword %}&search={{ keyword }}{% endif %}">
+                            <i class="fas fa-chevron-right"></i>
+                        </a>
+                    </li>
+                {% endif %}
+            </ul>
+            
+            <div class="pagination-info ms-3">
+                <small class="text-muted">
+                    第 {{ pages.number }} 页，共 {{ pages.paginator.num_pages }} 页
+                </small>
+            </div>
+        </nav>
+    </div>
+    {% endif %}
 </div>
-</body>
+
+<!-- 删除确认模态框 -->
+<div class="modal fade" id="deleteModal" tabindex="-1" aria-labelledby="deleteModalLabel" aria-hidden="true">
+    <div class="modal-dialog">
+        <div class="modal-content">
+            <div class="modal-header">
+                <h5 class="modal-title" id="deleteModalLabel">
+                    <i class="fas fa-exclamation-triangle text-warning me-2"></i>
+                    确认删除
+                </h5>
+                <button type="button" class="btn-close" data-bs-dismiss="modal" aria-label="关闭"></button>
+            </div>
+            <div class="modal-body">
+                <p>您确定要删除服务器 <strong id="serverName"></strong> 吗？</p>
+                <p class="text-muted small">此操作不可撤销，请谨慎操作。</p>
+            </div>
+            <div class="modal-footer">
+                <button type="button" class="btn btn-secondary" data-bs-dismiss="modal">取消</button>
+                <a href="#" id="confirmDeleteBtn" class="btn btn-danger">
+                    <i class="fas fa-trash me-1"></i>确认删除
+                </a>
+            </div>
+        </div>
+    </div>
+</div>
+
+<style>
+.server-stats .badge {
+    padding: 0.5rem 1rem;
+}
+
+.server-avatar {
+    width: 40px;
+    height: 40px;
+    background: rgba(0, 123, 255, 0.1);
+    border-radius: 50%;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+}
+
+.server-row:hover {
+    background-color: rgba(0, 123, 255, 0.05);
+}
+
+.empty-state {
+    padding: 3rem 1rem;
+}
+
+.pagination-custom {
+    position: relative;
+    bottom: auto;
+    left: auto;
+    transform: none;
+    background: white;
+    padding: 1rem;
+    border-radius: var(--border-radius);
+    box-shadow: var(--box-shadow);
+    margin-top: 2rem;
+    display: flex;
+    justify-content: center;
+    align-items: center;
+}
+
+.pagination-custom .pagination {
+    margin: 0;
+}
+
+.pagination-custom .page-link {
+    border-radius: 50%;
+    width: 40px;
+    height: 40px;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    margin: 0 0.25rem;
+    border: 1px solid #dee2e6;
+    color: #6c757d;
+}
+
+.pagination-custom .page-item.active .page-link {
+    background-color: var(--danger-color);
+    border-color: var(--danger-color);
+    color: white;
+    transform: scale(1.1);
+}
+
+.btn-action {
+    width: 36px;
+    height: 36px;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    padding: 0;
+}
+
+@media (max-width: 768px) {
+    .search-container .row {
+        flex-direction: column;
+        gap: 1rem;
+    }
+    
+    .search-container .col-md-4 {
+        text-align: left !important;
+    }
+    
+    .btn-group {
+        width: 100%;
+    }
+    
+    .btn-group .btn {
+        flex: 1;
+    }
+    
+    .table-responsive {
+        font-size: 0.875rem;
+    }
+    
+    .btn-action {
+        width: 32px;
+        height: 32px;
+    }
+}
+</style>
+
+<script>
+// 删除确认功能
+function confirmDelete(serverId, serverName) {
+    document.getElementById('serverName').textContent = serverName;
+    document.getElementById('confirmDeleteBtn').href = `/linux/delete/${serverId}/`;
+    
+    const modal = new bootstrap.Modal(document.getElementById('deleteModal'));
+    modal.show();
+}
+
+// 刷新服务器列表
+function refreshServerList() {
+    location.reload();
+}
+
+// 搜索功能增强
+document.addEventListener('DOMContentLoaded', function() {
+    const searchForm = document.getElementById('search_form');
+    const searchInput = searchForm.querySelector('input[name="search"]');
+    
+    // 搜索建议功能（可以根据需要实现）
+    let searchTimeout;
+    searchInput.addEventListener('input', function() {
+        clearTimeout(searchTimeout);
+        const query = this.value.trim();
+        
+        if (query.length > 2) {
+            searchTimeout = setTimeout(() => {
+                // 这里可以添加实时搜索建议的AJAX请求
+                console.log('搜索建议:', query);
+            }, 300);
+        }
+    });
+    
+    // 快捷键支持
+    document.addEventListener('keydown', function(e) {
+        // Ctrl/Cmd + K 聚焦搜索框
+        if ((e.ctrlKey || e.metaKey) && e.key === 'k') {
+            e.preventDefault();
+            searchInput.focus();
+        }
+    });
+});
+</script>
 {% endblock content %}
-</html>
 
 

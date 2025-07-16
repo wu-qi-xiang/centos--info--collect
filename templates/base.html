@@ -1,74 +1,106 @@
-<!-- 载入静态文件,模板中要加上 {% load staticfiles %} 之后，才可使用 {% static 'path' %} 引用静态文件 -->
-{#setting.py文件中INSTALLED_APPS中包含下列语句django.contrib.staticfiles#}
 {% load staticfiles %}
 
 <!DOCTYPE html>
 <html lang="zh-cn">
-
 <head>
-    <!-- 网站采用的字符编码 -->
     <meta charset="UTF-8">
-    <!-- 预留网站标题的位置 -->
-    <title>{% block title %}首页{% endblock %}</title>
-    <!-- 引入bootstrap的css文件 -->
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <meta name="description" content="Linux服务器监控系统 - 简单高效的服务器管理平台">
+    <meta name="keywords" content="Linux,服务器监控,系统管理,运维">
+    <title>{% block title %}Linux服务器监控系统{% endblock %}</title>
+    
+    <!-- 预加载关键资源 -->
+    <link rel="preload" href="{% static 'bootstrap/css/bootstrap.css' %}" as="style">
+    <link rel="preload" href="{% static 'css/custom.css' %}" as="style">
+    
+    <!-- CSS文件 -->
     <link rel="stylesheet" href="{% static 'bootstrap/css/bootstrap.css' %}">
-    <!-- 引入monikai.css -->
     <link rel="stylesheet" href="{% static 'md_css/monokai.css' %}">
-    <!-- 增加样式 -->
+    <link rel="stylesheet" href="{% static 'css/custom.css' %}">
+    
+    <!-- Favicon -->
+    <link rel="icon" type="image/x-icon" href="{% static 'images/favicon.ico' %}">
+    
+    {% block extra_css %}{% endblock %}
 </head>
 
-<body>
-    <!-- 引入导航栏 -->
-    {% include 'header.html' %}
-    <div>
-    <!-- 预留具体页面的位置 -->
-        {% if request.session.is_login %}
-            {% block content %}{% endblock content %}
-        {% else %}
-             <h1 class="text-center text" style="margin: 300px auto;">你尚未登录，需要登录才能查看</h1>
-        {% endif %}
+<body class="fade-in">
+    <!-- 页面加载指示器 -->
+    <div id="page-loader" class="page-loader">
+        <div class="loader-spinner"></div>
     </div>
-    <!-- 引入注脚 -->
-<!--    {#    {% include 'footer.html' %}#}-->
-    <!-- bootstrap.js 依赖 jquery.js 和popper.js，因此在这里引入 -->
+    
+    <!-- 导航栏 -->
+    {% include 'header.html' %}
+    
+    <!-- 主要内容区域 -->
+    <main class="main-content">
+        <div class="container-fluid">
+            {% if request.session.is_login %}
+                {% block content %}{% endblock content %}
+            {% else %}
+                <div class="login-prompt">
+                    <div class="login-prompt-content">
+                        <h1 class="login-prompt-title">欢迎使用Linux服务器监控系统</h1>
+                        <p class="login-prompt-text">请先登录以查看系统内容</p>
+                        <a href="{% url 'userprofile:login' %}" class="btn btn-primary btn-lg">立即登录</a>
+                    </div>
+                </div>
+            {% endif %}
+        </div>
+    </main>
+    
+    <!-- 返回顶部按钮 -->
+    <button id="back-to-top" class="back-to-top" title="返回顶部">
+        <i class="fas fa-chevron-up"></i>
+    </button>
+    
+    <!-- JavaScript文件 -->
     <script src="{% static 'jquery/jquery-3.4.1.js' %}"></script>
-    <!-- 引入bootstrap的js文件 -->
+    <script src="{% static 'popper/popper-1.14.4.js' %}"></script>
     <script src="{% static 'bootstrap/js/bootstrap.js' %}"></script>
-    <!-- 引入layer的js文件 -->
-<!--    {#    <script src="{% static 'layer/layer.js' %}"></script>#}-->
+    <script src="{% static 'js/custom.js' %}"></script>
+    
+    <!-- Live2D角色 -->
+    <script src="{% static 'live2d/L2Dwidget.min.js' %}"></script>
+    <script>
+        // 优化Live2D初始化
+        if (window.innerWidth > 768) { // 只在桌面端显示
+            L2Dwidget.init({
+                model: {
+                    jsonPath: '{% static "live2d/tororo/assets/tororo.model.json" %}',
+                },
+                display: {
+                    superSample: 2,
+                    width: 150,
+                    height: 150,
+                    position: 'left',
+                    hOffset: 0,
+                    vOffset: 0,
+                },
+                mobile: {
+                    show: false, // 移动端不显示
+                },
+                react: {
+                    opacityDefault: 0.7,
+                    opacityOnHover: 0.2,
+                }
+            });
+        }
+    </script>
+    
     {% block script %}{% endblock script %}
-
-<!--    <link rel="stylesheet"-->
-<!--      href="https://use.fontawesome.com/releases/v5.8.1/css/all.css"-->
-<!--      integrity="sha384-50oBUHEmvpQ+1lW4y57PTFmhCaXp0ML5d60M1M7uH2+nqUivzIebhndOJK28anvf"-->
-<!--      crossorigin="anonymous"-->
-<!--    >-->
+    
+    <!-- 页面加载完成后隐藏加载器 -->
+    <script>
+        window.addEventListener('load', function() {
+            const loader = document.getElementById('page-loader');
+            if (loader) {
+                loader.style.opacity = '0';
+                setTimeout(() => loader.style.display = 'none', 300);
+            }
+        });
+    </script>
 </body>
-
-<script src="../static/live2d/L2Dwidget.min.js"></script>
-<script type="text/javascript">
-  L2Dwidget.init({
-    model: {
-      jsonPath: '../static/live2d/tororo/assets/tororo.model.json',
-    },
-    display: {
-      superSample: 2,
-      width: 150,
-      height: 150,
-      position: 'left',
-      hOffset: 0,
-      vOffset: 0,
-    },
-    mobile: {
-      show: true,
-      scale: 1,
-      motion: true,
-    },
-    react: {
-      opacityDefault: 0.7,
-      opacityOnHover: 0.2,
-    }
-  })
-</script>
 
 </html>

@@ -1,81 +1,75 @@
-<!DOCTYPE html>
-<html lang="zh-cn">
-<head>
-    <meta charset="UTF-8">
-    <title>首页的头部</title>
-  <style type="text/css">
-     a:hover{
-         color: red !important;
-     }
-
-     a{
-         font-weight: bold;
-         font-size: 18px;
-     }
-  </style>
-</head>
 {% load staticfiles %}
-<body>
-  <nav class="navbar navbar-expand-lg navbar-light" style="background-color: #c4e3f3">
-  <a class="navbar-brand" href="{% url 'index' %}">LINUX首页</a>
-  <button class="navbar-toggler" type="button" data-toggle="collapse" data-target="#navbarTogglerDemo02" aria-controls="navbarTogglerDemo02" aria-expanded="false" aria-label="Toggle navigation">
-    <span class="navbar-toggler-icon"></span>
-  </button>
-   &emsp;&emsp;
-  <div class="collapse navbar-collapse" id="navbarTogglerDemo02">
-    <ul class="navbar-nav mr-auto mt-2 mt-lg-0">
-      <li class="nav-item">
-        <a class="nav-link" href="{% url 'linux' %}">本地linux</a>
-      </li>
-        &emsp;&emsp;
-      <li class="nav-item">
-        <a class="nav-link" href="{% url 'linux_detail' %}">linux列表</a>
-      </li>
-        &emsp;&emsp;
-      <li class="nav-item">
-        <a class="nav-link" href="{% url 'password:password_manage' %}">密码管理</a>
-      </li>
-        &emsp;&emsp;
-      <li class="nav-item">
-        <a class="nav-link" href="{% url 'monitor:monitor_index' %}">监控设置</a>
-      </li>
-    </ul>
-{#    <form class="form-inline my-2 my-lg-0" id="search_data" method="get" action="/search/">#}
-{#      <input class="form-control mr-sm-2" type="search" placeholder="linux列表Search" name="search" value="{{ keyword }}">#}
-{#      <button class="btn btn-outline-success my-2 my-sm-0" type="submit" id="search">Search</button>#}
-{#    </form>#}
-    <ul  class="nav navbar-nav navbar-right">
-      {% if request.session.is_login %}
-        <li class="nav-item">
-          <a class="nav-link" href="#">当前在线：{{ request.session.user_name }}</a></li>
-          &emsp;&emsp;
-        <li class="nav-item">
-          <a class="nav-link" href="{% url 'userprofile:logout' %}">退出</a></li>
-      {% else %}
-        <li class="nav-item">
-          <a class="nav-link" href="{% url 'userprofile:login' %}">登录</a></li>
-          &emsp;&emsp;
-        <li class="nav-item">
-          <a class="nav-link" href="{% url 'userprofile:register' %}">注册</a></li>
-      {% endif %}
-    </ul>
-  </div>
-</nav>
 
-<!--<script>-->
-<!--  $('#search').click(function () {-->
-<!--            $.ajax({-->
-<!--              url:'#',-->
-<!--              type:'POST',-->
-<!--              data:$('#search_data').serialize(),-->
-<!--              async:true,-->
-<!--              success:function () {-->
-<!--                alert("123");-->
-<!--                console.log("123")-->
-<!--              }-->
-<!--            })-->
-<!--          }-->
-<!--  )-->
-<!--</script>-->
-</body>
-</html>
+<nav class="navbar navbar-expand-lg navbar-light navbar-custom sticky-top">
+    <div class="container-fluid">
+        <!-- 品牌Logo -->
+        <a class="navbar-brand" href="{% url 'index' %}">
+            <i class="fas fa-server me-2"></i>
+            Linux监控系统
+        </a>
+        
+        <!-- 移动端切换按钮 -->
+        <button class="navbar-toggler" type="button" data-bs-toggle="collapse" data-bs-target="#navbarNav" 
+                aria-controls="navbarNav" aria-expanded="false" aria-label="切换导航">
+            <span class="navbar-toggler-icon"></span>
+        </button>
+        
+        <!-- 导航菜单 -->
+        <div class="collapse navbar-collapse" id="navbarNav">
+            <ul class="navbar-nav me-auto">
+                <li class="nav-item">
+                    <a class="nav-link" href="{% url 'linux' %}" data-tooltip="查看本地Linux系统信息">
+                        <i class="fas fa-desktop me-1"></i>本地Linux
+                    </a>
+                </li>
+                <li class="nav-item">
+                    <a class="nav-link" href="{% url 'linux_detail' %}" data-tooltip="管理所有Linux服务器">
+                        <i class="fas fa-list me-1"></i>服务器列表
+                    </a>
+                </li>
+                <li class="nav-item">
+                    <a class="nav-link" href="{% url 'password:password_manage' %}" data-tooltip="管理服务器密码">
+                        <i class="fas fa-key me-1"></i>密码管理
+                    </a>
+                </li>
+                <li class="nav-item">
+                    <a class="nav-link" href="{% url 'monitor:monitor_index' %}" data-tooltip="配置监控告警">
+                        <i class="fas fa-chart-line me-1"></i>监控设置
+                    </a>
+                </li>
+            </ul>
+            
+            <!-- 用户信息和操作 -->
+            <ul class="navbar-nav">
+                {% if request.session.is_login %}
+                    <li class="nav-item dropdown">
+                        <a class="nav-link dropdown-toggle" href="#" id="userDropdown" role="button" 
+                           data-bs-toggle="dropdown" aria-expanded="false">
+                            <i class="fas fa-user-circle me-1"></i>
+                            {{ request.session.user_name }}
+                        </a>
+                        <ul class="dropdown-menu dropdown-menu-end">
+                            <li><a class="dropdown-item" href="#"><i class="fas fa-user me-2"></i>个人资料</a></li>
+                            <li><a class="dropdown-item" href="#"><i class="fas fa-cog me-2"></i>系统设置</a></li>
+                            <li><hr class="dropdown-divider"></li>
+                            <li><a class="dropdown-item" href="{% url 'userprofile:logout' %}">
+                                <i class="fas fa-sign-out-alt me-2"></i>退出登录
+                            </a></li>
+                        </ul>
+                    </li>
+                {% else %}
+                    <li class="nav-item">
+                        <a class="nav-link" href="{% url 'userprofile:login' %}">
+                            <i class="fas fa-sign-in-alt me-1"></i>登录
+                        </a>
+                    </li>
+                    <li class="nav-item">
+                        <a class="nav-link" href="{% url 'userprofile:register' %}">
+                            <i class="fas fa-user-plus me-1"></i>注册
+                        </a>
+                    </li>
+                {% endif %}
+            </ul>
+        </div>
+    </div>
+</nav>
