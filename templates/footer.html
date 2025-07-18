@@ -1,15 +1,208 @@
-<!DOCTYPE html>
-<html lang="zh-cn">
-<head>
-    <meta charset="UTF-8">
-    <title>首页的尾部</title>
-</head>
 {% load staticfiles %}
-<body>
-<footer class="bg-success navbar-fixed-bottom">
-    <div class="container">
-        <span style="text-align: center"><i><b>当你支撑不了自己的野心，就安静的学习吧</b></i></span>
+
+<footer class="footer-modern">
+    <div class="container-fluid">
+        <div class="row align-items-center">
+            <div class="col-md-6">
+                <div class="footer-brand">
+                    <i class="fas fa-server me-2"></i>
+                    <span class="brand-text">Linux监控系统</span>
+                </div>
+                <p class="footer-description">
+                    专业的服务器监控与管理平台
+                </p>
+            </div>
+            <div class="col-md-6 text-md-end">
+                <div class="footer-links">
+                    <a href="#" class="footer-link">
+                        <i class="fas fa-question-circle me-1"></i>帮助文档
+                    </a>
+                    <a href="#" class="footer-link">
+                        <i class="fas fa-shield-alt me-1"></i>隐私政策
+                    </a>
+                    <a href="https://github.com/helloworldff/centos--info--collect" 
+                       class="footer-link" target="_blank" rel="noopener">
+                        <i class="fab fa-github me-1"></i>开源项目
+                    </a>
+                </div>
+                <div class="footer-social">
+                    <a href="#" class="social-link" data-tooltip="关注我们">
+                        <i class="fab fa-twitter"></i>
+                    </a>
+                    <a href="#" class="social-link" data-tooltip="加入社区">
+                        <i class="fab fa-discord"></i>
+                    </a>
+                    <a href="#" class="social-link" data-tooltip="技术支持">
+                        <i class="fas fa-envelope"></i>
+                    </a>
+                </div>
+            </div>
+        </div>
+        <hr class="footer-divider">
+        <div class="row align-items-center">
+            <div class="col-md-6">
+                <div class="footer-quote">
+                    <i class="fas fa-quote-left me-2"></i>
+                    <em>当你支撑不了自己的野心，就安静的学习吧</em>
+                </div>
+            </div>
+            <div class="col-md-6 text-md-end">
+                <div class="footer-copyright">
+                    <span>&copy; 2024 Linux监控系统. </span>
+                    <span class="text-muted">版本 v2.0.0</span>
+                </div>
+                <div class="footer-status">
+                    <span class="status-indicator status-online"></span>
+                    <small class="text-muted">系统运行正常</small>
+                </div>
+            </div>
+        </div>
     </div>
 </footer>
-</body>
-</html>
+
+<style>
+.footer-modern {
+    background: linear-gradient(135deg, var(--bg-light) 0%, var(--bg-primary) 100%);
+    border-top: 1px solid var(--border-color);
+    padding: var(--spacing-xl) 0 var(--spacing-lg);
+    margin-top: var(--spacing-xl);
+    position: relative;
+    overflow: hidden;
+}
+
+.footer-modern::before {
+    content: '';
+    position: absolute;
+    top: 0;
+    left: 0;
+    right: 0;
+    height: 3px;
+    background: linear-gradient(90deg, var(--primary-color), var(--primary-light), var(--primary-color));
+}
+
+.footer-brand {
+    display: flex;
+    align-items: center;
+    margin-bottom: var(--spacing-sm);
+}
+
+.footer-brand i {
+    font-size: 1.5rem;
+    color: var(--primary-color);
+}
+
+.brand-text {
+    font-size: 1.25rem;
+    font-weight: 600;
+    color: var(--text-primary);
+}
+
+.footer-description {
+    color: var(--text-secondary);
+    margin-bottom: var(--spacing-md);
+    font-size: 0.9rem;
+}
+
+.footer-links {
+    display: flex;
+    flex-wrap: wrap;
+    gap: var(--spacing-lg);
+    margin-bottom: var(--spacing-md);
+}
+
+.footer-link {
+    color: var(--text-secondary);
+    text-decoration: none;
+    font-size: 0.9rem;
+    transition: var(--transition-fast);
+    display: flex;
+    align-items: center;
+}
+
+.footer-link:hover {
+    color: var(--primary-color);
+    transform: translateY(-1px);
+}
+
+.footer-social {
+    display: flex;
+    gap: var(--spacing-sm);
+}
+
+.social-link {
+    width: 36px;
+    height: 36px;
+    border-radius: 50%;
+    background: var(--bg-secondary);
+    color: var(--text-secondary);
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    text-decoration: none;
+    transition: var(--transition-fast);
+}
+
+.social-link:hover {
+    background: var(--primary-color);
+    color: white;
+    transform: translateY(-2px);
+    box-shadow: 0 4px 12px rgba(0, 123, 255, 0.3);
+}
+
+.footer-divider {
+    border-color: var(--border-color);
+    margin: var(--spacing-lg) 0;
+    opacity: 0.5;
+}
+
+.footer-quote {
+    color: var(--text-secondary);
+    font-style: italic;
+    display: flex;
+    align-items: center;
+}
+
+.footer-quote i {
+    color: var(--primary-color);
+    opacity: 0.7;
+}
+
+.footer-copyright {
+    color: var(--text-secondary);
+    font-size: 0.85rem;
+    margin-bottom: var(--spacing-xs);
+}
+
+.footer-status {
+    display: flex;
+    align-items: center;
+    gap: var(--spacing-xs);
+    font-size: 0.8rem;
+}
+
+@media (max-width: 768px) {
+    .footer-modern {
+        padding: var(--spacing-lg) 0;
+        text-align: center;
+    }
+    
+    .footer-links {
+        justify-content: center;
+        margin-bottom: var(--spacing-lg);
+    }
+    
+    .footer-social {
+        justify-content: center;
+        margin-bottom: var(--spacing-lg);
+    }
+    
+    .footer-quote {
+        justify-content: center;
+        margin-bottom: var(--spacing-md);
+    }
+    
+    .footer-status {
+        justify-content: center;
+    }
+}
+</style>

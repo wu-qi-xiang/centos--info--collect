@@ -1,87 +1,587 @@
-<!DOCTYPE html>
-<html lang="en">
-<head>
-    <meta charset="UTF-8">
-    <title>添加linux主机</title>
-</head>
 {% extends "base.html" %}
 {% load staticfiles %}
+
+{% block title %}添加服务器 - Linux监控系统{% endblock %}
+
 {% block content %}
-<body>
-<div class="container">
-        </br>
-            <!-- 提交文章的表单 -->
-        <form id="testform" method="post" action="." enctype="multipart/form-data">
-            <!-- Django中需要POST数据的地方都必须有csrf_token -->
-                {% csrf_token %}
-            <div class="row" style="margin-left: 300px">
-                <div class="form-group">
-                    <label><b>服务器名称</b></label>
-                    <input type="text" class="form-control" id="linux_name" name="linux_name" placeholder="请输入服务器名称">
+<div class="container-fluid px-4">
+    <!-- 页面标题 -->
+    <div class="row mb-4">
+        <div class="col-12">
+            <div class="d-flex align-items-center">
+                <a href="{% url 'linux_detail' %}" class="btn btn-outline-secondary me-3" data-tooltip="返回服务器列表">
+                    <i class="fas fa-arrow-left"></i>
+                </a>
+                <div>
+                    <h1 class="h3 mb-0">
+                        <i class="fas fa-plus-circle me-2 text-success"></i>添加服务器
+                    </h1>
+                    <p class="text-muted mb-0">配置新的Linux服务器连接信息</p>
                 </div>
-                <div class="col-1"></div>
-                <div class="form-group">
-                    <label><b>主机IP地址</b></label>
-                    <input type="text" class="form-control" id="linux_ip" name="linux_ip" placeholder="请输入服务器IP地址">
+            </div>
+        </div>
+    </div>
+
+    <div class="row justify-content-center">
+        <div class="col-lg-8 col-xl-6">
+            <!-- 表单卡片 -->
+            <div class="card-modern" data-validate>
+                <div class="form-header">
+                    <div class="d-flex align-items-center mb-3">
+                        <div class="form-icon me-3">
+                            <i class="fas fa-server fa-2x text-primary"></i>
+                        </div>
+                        <div>
+                            <h4 class="mb-1">服务器配置</h4>
+                            <p class="text-muted mb-0">请填写服务器的连接信息</p>
+                        </div>
+                    </div>
                 </div>
+
+                <form id="serverForm" method="post" action="." enctype="multipart/form-data" data-autosave>
+                    {% csrf_token %}
+
+                    <!-- 基本信息 -->
+                    <div class="form-section">
+                        <h5 class="form-section-title">
+                            <i class="fas fa-info-circle me-2"></i>基本信息
+                        </h5>
+
+                        <div class="row">
+                            <div class="col-md-6">
+                                <div class="form-group-custom">
+                                    <label class="form-label-custom" for="linux_name">
+                                        <i class="fas fa-tag me-2"></i>服务器名称 <span class="text-danger">*</span>
+                                    </label>
+                                    <input type="text" class="form-control-custom" id="linux_name" name="linux_name"
+                                        placeholder="例如: Web-Server-01" required data-tooltip="为服务器设置一个易识别的名称">
+                                    <small class="form-text text-muted">
+                                        <i class="fas fa-lightbulb me-1"></i>建议使用有意义的名称，如 Web-Server-01
+                                    </small>
+                                </div>
+                            </div>
+                            <div class="col-md-6">
+                                <div class="form-group-custom">
+                                    <label class="form-label-custom" for="linux_ip">
+                                        <i class="fas fa-globe me-2"></i>IP地址 <span class="text-danger">*</span>
+                                    </label>
+                                    <input type="text" class="form-control-custom" id="linux_ip" name="linux_ip"
+                                        placeholder="例如: 192.168.1.100" required
+                                        pattern="^(?:(?:25[0-5]|2[0-4][0-9]|[01]?[0-9][0-9]?)\.){3}(?:25[0-5]|2[0-4][0-9]|[01]?[0-9][0-9]?)$"
+                                        data-tooltip="服务器的IP地址">
+                                    <small class="form-text text-muted">
+                                        <i class="fas fa-info-circle me-1"></i>支持IPv4地址格式
+                                    </small>
+                                </div>
+                            </div>
+                        </div>
+
+                        <div class="row">
+                            <div class="col-md-6">
+                                <div class="form-group-custom">
+                                    <label class="form-label-custom" for="linux_hostname">
+                                        <i class="fas fa-desktop me-2"></i>主机名
+                                    </label>
+                                    <input type="text" class="form-control-custom" id="linux_hostname"
+                                        name="linux_hostname" placeholder="例如: web-server-01" data-tooltip="服务器的主机名">
+                                    <small class="form-text text-muted">
+                                        <i class="fas fa-info-circle me-1"></i>可选，用于标识服务器
+                                    </small>
+                                </div>
+                            </div>
+                            <div class="col-md-6">
+                                <div class="form-group-custom">
+                                    <label class="form-label-custom" for="linux_port">
+                                        <i class="fas fa-plug me-2"></i>SSH端口
+                                    </label>
+                                    <input type="number" class="form-control-custom" id="linux_port" name="linux_port"
+                                        placeholder="22" value="22" min="1" max="65535" data-tooltip="SSH服务端口，默认为22">
+                                    <small class="form-text text-muted">
+                                        <i class="fas fa-info-circle me-1"></i>默认SSH端口为22
+                                    </small>
+                                </div>
+                            </div>
+                        </div>
+                    </div>
+
+                    <!-- 认证信息 -->
+                    <div class="form-section">
+                        <h5 class="form-section-title">
+                            <i class="fas fa-key me-2"></i>认证信息
+                        </h5>
+
+                        <div class="row">
+                            <div class="col-md-6">
+                                <div class="form-group-custom">
+                                    <label class="form-label-custom" for="linux_user">
+                                        <i class="fas fa-user me-2"></i>用户名 <span class="text-danger">*</span>
+                                    </label>
+                                    <input type="text" class="form-control-custom" id="linux_user" name="linux_user"
+                                        placeholder="例如: root" required data-tooltip="SSH登录用户名">
+                                    <small class="form-text text-muted">
+                                        <i class="fas fa-shield-alt me-1"></i>建议使用具有管理权限的用户
+                                    </small>
+                                </div>
+                            </div>
+                            <div class="col-md-6">
+                                <div class="form-group-custom">
+                                    <label class="form-label-custom" for="linux_passwd">
+                                        <i class="fas fa-lock me-2"></i>密码 <span class="text-danger">*</span>
+                                    </label>
+                                    <div class="input-group">
+                                        <input type="password" class="form-control-custom" id="linux_passwd"
+                                            name="linux_passwd" placeholder="请输入密码" required data-tooltip="SSH登录密码">
+                                        <button class="btn btn-outline-secondary" type="button" id="togglePassword"
+                                            data-tooltip="显示/隐藏密码">
+                                            <i class="fas fa-eye"></i>
+                                        </button>
+                                    </div>
+                                    <small class="form-text text-muted">
+                                        <i class="fas fa-lock me-1"></i>密码将被安全存储
+                                    </small>
+                                </div>
+                            </div>
+                        </div>
+                    </div>
+
+                    <!-- 服务信息 -->
+                    <div class="form-section">
+                        <h5 class="form-section-title">
+                            <i class="fas fa-cogs me-2"></i>服务信息
+                        </h5>
+
+                        <div class="form-group-custom">
+                            <label class="form-label-custom" for="linux_app">
+                                <i class="fas fa-list me-2"></i>运行的服务
+                            </label>
+                            <textarea class="form-control-custom" id="linux_app" name="linux_app" rows="4"
+                                placeholder="例如: Nginx, MySQL, Redis, Docker..."
+                                data-tooltip="描述服务器上运行的主要服务"></textarea>
+                            <small class="form-text text-muted">
+                                <i class="fas fa-info-circle me-1"></i>可选，用于记录服务器用途和运行的服务
+                            </small>
+                        </div>
+                    </div>
+
+                    <!-- 连接测试结果 -->
+                    <div id="connectionResult" class="connection-result" style="display: none;">
+                        <div class="alert alert-info">
+                            <i class="fas fa-spinner fa-spin me-2"></i>正在测试连接...
+                        </div>
+                    </div>
+
+                    <!-- 操作按钮 -->
+                    <div class="form-actions">
+                        <div class="d-flex justify-content-between align-items-center">
+                            <div class="form-progress">
+                                <small class="text-muted">
+                                    <i class="fas fa-info-circle me-1"></i>
+                                    <span class="required-fields">必填字段</span> 已填写
+                                    <span id="progressCount">0/4</span>
+                                </small>
+                                <div class="progress-custom mt-2">
+                                    <div class="progress-bar-custom" id="formProgress" style="width: 0%"></div>
+                                </div>
+                            </div>
+                            <div class="action-buttons">
+                                <button type="button" class="btn btn-outline-primary btn-custom me-2"
+                                    id="testConnection">
+                                    <i class="fas fa-plug me-1"></i>测试连接
+                                </button>
+                                <button type="submit" class="btn btn-success btn-custom" id="submitBtn">
+                                    <i class="fas fa-check me-1"></i>添加服务器
+                                </button>
+                            </div>
+                        </div>
+                    </div>
+                </form>
             </div>
 
-            <div class="row" style="margin-left: 300px">
-                <div class="form-group">
-                    <label><b>主机的主机名</b></label>
-                    <input type="text" class="form-control" id="linux_hostname" name="linux_hostname" placeholder="请输入服务器的主机名">
-                </div>
-                <div class="col-1"></div>
-                <div class="form-group">
-                    <label><b>SSH端口</b></label>
-                    <input type="text" class="form-control" id="linux_port" name="linux_port" placeholder="请输入服务器SSH端口">
+            <!-- 帮助信息 -->
+            <div class="help-section mt-4" data-aos="fade-up" data-aos-delay="200">
+                <div class="card-custom">
+                    <div class="card-body">
+                        <h6 class="mb-3">
+                            <i class="fas fa-question-circle me-2 text-info"></i>配置帮助
+                        </h6>
+                        <div class="row">
+                            <div class="col-md-6">
+                                <div class="help-item">
+                                    <h6><i class="fas fa-network-wired me-2"></i>网络要求</h6>
+                                    <ul class="help-list">
+                                        <li>确保服务器SSH服务已启动</li>
+                                        <li>网络连接正常，端口可访问</li>
+                                        <li>防火墙允许SSH连接</li>
+                                    </ul>
+                                </div>
+                            </div>
+                            <div class="col-md-6">
+                                <div class="help-item">
+                                    <h6><i class="fas fa-shield-alt me-2"></i>安全建议</h6>
+                                    <ul class="help-list">
+                                        <li>使用强密码或密钥认证</li>
+                                        <li>定期更换登录凭据</li>
+                                        <li>限制用户权限范围</li>
+                                    </ul>
+                                </div>
+                            </div>
+                        </div>
+                    </div>
                 </div>
             </div>
+        </div>
+    </div>
+</div>
 
-            <div class="row" style="margin-left: 300px">
-                <div class="form-group">
-                    <label><b>用户名</b></label>
-                    <input type="text" class="form-control" id="linux_user" name="linux_user" placeholder="请输入服务器登录用户名">
-                </div>
-                <div class="col-1"></div>
-                <div class="form-group">
-                    <label><b>密码</b></label>
-                    <input type="password" class="form-control" id="linux_passwd" name="linux_passwd" placeholder="请输入服务器登录密码">
-                </div>
+<!-- 连接测试模态框 -->
+<div class="modal fade" id="testModal" tabindex="-1" aria-labelledby="testModalLabel" aria-hidden="true">
+    <div class="modal-dialog">
+        <div class="modal-content">
+            <div class="modal-header">
+                <h5 class="modal-title" id="testModalLabel">
+                    <i class="fas fa-plug me-2"></i>连接测试
+                </h5>
+                <button type="button" class="btn-close" data-bs-dismiss="modal" aria-label="关闭"></button>
             </div>
-
-            <div class="row" style="margin-left: 300px">
-                <div class="form-group input-xlarge">
-                    <label><b>主机上的服务</b></label>
-                    <textarea type="text" class="form-control" style="width: 260%;line-height: 4" id="linux_app" name="linux_app" placeholder="主机上的服务"></textarea>
+            <div class="modal-body">
+                <div id="testProgress" class="text-center">
+                    <div class="spinner-border text-primary mb-3" role="status">
+                        <span class="visually-hidden">测试中...</span>
+                    </div>
+                    <p>正在测试服务器连接...</p>
                 </div>
+                <div id="testResult" style="display: none;"></div>
             </div>
-
-            <div class="row" style="margin-left: 300px">
-            <!-- 测试按钮 -->
-            <button type="button" class="btn btn-success" style="width: 15%;font-size: 15px;font-weight: bold;" id="ajax_test">测试连接</button>
-            <!-- 提交按钮 -->
-<!--            <div class="col-3"></div>-->
-            <button type="submit" class="btn btn-success" style="width: 15%;margin-left: 230px;font-size: 15px;font-weight: bold;">完成</button>
+            <div class="modal-footer">
+                <button type="button" class="btn btn-secondary" data-bs-dismiss="modal">关闭</button>
             </div>
-        </form>
+        </div>
+    </div>
 </div>
 {% endblock content %}
+
 {% block script %}
 <script>
-    $('#ajax_test').click(function () {
-        $.ajax({
-            url:'/connect_test/',
-            type:'POST',
-            data:$('#testform').serialize(),
-            async:true,
-            success:function (data) {
-                alert(data);
-                console.info(data);
+    document.addEventListener('DOMContentLoaded', function () {
+        const form = document.getElementById('serverForm');
+        const testBtn = document.getElementById('testConnection');
+        const submitBtn = document.getElementById('submitBtn');
+        const togglePasswordBtn = document.getElementById('togglePassword');
+        const passwordInput = document.getElementById('linux_passwd');
+        const progressBar = document.getElementById('formProgress');
+        const progressCount = document.getElementById('progressCount');
+
+        // 必填字段
+        const requiredFields = ['linux_name', 'linux_ip', 'linux_user', 'linux_passwd'];
+
+        // 密码显示/隐藏切换
+        togglePasswordBtn.addEventListener('click', function () {
+            const type = passwordInput.getAttribute('type') === 'password' ? 'text' : 'password';
+            passwordInput.setAttribute('type', type);
+
+            const icon = this.querySelector('i');
+            icon.className = type === 'password' ? 'fas fa-eye' : 'fas fa-eye-slash';
+        });
+
+        // 表单进度更新
+        function updateFormProgress() {
+            let filledCount = 0;
+            requiredFields.forEach(fieldName => {
+                const field = document.getElementById(fieldName);
+                if (field && field.value.trim()) {
+                    filledCount++;
+                }
+            });
+
+            const percentage = (filledCount / requiredFields.length) * 100;
+            progressBar.style.width = percentage + '%';
+            progressCount.textContent = `${filledCount}/${requiredFields.length}`;
+
+            // 更新提交按钮状态
+            submitBtn.disabled = filledCount < requiredFields.length;
+        }
+
+        // 监听表单字段变化
+        requiredFields.forEach(fieldName => {
+            const field = document.getElementById(fieldName);
+            if (field) {
+                field.addEventListener('input', updateFormProgress);
+                field.addEventListener('blur', function () {
+                    validateField(this);
+                });
             }
+        });
+
+        // 字段验证
+        function validateField(field) {
+            const value = field.value.trim();
+            let isValid = true;
+            let message = '';
+
+            if (field.hasAttribute('required') && !value) {
+                isValid = false;
+                message = '此字段为必填项';
+            } else if (field.id === 'linux_ip' && value) {
+                const ipPattern = /^(?:(?:25[0-5]|2[0-4][0-9]|[01]?[0-9][0-9]?)\.){3}(?:25[0-5]|2[0-4][0-9]|[01]?[0-9][0-9]?)$/;
+                if (!ipPattern.test(value)) {
+                    isValid = false;
+                    message = '请输入有效的IP地址';
+                }
+            } else if (field.id === 'linux_port' && value) {
+                const port = parseInt(value);
+                if (port < 1 || port > 65535) {
+                    isValid = false;
+                    message = '端口号必须在1-65535之间';
+                }
+            }
+
+            if (isValid) {
+                field.classList.remove('is-invalid');
+                field.classList.add('is-valid');
+                clearFieldError(field);
+            } else {
+                field.classList.remove('is-valid');
+                field.classList.add('is-invalid');
+                showFieldError(field, message);
+            }
+
+            return isValid;
+        }
+
+        // 显示字段错误
+        function showFieldError(field, message) {
+            clearFieldError(field);
+            const errorElement = document.createElement('div');
+            errorElement.className = 'field-error';
+            errorElement.textContent = message;
+            field.parentNode.appendChild(errorElement);
+        }
+
+        // 清除字段错误
+        function clearFieldError(field) {
+            const errorElement = field.parentNode.querySelector('.field-error');
+            if (errorElement) {
+                errorElement.remove();
+            }
+        }
+
+        // 连接测试
+        testBtn.addEventListener('click', function () {
+            // 验证必要字段
+            const requiredForTest = ['linux_ip', 'linux_user', 'linux_passwd'];
+            let canTest = true;
+
+            requiredForTest.forEach(fieldName => {
+                const field = document.getElementById(fieldName);
+                if (!field.value.trim()) {
+                    canTest = false;
+                    field.focus();
+                    showNotification('请先填写必要的连接信息', 'warning');
+                    return;
+                }
+            });
+
+            if (!canTest) return;
+
+            // 显示测试模态框
+            const modal = new bootstrap.Modal(document.getElementById('testModal'));
+            modal.show();
+
+            // 执行连接测试
+            const formData = new FormData(form);
+
+            fetch('/connect_test/', {
+                method: 'POST',
+                body: formData,
+                headers: {
+                    'X-CSRFToken': document.querySelector('[name=csrfmiddlewaretoken]').value
+                }
             })
-    })
+                .then(response => response.text())
+                .then(data => {
+                    document.getElementById('testProgress').style.display = 'none';
+                    const resultDiv = document.getElementById('testResult');
+                    resultDiv.style.display = 'block';
+
+                    if (data.includes('成功') || data.includes('连接正常')) {
+                        resultDiv.innerHTML = `
+                    <div class="alert alert-success">
+                        <i class="fas fa-check-circle me-2"></i>
+                        <strong>连接成功！</strong><br>
+                        ${data}
+                    </div>
+                `;
+                        showNotification('服务器连接测试成功', 'success');
+                    } else {
+                        resultDiv.innerHTML = `
+                    <div class="alert alert-danger">
+                        <i class="fas fa-exclamation-circle me-2"></i>
+                        <strong>连接失败</strong><br>
+                        ${data}
+                    </div>
+                `;
+                        showNotification('服务器连接测试失败', 'error');
+                    }
+                })
+                .catch(error => {
+                    document.getElementById('testProgress').style.display = 'none';
+                    const resultDiv = document.getElementById('testResult');
+                    resultDiv.style.display = 'block';
+                    resultDiv.innerHTML = `
+                <div class="alert alert-danger">
+                    <i class="fas fa-exclamation-circle me-2"></i>
+                    <strong>测试出错</strong><br>
+                    网络错误或服务器无响应
+                </div>
+            `;
+                    showNotification('连接测试出错', 'error');
+                });
+        });
+
+        // 表单提交
+        form.addEventListener('submit', function (e) {
+            e.preventDefault();
+
+            // 验证所有必填字段
+            let isValid = true;
+            requiredFields.forEach(fieldName => {
+                const field = document.getElementById(fieldName);
+                if (!validateField(field)) {
+                    isValid = false;
+                }
+            });
+
+            if (!isValid) {
+                showNotification('请检查并填写所有必填字段', 'error');
+                return;
+            }
+
+            // 提交表单
+            const originalText = submitBtn.innerHTML;
+            submitBtn.innerHTML = '<span class="loading"></span> 添加中...';
+            submitBtn.disabled = true;
+
+            // 实际提交
+            this.submit();
+        });
+
+        // 初始化进度
+        updateFormProgress();
+
+        // IP地址格式化
+        document.getElementById('linux_ip').addEventListener('input', function () {
+            let value = this.value.replace(/[^\d.]/g, '');
+            this.value = value;
+        });
+
+        // 端口号限制
+        document.getElementById('linux_port').addEventListener('input', function () {
+            let value = parseInt(this.value);
+            if (value > 65535) this.value = 65535;
+            if (value < 1) this.value = 1;
+        });
+    });
 </script>
-{% endblock script %}
-</body>
-</html>
+// 通知函数
+function showNotification(message, type = 'info', duration = 5000) {
+if (window.app && window.app.notifications) {
+window.app.notifications.show(message, type, duration);
+} else {
+alert(message);
+}
+}
+</script>
+
+<style>
+    /* 现代化表单增强样式 */
+    .form-header {
+        padding: 2rem 2rem 1rem;
+        background: linear-gradient(135deg, var(--primary-50), var(--primary-100));
+        border-radius: var(--border-radius-lg) var(--border-radius-lg) 0 0;
+        border-bottom: 1px solid var(--border-color);
+    }
+
+    .form-icon {
+        width: 60px;
+        height: 60px;
+        background: linear-gradient(135deg, var(--primary-500), var(--primary-600));
+        border-radius: 50%;
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        color: white;
+        box-shadow: 0 4px 15px rgba(37, 99, 235, 0.3);
+    }
+
+    .help-section .card-custom {
+        background: var(--bg-light);
+        border: 1px solid var(--border-color);
+        border-radius: var(--border-radius-lg);
+        box-shadow: 0 2px 10px rgba(0, 0, 0, 0.05);
+    }
+
+    .help-item {
+        margin-bottom: 1.5rem;
+    }
+
+    .help-item h6 {
+        color: var(--text-primary);
+        font-weight: 600;
+        margin-bottom: 0.75rem;
+    }
+
+    .help-list {
+        list-style: none;
+        padding-left: 0;
+        margin-bottom: 0;
+    }
+
+    .help-list li {
+        padding: 0.25rem 0;
+        color: var(--text-secondary);
+        position: relative;
+        padding-left: 1.5rem;
+    }
+
+    .help-list li::before {
+        content: '✓';
+        position: absolute;
+        left: 0;
+        color: var(--success-color);
+        font-weight: bold;
+    }
+
+    .connection-result {
+        margin: 1.5rem 0;
+        padding: 1rem;
+        border-radius: var(--border-radius);
+        background: var(--bg-primary);
+        border-left: 4px solid var(--info-color);
+    }
+
+    /* 响应式优化 */
+    @media (max-width: 768px) {
+        .form-header {
+            padding: 1.5rem 1rem 1rem;
+            text-align: center;
+        }
+
+        .form-header .d-flex {
+            flex-direction: column;
+            align-items: center;
+        }
+
+        .form-icon {
+            margin-bottom: 1rem;
+        }
+
+        .action-buttons {
+            flex-direction: column;
+            gap: 0.75rem;
+        }
+
+        .action-buttons .btn {
+            width: 100%;
+        }
+    }
+</style>

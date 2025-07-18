@@ -1,65 +1,207 @@
+{% load staticfiles %}
+
 <!DOCTYPE html>
-<html lang="zh-CN">
+<html lang="zh-cn">
 <head>
     <meta charset="UTF-8">
-    <meta http-equiv="x-ua-compatible" content="IE=edge">
-    <meta name="viewport" content="width=device-width, initial-scale=1">
-    <link rel="stylesheet" href="https://stackpath.bootstrapcdn.com/bootstrap/3.4.1/css/bootstrap.min.css">
-    <link rel="stylesheet" href="http://libs.baidu.com/fontawesome/4.0.3/css/font-awesome.min.css">
-    <title>登录页面</title>
-    <style>
-        body {
-            background-color: #eee;
-        }
-    </style>
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <meta name="description" content="Linux服务器监控系统 - 用户登录">
+    <title>用户登录 - Linux监控系统</title>
+    
+    <!-- CSS文件 -->
+    <link rel="stylesheet" href="{% static 'bootstrap/css/bootstrap.css' %}">
+    <link rel="stylesheet" href="{% static 'css/custom.css' %}">
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.0.0/css/all.min.css">
+    
+    <!-- 预连接到外部资源 -->
+    <link rel="preconnect" href="https://cdnjs.cloudflare.com">
 </head>
-<body>
 
-<div class="container">
-    <div class="row">
-        <div class="col-md-4 col-md-offset-4" style="margin-top: 100px">
-            <h2 class="text-center">请登录</h2>
-            </br>
-            </br>
-            <form class="form-horizontal" action="/login/" method="post">
-                {% csrf_token %}
-                <div class="form-group">
-                    <label for="user" class="col-sm-2 control-label"></label>
-                    <div class="input-group col-sm-8">
-                         <span class="input-group-addon"><i class="fa fa-user fa-fw"></i></span>
-                        <input type="user" name="user" class="form-control" id="user" placeholder="User">
-                    </div>
-                </div>
-                <div class="form-group">
-                    <label for="inputPassword3" class="col-sm-2 control-label"></label>
-                    <div class="input-group col-sm-8">
-                        <span class="input-group-addon"><i class="fa fa-key fa-fw"></i></span>
-                        <input type="password" name="pwd" class="form-control" id="inputPassword3" placeholder="Password">
-                    </div>
-                </div>
-                <div class="form-group">
-                    <div class="input-group col-sm-offset-2 col-sm-8">
-                        <div class="checkbox">
-                            <label>
-                                <input type="checkbox"> 记住我
-                            </label>
-                        </div>
-                    </div>
-                </div>
-                <div class="form-group">
-                    <div class="input-group col-sm-offset-2 col-sm-8">
-                        <button type="submit" class="btn btn-primary btn-block">登录</button>
-                    </div>
-                </div>
-                <div class="form-group">
-                    <div class="input-group col-sm-offset-2 col-sm-8">
-                        <a href="{% url 'userprofile:register' %}">没有注册的话，点此注册</a>
-                    </div>
-                </div>
-                <p class="text-danger text-center">{{ error }}</p>
-            </form>
+<body class="auth-body">
+    <!-- 背景装饰 -->
+    <div class="auth-background">
+        <div class="auth-shapes">
+            <div class="shape shape-1"></div>
+            <div class="shape shape-2"></div>
+            <div class="shape shape-3"></div>
         </div>
     </div>
-</div>
+
+    <div class="auth-container">
+        <div class="auth-card">
+            <!-- 品牌标识 -->
+            <div class="auth-header">
+                <div class="auth-logo">
+                    <i class="fas fa-server"></i>
+                </div>
+                <h1 class="auth-title">Linux监控系统</h1>
+                <p class="auth-subtitle">欢迎回来，请登录您的账户</p>
+            </div>
+
+            <!-- 登录表单 -->
+            <form class="auth-form" action="/login/" method="post" id="loginForm">
+                {% csrf_token %}
+                
+                <div class="form-group-custom">
+                    <label class="form-label-custom" for="user">
+                        <i class="fas fa-user me-2"></i>用户名
+                    </label>
+                    <div class="input-group-auth">
+                        <span class="input-group-icon">
+                            <i class="fas fa-user"></i>
+                        </span>
+                        <input type="text" 
+                               class="form-control-auth" 
+                               id="user" 
+                               name="user" 
+                               placeholder="请输入用户名"
+                               required
+                               autocomplete="username">
+                    </div>
+                </div>
+
+                <div class="form-group-custom">
+                    <label class="form-label-custom" for="password">
+                        <i class="fas fa-lock me-2"></i>密码
+                    </label>
+                    <div class="input-group-auth">
+                        <span class="input-group-icon">
+                            <i class="fas fa-lock"></i>
+                        </span>
+                        <input type="password" 
+                               class="form-control-auth" 
+                               id="password" 
+                               name="pwd" 
+                               placeholder="请输入密码"
+                               required
+                               autocomplete="current-password">
+                        <button type="button" class="password-toggle" id="togglePassword">
+                            <i class="fas fa-eye"></i>
+                        </button>
+                    </div>
+                </div>
+
+                <div class="form-options">
+                    <div class="form-check-custom">
+                        <input type="checkbox" class="form-check-input" id="remember" name="remember">
+                        <label class="form-check-label" for="remember">
+                            记住我
+                        </label>
+                    </div>
+                    <a href="#" class="forgot-password">忘记密码？</a>
+                </div>
+
+                {% if error %}
+                <div class="alert alert-danger auth-error" role="alert">
+                    <i class="fas fa-exclamation-circle me-2"></i>
+                    {{ error }}
+                </div>
+                {% endif %}
+
+                <button type="submit" class="btn-auth btn-primary" id="loginBtn">
+                    <span class="btn-text">
+                        <i class="fas fa-sign-in-alt me-2"></i>登录
+                    </span>
+                    <span class="btn-loading" style="display: none;">
+                        <i class="fas fa-spinner fa-spin me-2"></i>登录中...
+                    </span>
+                </button>
+
+                <div class="auth-divider">
+                    <span>或</span>
+                </div>
+
+                <div class="auth-links">
+                    <p class="text-center">
+                        还没有账户？
+                        <a href="{% url 'userprofile:register' %}" class="auth-link">
+                            立即注册
+                        </a>
+                    </p>
+                </div>
+            </form>
+        </div>
+
+        <!-- 系统信息 -->
+        <div class="auth-info">
+            <div class="info-item">
+                <i class="fas fa-shield-alt"></i>
+                <span>安全可靠</span>
+            </div>
+            <div class="info-item">
+                <i class="fas fa-clock"></i>
+                <span>7×24小时监控</span>
+            </div>
+            <div class="info-item">
+                <i class="fas fa-chart-line"></i>
+                <span>实时数据分析</span>
+            </div>
+        </div>
+    </div>
+
+    <!-- JavaScript文件 -->
+    <script src="{% static 'jquery/jquery-3.4.1.js' %}"></script>
+    <script src="{% static 'bootstrap/js/bootstrap.js' %}"></script>
+    
+    <script>
+    document.addEventListener('DOMContentLoaded', function() {
+        const loginForm = document.getElementById('loginForm');
+        const loginBtn = document.getElementById('loginBtn');
+        const togglePassword = document.getElementById('togglePassword');
+        const passwordInput = document.getElementById('password');
+        
+        // 密码显示/隐藏切换
+        togglePassword.addEventListener('click', function() {
+            const type = passwordInput.getAttribute('type') === 'password' ? 'text' : 'password';
+            passwordInput.setAttribute('type', type);
+            
+            const icon = this.querySelector('i');
+            icon.className = type === 'password' ? 'fas fa-eye' : 'fas fa-eye-slash';
+        });
+        
+        // 表单提交处理
+        loginForm.addEventListener('submit', function(e) {
+            const btnText = loginBtn.querySelector('.btn-text');
+            const btnLoading = loginBtn.querySelector('.btn-loading');
+            
+            btnText.style.display = 'none';
+            btnLoading.style.display = 'inline-flex';
+            loginBtn.disabled = true;
+            
+            // 如果有验证错误，恢复按钮状态
+            setTimeout(() => {
+                if (document.querySelector('.auth-error')) {
+                    btnText.style.display = 'inline-flex';
+                    btnLoading.style.display = 'none';
+                    loginBtn.disabled = false;
+                }
+            }, 100);
+        });
+        
+        // 输入框焦点效果
+        const inputs = document.querySelectorAll('.form-control-auth');
+        inputs.forEach(input => {
+            input.addEventListener('focus', function() {
+                this.parentNode.classList.add('focused');
+            });
+            
+            input.addEventListener('blur', function() {
+                if (!this.value) {
+                    this.parentNode.classList.remove('focused');
+                }
+            });
+            
+            // 初始化已有值的输入框
+            if (input.value) {
+                input.parentNode.classList.add('focused');
+            }
+        });
+        
+        // 页面加载动画
+        setTimeout(() => {
+            document.querySelector('.auth-card').classList.add('show');
+        }, 100);
+    });
+    </script>
 </body>
 </html>

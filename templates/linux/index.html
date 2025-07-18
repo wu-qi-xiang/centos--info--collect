@@ -159,39 +159,173 @@
     <!-- 系统统计 -->
     <div class="row mt-5 mb-5">
         <div class="col-md-3 col-sm-6 mb-4">
-            <div class="card-custom text-center p-4">
-                <div class="stat-icon mb-2">
-                    <i class="fas fa-server fa-2x text-primary"></i>
+            <div class="card-custom text-center p-4 stat-card" data-aos="fade-up" data-aos-delay="100">
+                <div class="stat-icon mb-3">
+                    <div class="icon-wrapper">
+                        <i class="fas fa-server fa-2x text-primary"></i>
+                    </div>
                 </div>
-                <h4 class="stat-number" data-target="0">0</h4>
+                <h4 class="stat-number" data-target="{{ sum|default:0 }}">0</h4>
                 <p class="stat-label">服务器总数</p>
+                <div class="stat-progress">
+                    <div class="progress-custom">
+                        <div class="progress-bar-custom" style="width: 100%"></div>
+                    </div>
+                </div>
             </div>
         </div>
         <div class="col-md-3 col-sm-6 mb-4">
-            <div class="card-custom text-center p-4">
-                <div class="stat-icon mb-2">
-                    <i class="fas fa-check-circle fa-2x text-success"></i>
+            <div class="card-custom text-center p-4 stat-card" data-aos="fade-up" data-aos-delay="200">
+                <div class="stat-icon mb-3">
+                    <div class="icon-wrapper">
+                        <i class="fas fa-check-circle fa-2x text-success"></i>
+                    </div>
                 </div>
-                <h4 class="stat-number" data-target="0">0</h4>
+                <h4 class="stat-number" data-target="{{ sum|default:0 }}">0</h4>
                 <p class="stat-label">在线服务器</p>
+                <div class="stat-progress">
+                    <div class="progress-custom">
+                        <div class="progress-bar-custom bg-success" style="width: 95%"></div>
+                    </div>
+                </div>
             </div>
         </div>
         <div class="col-md-3 col-sm-6 mb-4">
-            <div class="card-custom text-center p-4">
-                <div class="stat-icon mb-2">
-                    <i class="fas fa-exclamation-triangle fa-2x text-warning"></i>
+            <div class="card-custom text-center p-4 stat-card" data-aos="fade-up" data-aos-delay="300">
+                <div class="stat-icon mb-3">
+                    <div class="icon-wrapper">
+                        <i class="fas fa-exclamation-triangle fa-2x text-warning"></i>
+                    </div>
                 </div>
-                <h4 class="stat-number" data-target="0">0</h4>
+                <h4 class="stat-number" data-target="2">0</h4>
                 <p class="stat-label">告警数量</p>
+                <div class="stat-progress">
+                    <div class="progress-custom">
+                        <div class="progress-bar-custom bg-warning" style="width: 15%"></div>
+                    </div>
+                </div>
             </div>
         </div>
         <div class="col-md-3 col-sm-6 mb-4">
-            <div class="card-custom text-center p-4">
-                <div class="stat-icon mb-2">
-                    <i class="fas fa-clock fa-2x text-info"></i>
+            <div class="card-custom text-center p-4 stat-card" data-aos="fade-up" data-aos-delay="400">
+                <div class="stat-icon mb-3">
+                    <div class="icon-wrapper">
+                        <i class="fas fa-clock fa-2x text-info"></i>
+                    </div>
                 </div>
-                <h4 class="stat-number" data-target="99">0</h4>
+                <h4 class="stat-number" data-target="99.8">0</h4>
                 <p class="stat-label">系统运行时间(%)</p>
+                <div class="stat-progress">
+                    <div class="progress-custom">
+                        <div class="progress-bar-custom bg-info" style="width: 99.8%"></div>
+                    </div>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <!-- 最近活动 -->
+    <div class="row mt-5">
+        <div class="col-lg-8">
+            <div class="card-custom">
+                <div class="card-header d-flex justify-content-between align-items-center">
+                    <h5 class="mb-0">
+                        <i class="fas fa-history me-2"></i>最近活动
+                    </h5>
+                    <small class="text-muted">实时更新</small>
+                </div>
+                <div class="card-body">
+                    <div class="activity-timeline">
+                        <div class="activity-item">
+                            <div class="activity-icon bg-success">
+                                <i class="fas fa-plus"></i>
+                            </div>
+                            <div class="activity-content">
+                                <div class="activity-title">新增服务器</div>
+                                <div class="activity-desc">添加了新的服务器 "Web-Server-01"</div>
+                                <div class="activity-time">2分钟前</div>
+                            </div>
+                        </div>
+                        <div class="activity-item">
+                            <div class="activity-icon bg-info">
+                                <i class="fas fa-sync"></i>
+                            </div>
+                            <div class="activity-content">
+                                <div class="activity-title">状态更新</div>
+                                <div class="activity-desc">服务器 "DB-Server-02" 状态检查完成</div>
+                                <div class="activity-time">5分钟前</div>
+                            </div>
+                        </div>
+                        <div class="activity-item">
+                            <div class="activity-icon bg-warning">
+                                <i class="fas fa-exclamation-triangle"></i>
+                            </div>
+                            <div class="activity-content">
+                                <div class="activity-title">告警通知</div>
+                                <div class="activity-desc">服务器 "Cache-Server-01" CPU使用率过高</div>
+                                <div class="activity-time">10分钟前</div>
+                            </div>
+                        </div>
+                    </div>
+                    <div class="text-center mt-3">
+                        <a href="#" class="btn btn-outline-primary btn-sm">查看全部活动</a>
+                    </div>
+                </div>
+            </div>
+        </div>
+        <div class="col-lg-4">
+            <div class="card-custom">
+                <div class="card-header">
+                    <h5 class="mb-0">
+                        <i class="fas fa-chart-pie me-2"></i>资源使用概览
+                    </h5>
+                </div>
+                <div class="card-body">
+                    <div class="resource-item mb-3">
+                        <div class="d-flex justify-content-between align-items-center mb-1">
+                            <span class="resource-label">
+                                <i class="fas fa-microchip text-danger me-2"></i>CPU平均使用率
+                            </span>
+                            <span class="resource-value">45%</span>
+                        </div>
+                        <div class="progress-custom">
+                            <div class="progress-bar-custom bg-danger" style="width: 45%"></div>
+                        </div>
+                    </div>
+                    <div class="resource-item mb-3">
+                        <div class="d-flex justify-content-between align-items-center mb-1">
+                            <span class="resource-label">
+                                <i class="fas fa-memory text-warning me-2"></i>内存平均使用率
+                            </span>
+                            <span class="resource-value">68%</span>
+                        </div>
+                        <div class="progress-custom">
+                            <div class="progress-bar-custom bg-warning" style="width: 68%"></div>
+                        </div>
+                    </div>
+                    <div class="resource-item mb-3">
+                        <div class="d-flex justify-content-between align-items-center mb-1">
+                            <span class="resource-label">
+                                <i class="fas fa-hdd text-info me-2"></i>磁盘平均使用率
+                            </span>
+                            <span class="resource-value">32%</span>
+                        </div>
+                        <div class="progress-custom">
+                            <div class="progress-bar-custom bg-info" style="width: 32%"></div>
+                        </div>
+                    </div>
+                    <div class="resource-item">
+                        <div class="d-flex justify-content-between align-items-center mb-1">
+                            <span class="resource-label">
+                                <i class="fas fa-network-wired text-success me-2"></i>网络流量
+                            </span>
+                            <span class="resource-value">1.2GB/s</span>
+                        </div>
+                        <div class="progress-custom">
+                            <div class="progress-bar-custom bg-success" style="width: 60%"></div>
+                        </div>
+                    </div>
+                </div>
             </div>
         </div>
     </div>
