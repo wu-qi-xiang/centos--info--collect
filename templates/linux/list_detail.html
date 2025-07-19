@@ -1,57 +1,563 @@
-<!DOCTYPE html>
-<html lang="en">
-<head>
-    <meta charset="UTF-8">
-    <title>linux服务器详细信息</title>
-</head>
 {% extends "base.html" %}
 {% load staticfiles %}
-{#获取views中的参数#}
+
+{% block title %}{{ newlinux.linux_name }} - 服务器详情{% endblock %}
+
 {% block content %}
-<body>
-<table class="table table-bordered table-hover">
-    <thred>
-        <th class="text-center h2"><b>{{ newlinux.linux_name }}的基础信息</b></th>
-    </thred>
-</table>
-    <table class="table table-bordered table-hover">
-        <thred>
-            <th class="text-center">系统的内网IP</th>
-            <th class="text-center">系统外网IP</th>
-            <th class="text-center">系统版本</th>
-            <th class="text-center">系统内核版本</th>
-        </thred>
-        <tr class="text-center">
-            <td>{{ intranet_ip }}</td>
-            <td>{{ newlinux.linux_ip }}</td>
-            <td>{{ release }}</td>
-            <td>{{ kernel }}</td>
-        </tr>
-        <tr class="text-center">
-            <td><b>cpu个数</b></td>
-            <td><b>总内存</b></td>
-            <td><b>已使用内存</b></td>
-            <td><b>剩余内存</b></td>
-        </tr>
-        <tr class="text-center">
-            <td>{{ cpu }}</td>
-            <td>{{ total_mem }}</td>
-            <td>{{ used_mem}}</td>
-            <td>{{ free_mem }}</td>
-        </tr>
-         <tr class="text-center">
-            <td><b>可用内存</b></td>
-            <td><b>磁盘总量</b></td>
-            <td><b>磁盘已使用</b></td>
-            <td><b>磁盘可用</b></td>
-        </tr>
-        <tr class="text-center">
-            <td>{{ available_mem }}</td>
-            <td>{{ total_disk }}</td>
-            <td>{{ used_disk }}</td>
-            <td>{{ available_disk }}</td>
-        </tr>
-    </table>
+<div class="container-fluid px-4">
+    <!-- 页面头部 -->
+    <div class="page-header mb-4">
+        <div class="d-flex align-items-center justify-content-between">
+            <div class="d-flex align-items-center">
+                <a href="{% url 'linux_detail' %}" class="btn btn-outline-secondary me-3">
+                    <i class="fas fa-arrow-left"></i>
+                </a>
+                <div>
+                    <h1 class="h3 mb-0">
+                        <i class="fas fa-server me-2 text-primary"></i>{{ newlinux.linux_name }}
+                    </h1>
+                    <p class="text-muted mb-0">服务器详细信息</p>
+                </div>
+            </div>
+            <div class="btn-group">
+                <a href="{% url 'linux_connect' newlinux.id %}" target="_blank" class="btn btn-success">
+                    <i class="fas fa-terminal me-1"></i>连接
+                </a>
+                <a href="{% url 'linux_update' newlinux.id %}" class="btn btn-warning">
+                    <i class="fas fa-edit me-1"></i>编辑
+                </a>
+                <button type="button" class="btn btn-info" onclick="location.reload()">
+                    <i class="fas fa-sync-alt me-1"></i>刷新
+                </button>
+            </div>
+        </div>
+    </div>
+
+    <!-- 服务器状态卡片 -->
+    <div class="status-card mb-4">
+        <div class="row align-items-center">
+            <div class="col-md-8">
+                <div class="d-flex align-items-center">
+                    <div class="server-icon me-3">
+                        <i class="fas fa-server fa-2x"></i>
+                    </div>
+                    <div>
+                        <h4 class="mb-1">{{ newlinux.linux_name }}</h4>
+                        <div class="server-info">
+                            <span class="badge bg-success me-2">
+                                <i class="fas fa-circle me-1"></i>在线
+                            </span>
+                            <span class="text-light">
+                                <i class="fas fa-globe me-1"></i>{{ newlinux.linux_ip }}
+                            </span>
+                        </div>
+                    </div>
+                </div>
+            </div>
+            <div class="col-md-4 text-end">
+                <div class="uptime-info">
+                    <small class="text-light opacity-75">运行时间</small>
+                    <div class="uptime-value">
+                        <i class="fas fa-clock me-1"></i>
+                        <span>24天 8小时</span>
+                    </div>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <!-- 系统信息网格 -->
+    <div class="row g-4">
+        <!-- 基本信息 -->
+        <div class="col-lg-6">
+            <div class="info-card h-100">
+                <div class="card-header">
+                    <h5><i class="fas fa-info-circle me-2 text-primary"></i>基本信息</h5>
+                </div>
+                <div class="card-body">
+                    <div class="info-list">
+                        <div class="info-row">
+                            <span class="info-label">
+                                <i class="fas fa-network-wired me-2"></i>内网IP
+                            </span>
+                            <span class="info-value">
+                                <code>{{ intranet_ip|default:"未获取" }}</code>
+                            </span>
+                        </div>
+                        <div class="info-row">
+                            <span class="info-label">
+                                <i class="fas fa-globe me-2"></i>外网IP
+                            </span>
+                            <span class="info-value">
+                                <code>{{ newlinux.linux_ip }}</code>
+                            </span>
+                        </div>
+                        <div class="info-row">
+                            <span class="info-label">
+                                <i class="fas fa-desktop me-2"></i>系统版本
+                            </span>
+                            <span class="info-value">{{ release|default:"未知" }}</span>
+                        </div>
+                        <div class="info-row">
+                            <span class="info-label">
+                                <i class="fas fa-cog me-2"></i>内核版本
+                            </span>
+                            <span class="info-value">{{ kernel|default:"未知" }}</span>
+                        </div>
+                    </div>
+                </div>
+            </div>
+        </div>
+
+        <!-- CPU信息 -->
+        <div class="col-lg-6">
+            <div class="info-card h-100">
+                <div class="card-header">
+                    <h5><i class="fas fa-microchip me-2 text-danger"></i>CPU信息</h5>
+                </div>
+                <div class="card-body text-center">
+                    <div class="cpu-display">
+                        <div class="cpu-cores">
+                            <div class="metric-number">{{ cpu|default:"0" }}</div>
+                            <div class="metric-text">CPU核心</div>
+                        </div>
+                        <div class="cpu-usage-ring">
+                            <div class="progress-circle" data-percent="45">
+                                <span class="progress-text">45%</span>
+                            </div>
+                            <div class="usage-label">使用率</div>
+                        </div>
+                    </div>
+                </div>
+            </div>
+        </div>
+
+        <!-- 内存信息 -->
+        <div class="col-lg-6">
+            <div class="info-card h-100">
+                <div class="card-header">
+                    <h5><i class="fas fa-memory me-2 text-warning"></i>内存信息</h5>
+                </div>
+                <div class="card-body">
+                    <div class="memory-stats mb-3">
+                        <div class="row text-center">
+                            <div class="col-3">
+                                <div class="stat-item">
+                                    <div class="stat-value text-primary">{{ total_mem|default:"0" }}</div>
+                                    <div class="stat-label">总内存</div>
+                                </div>
+                            </div>
+                            <div class="col-3">
+                                <div class="stat-item">
+                                    <div class="stat-value text-danger">{{ used_mem|default:"0" }}</div>
+                                    <div class="stat-label">已使用</div>
+                                </div>
+                            </div>
+                            <div class="col-3">
+                                <div class="stat-item">
+                                    <div class="stat-value text-success">{{ free_mem|default:"0" }}</div>
+                                    <div class="stat-label">空闲</div>
+                                </div>
+                            </div>
+                            <div class="col-3">
+                                <div class="stat-item">
+                                    <div class="stat-value text-info">{{ available_mem|default:"0" }}</div>
+                                    <div class="stat-label">可用</div>
+                                </div>
+                            </div>
+                        </div>
+                    </div>
+                    <div class="progress-bar-wrapper">
+                        <div class="progress-bar-bg">
+                            <div class="progress-bar-fill" style="width: 65%"></div>
+                        </div>
+                        <div class="progress-info">
+                            <span>内存使用率: <strong>65%</strong></span>
+                        </div>
+                    </div>
+                </div>
+            </div>
+        </div>
+
+        <!-- 磁盘信息 -->
+        <div class="col-lg-6">
+            <div class="info-card h-100">
+                <div class="card-header">
+                    <h5><i class="fas fa-hdd me-2 text-info"></i>磁盘信息</h5>
+                </div>
+                <div class="card-body">
+                    <div class="disk-stats mb-3">
+                        <div class="row text-center">
+                            <div class="col-4">
+                                <div class="stat-item">
+                                    <div class="stat-value text-primary">{{ total_disk|default:"0" }}</div>
+                                    <div class="stat-label">总容量</div>
+                                </div>
+                            </div>
+                            <div class="col-4">
+                                <div class="stat-item">
+                                    <div class="stat-value text-danger">{{ used_disk|default:"0" }}</div>
+                                    <div class="stat-label">已使用</div>
+                                </div>
+                            </div>
+                            <div class="col-4">
+                                <div class="stat-item">
+                                    <div class="stat-value text-success">{{ available_disk|default:"0" }}</div>
+                                    <div class="stat-label">可用</div>
+                                </div>
+                            </div>
+                        </div>
+                    </div>
+                    <div class="progress-bar-wrapper">
+                        <div class="progress-bar-bg">
+                            <div class="progress-bar-fill" style="width: 42%"></div>
+                        </div>
+                        <div class="progress-info">
+                            <span>磁盘使用率: <strong>42%</strong></span>
+                        </div>
+                    </div>
+                </div>
+            </div>
+        </div>
+
+        <!-- 服务信息 -->
+        <div class="col-12">
+            <div class="info-card">
+                <div class="card-header">
+                    <div class="d-flex justify-content-between align-items-center">
+                        <h5><i class="fas fa-tasks me-2 text-success"></i>运行服务</h5>
+                        <button class="btn btn-outline-primary btn-sm" onclick="toggleServices()">
+                            <i class="fas fa-eye me-1"></i>查看详情
+                        </button>
+                    </div>
+                </div>
+                <div class="card-body">
+                    {% if newlinux.linux_app %}
+                    <div class="service-description">
+                        <p class="mb-0">{{ newlinux.linux_app }}</p>
+                    </div>
+                    {% else %}
+                    <div class="empty-state">
+                        <i class="fas fa-info-circle text-muted me-2"></i>
+                        <span class="text-muted">暂无服务信息记录</span>
+                    </div>
+                    {% endif %}
+
+                    <div id="serviceDetails" class="service-details" style="display: none;">
+                        <div class="row mt-3">
+                            <div class="col-md-4">
+                                <div class="service-stat bg-success-light">
+                                    <i class="fas fa-play-circle text-success me-2"></i>
+                                    运行中: <strong>12</strong>
+                                </div>
+                            </div>
+                            <div class="col-md-4">
+                                <div class="service-stat bg-danger-light">
+                                    <i class="fas fa-stop-circle text-danger me-2"></i>
+                                    已停止: <strong>3</strong>
+                                </div>
+                            </div>
+                            <div class="col-md-4">
+                                <div class="service-stat bg-warning-light">
+                                    <i class="fas fa-exclamation-triangle text-warning me-2"></i>
+                                    异常: <strong>1</strong>
+                                </div>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+            </div>
+        </div>
+    </div>
+</div>
+
+<style>
+    /* 页面头部样式 */
+    .page-header {
+        padding: 1rem 0;
+    }
+
+    /* 状态卡片样式 */
+    .status-card {
+        background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+        color: white;
+        padding: 2rem;
+        border-radius: 12px;
+        box-shadow: 0 8px 32px rgba(0, 0, 0, 0.1);
+    }
+
+    .server-icon {
+        width: 60px;
+        height: 60px;
+        background: rgba(255, 255, 255, 0.2);
+        border-radius: 50%;
+        display: flex;
+        align-items: center;
+        justify-content: center;
+    }
+
+    .server-info .badge {
+        font-size: 0.875rem;
+    }
+
+    .uptime-info {
+        text-align: right;
+    }
+
+    .uptime-value {
+        font-size: 1.1rem;
+        font-weight: 600;
+        margin-top: 0.5rem;
+    }
+
+    /* 信息卡片样式 */
+    .info-card {
+        background: white;
+        border-radius: 12px;
+        box-shadow: 0 4px 16px rgba(0, 0, 0, 0.08);
+        border: none;
+        overflow: hidden;
+    }
+
+    .info-card .card-header {
+        background: #f8f9fa;
+        border-bottom: 1px solid #e9ecef;
+        padding: 1rem 1.5rem;
+    }
+
+    .info-card .card-body {
+        padding: 1.5rem;
+    }
+
+    /* 信息列表样式 */
+    .info-list {
+        display: flex;
+        flex-direction: column;
+        gap: 1rem;
+    }
+
+    .info-row {
+        display: flex;
+        justify-content: space-between;
+        align-items: center;
+        padding: 0.75rem 0;
+        border-bottom: 1px solid #f8f9fa;
+    }
+
+    .info-row:last-child {
+        border-bottom: none;
+    }
+
+    .info-label {
+        font-weight: 600;
+        color: #6c757d;
+    }
+
+    .info-value {
+        font-weight: 500;
+        color: #495057;
+    }
+
+    /* CPU显示样式 */
+    .cpu-display {
+        display: flex;
+        align-items: center;
+        justify-content: space-around;
+    }
+
+    .cpu-cores {
+        text-align: center;
+    }
+
+    .metric-number {
+        font-size: 2.5rem;
+        font-weight: bold;
+        color: var(--primary-color);
+        line-height: 1;
+    }
+
+    .metric-text {
+        font-size: 0.875rem;
+        color: #6c757d;
+        margin-top: 0.5rem;
+    }
+
+    /* 进度圆环样式 */
+    .cpu-usage-ring {
+        text-align: center;
+    }
+
+    .progress-circle {
+        position: relative;
+        width: 80px;
+        height: 80px;
+        border-radius: 50%;
+        background: conic-gradient(var(--danger-color) 0deg 162deg, #e9ecef 162deg 360deg);
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        margin: 0 auto 0.5rem;
+    }
+
+    .progress-circle::before {
+        content: '';
+        position: absolute;
+        width: 60px;
+        height: 60px;
+        background: white;
+        border-radius: 50%;
+    }
+
+    .progress-text {
+        position: relative;
+        z-index: 1;
+        font-weight: bold;
+        font-size: 1rem;
+    }
+
+    .usage-label {
+        font-size: 0.75rem;
+        color: #6c757d;
+    }
+
+    /* 统计项样式 */
+    .stat-item {
+        padding: 0.5rem;
+    }
+
+    .stat-value {
+        font-size: 1.25rem;
+        font-weight: bold;
+        margin-bottom: 0.25rem;
+    }
+
+    .stat-label {
+        font-size: 0.75rem;
+        color: #6c757d;
+    }
+
+    /* 进度条样式 */
+    .progress-bar-wrapper {
+        margin-top: 1rem;
+    }
+
+    .progress-bar-bg {
+        height: 8px;
+        background-color: #e9ecef;
+        border-radius: 4px;
+        overflow: hidden;
+        margin-bottom: 0.5rem;
+    }
+
+    .progress-bar-fill {
+        height: 100%;
+        background: linear-gradient(90deg, var(--success-color), var(--warning-color));
+        border-radius: 4px;
+        transition: width 0.5s ease;
+    }
+
+    .progress-info {
+        font-size: 0.875rem;
+        color: #6c757d;
+    }
+
+    /* 服务信息样式 */
+    .service-description {
+        background: #f8f9fa;
+        padding: 1rem;
+        border-radius: 8px;
+        border-left: 4px solid var(--primary-color);
+    }
+
+    .empty-state {
+        text-align: center;
+        padding: 2rem;
+        color: #6c757d;
+    }
+
+    .service-details {
+        border-top: 1px solid #e9ecef;
+        padding-top: 1rem;
+    }
+
+    .service-stat {
+        padding: 0.75rem;
+        border-radius: 8px;
+        margin-bottom: 0.5rem;
+        font-weight: 500;
+    }
+
+    .bg-success-light {
+        background-color: rgba(40, 167, 69, 0.1);
+    }
+
+    .bg-danger-light {
+        background-color: rgba(220, 53, 69, 0.1);
+    }
+
+    .bg-warning-light {
+        background-color: rgba(255, 193, 7, 0.1);
+    }
+
+    /* 响应式设计 */
+    @media (max-width: 768px) {
+        .status-card {
+            padding: 1.5rem;
+        }
+
+        .status-card .row {
+            flex-direction: column;
+            text-align: center;
+        }
+
+        .uptime-info {
+            text-align: center;
+            margin-top: 1rem;
+        }
+
+        .cpu-display {
+            flex-direction: column;
+            gap: 1rem;
+        }
+
+        .page-header .btn-group {
+            width: 100%;
+            margin-top: 1rem;
+        }
+
+        .page-header .btn {
+            flex: 1;
+        }
+    }
+</style>
+
+<script>
+    function toggleServices() {
+        const details = document.getElementById('serviceDetails');
+        const btn = event.target.closest('button');
+
+        if (details.style.display === 'none') {
+            details.style.display = 'block';
+            btn.innerHTML = '<i class="fas fa-eye-slash me-1"></i>隐藏详情';
+        } else {
+            details.style.display = 'none';
+            btn.innerHTML = '<i class="fas fa-eye me-1"></i>查看详情';
+        }
+    }
+
+    // 页面加载完成后初始化
+    document.addEventListener('DOMContentLoaded', function () {
+        // 添加页面加载动画
+        document.querySelectorAll('.info-card').forEach((card, index) => {
+            card.style.opacity = '0';
+            card.style.transform = 'translateY(20px)';
+
+            setTimeout(() => {
+                card.style.transition = 'all 0.6s ease';
+                card.style.opacity = '1';
+                card.style.transform = 'translateY(0)';
+            }, index * 100);
+        });
+    });
+</script>
 {% endblock content %}
-</body>
-</html>

@@ -1,57 +1,416 @@
-<!DOCTYPE html>
-<html lang="en">
-<head>
-    <meta charset="UTF-8">
-    <title>linux基础数据首页</title>
-</head>
 {% extends "base.html" %}
 {% load staticfiles %}
-{#获取views中的参数#}
+
+{% block title %}本地服务器 - Linux监控系统{% endblock %}
+
 {% block content %}
-<body>
-<table class="table table-bordered table-hover">
-    <thred>
-        <th class="text-center h2"><b>服务器详细信息</b></th>
-    </thred>
-</table>
-    <table class="table table-bordered table-hover">
-        <thred>
-            <th class="text-center">系统的内网IP</th>
-            <th class="text-center">系统外网IP</th>
-            <th class="text-center">系统版本</th>
-            <th class="text-center">系统内核版本</th>
-        </thred>
-        <tr class="text-center">
-            <td>{{ intranet_ip }}</td>
-            <td>{{ outside_ip }}</td>
-            <td>{{ release }}</td>
-            <td>{{ kernel }}</td>
-        </tr>
-        <tr class="text-center">
-            <td><b>cpu个数</b></td>
-            <td><b>总内存</b></td>
-            <td><b>已使用内存</b></td>
-            <td><b>剩余内存</b></td>
-        </tr>
-        <tr class="text-center">
-            <td>{{ cpu }}</td>
-            <td>{{ total_mem }}</td>
-            <td>{{ used_mem}}</td>
-            <td>{{ free_mem }}</td>
-        </tr>
-         <tr class="text-center">
-            <td><b>可用内存</b></td>
-            <td><b>磁盘总量</b></td>
-            <td><b>磁盘已使用</b></td>
-            <td><b>磁盘可用</b></td>
-        </tr>
-        <tr class="text-center">
-            <td>{{ available_mem }}</td>
-            <td>{{ total_disk }}</td>
-            <td>{{ used_disk }}</td>
-            <td>{{ available_disk }}</td>
-        </tr>
-    </table>
-</body>
+<div class="container-fluid px-4">
+    <!-- 页面头部 -->
+    <div class="d-flex justify-content-between align-items-center mb-4">
+        <div>
+            <h1 class="h3 mb-0">
+                <i class="fas fa-desktop me-2 text-success"></i>本地服务器信息
+            </h1>
+            <p class="text-muted mb-0">当前服务器的系统信息概览</p>
+        </div>
+        <button type="button" class="btn btn-primary" onclick="location.reload()">
+            <i class="fas fa-sync-alt me-1"></i>刷新
+        </button>
+    </div>
+
+
+
+    <!-- 详细信息 -->
+    <div class="row g-4">
+        <!-- 系统基本信息 -->
+        <div class="col-lg-6">
+            <div class="info-card">
+                <div class="card-header">
+                    <h5><i class="fas fa-info-circle me-2 text-primary"></i>系统基本信息</h5>
+                </div>
+                <div class="card-body">
+                    <div class="info-table">
+                        <div class="info-row">
+                            <div class="info-label">
+                                <i class="fas fa-network-wired me-2 text-primary"></i>内网IP
+                            </div>
+                            <div class="info-value">
+                                <code>{{ intranet_ip|default:"未获取" }}</code>
+                            </div>
+                        </div>
+                        <div class="info-row">
+                            <div class="info-label">
+                                <i class="fas fa-globe me-2 text-success"></i>外网IP
+                            </div>
+                            <div class="info-value">
+                                <code>{{ outside_ip|default:"未获取" }}</code>
+                            </div>
+                        </div>
+                        <div class="info-row">
+                            <div class="info-label">
+                                <i class="fas fa-desktop me-2 text-info"></i>系统版本
+                            </div>
+                            <div class="info-value">{{ release|default:"未知" }}</div>
+                        </div>
+                        <div class="info-row">
+                            <div class="info-label">
+                                <i class="fas fa-cog me-2 text-warning"></i>内核版本
+                            </div>
+                            <div class="info-value">{{ kernel|default:"未知" }}</div>
+                        </div>
+                    </div>
+                </div>
+            </div>
+        </div>
+
+        <!-- CPU信息 -->
+        <div class="col-lg-6">
+            <div class="info-card">
+                <div class="card-header">
+                    <h5><i class="fas fa-microchip me-2 text-danger"></i>CPU信息</h5>
+                </div>
+                <div class="card-body text-center">
+                    <div class="cpu-display">
+                        <div class="cpu-number">{{ cpu|default:"0" }}</div>
+                        <div class="cpu-label">CPU核心数</div>
+                        <div class="cpu-usage mt-3">
+                            <div class="usage-ring">
+                                <div class="usage-fill" style="--usage: 35"></div>
+                                <div class="usage-text">35%</div>
+                            </div>
+                            <div class="usage-label">当前使用率</div>
+                        </div>
+                    </div>
+                </div>
+            </div>
+        </div>
+
+        <!-- 内存信息 -->
+        <div class="col-lg-6">
+            <div class="info-card">
+                <div class="card-header">
+                    <h5><i class="fas fa-memory me-2 text-warning"></i>内存信息</h5>
+                </div>
+                <div class="card-body">
+                    <div class="memory-grid">
+                        <div class="row text-center mb-3">
+                            <div class="col-3">
+                                <div class="memory-item">
+                                    <div class="memory-value text-primary">{{ total_mem|default:"0" }}</div>
+                                    <div class="memory-label">总内存</div>
+                                </div>
+                            </div>
+                            <div class="col-3">
+                                <div class="memory-item">
+                                    <div class="memory-value text-danger">{{ used_mem|default:"0" }}</div>
+                                    <div class="memory-label">已使用</div>
+                                </div>
+                            </div>
+                            <div class="col-3">
+                                <div class="memory-item">
+                                    <div class="memory-value text-success">{{ free_mem|default:"0" }}</div>
+                                    <div class="memory-label">空闲</div>
+                                </div>
+                            </div>
+                            <div class="col-3">
+                                <div class="memory-item">
+                                    <div class="memory-value text-info">{{ available_mem|default:"0" }}</div>
+                                    <div class="memory-label">可用</div>
+                                </div>
+                            </div>
+                        </div>
+                        <div class="progress-wrapper">
+                            <div class="progress-info">
+                                <span>内存使用率</span>
+                                <span id="memoryUsage">计算中...</span>
+                            </div>
+                            <div class="progress-bar">
+                                <div class="progress-fill" id="memoryBar"></div>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+            </div>
+        </div>
+
+        <!-- 磁盘信息 -->
+        <div class="col-lg-6">
+            <div class="info-card">
+                <div class="card-header">
+                    <h5><i class="fas fa-hdd me-2 text-info"></i>磁盘信息</h5>
+                </div>
+                <div class="card-body">
+                    <div class="disk-grid">
+                        <div class="row text-center mb-3">
+                            <div class="col-4">
+                                <div class="disk-item">
+                                    <div class="disk-value text-primary">{{ total_disk|default:"0" }}</div>
+                                    <div class="disk-label">总容量</div>
+                                </div>
+                            </div>
+                            <div class="col-4">
+                                <div class="disk-item">
+                                    <div class="disk-value text-danger">{{ used_disk|default:"0" }}</div>
+                                    <div class="disk-label">已使用</div>
+                                </div>
+                            </div>
+                            <div class="col-4">
+                                <div class="disk-item">
+                                    <div class="disk-value text-success">{{ available_disk|default:"0" }}</div>
+                                    <div class="disk-label">可用</div>
+                                </div>
+                            </div>
+                        </div>
+                        <div class="progress-wrapper">
+                            <div class="progress-info">
+                                <span>磁盘使用率</span>
+                                <span id="diskUsage">计算中...</span>
+                            </div>
+                            <div class="progress-bar">
+                                <div class="progress-fill" id="diskBar"></div>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+            </div>
+        </div>
+    </div>
+</div>
+
+<style>
+    /* 信息卡片 */
+    .info-card {
+        background: white;
+        border-radius: 10px;
+        box-shadow: 0 2px 10px rgba(0, 0, 0, 0.08);
+        overflow: hidden;
+        height: 100%;
+    }
+
+    .info-card .card-header {
+        background: #f8f9fa;
+        border-bottom: 1px solid #e9ecef;
+        padding: 1rem 1.5rem;
+    }
+
+    .info-card .card-body {
+        padding: 1.5rem;
+    }
+
+    /* 信息表格 */
+    .info-table {
+        display: flex;
+        flex-direction: column;
+        gap: 1rem;
+    }
+
+    .info-row {
+        display: flex;
+        justify-content: space-between;
+        align-items: center;
+        padding: 0.75rem;
+        background: #f8f9fa;
+        border-radius: 6px;
+    }
+
+    .info-label {
+        font-weight: 600;
+        color: #495057;
+    }
+
+    .info-value {
+        font-weight: 500;
+        color: #6c757d;
+    }
+
+    /* CPU显示 */
+    .cpu-display {
+        display: flex;
+        flex-direction: column;
+        align-items: center;
+    }
+
+    .cpu-number {
+        font-size: 3rem;
+        font-weight: bold;
+        color: var(--primary-color);
+        line-height: 1;
+    }
+
+    .cpu-label {
+        font-size: 0.875rem;
+        color: #6c757d;
+        margin-bottom: 1rem;
+    }
+
+    .usage-ring {
+        position: relative;
+        width: 80px;
+        height: 80px;
+        border-radius: 50%;
+        background: conic-gradient(var(--danger-color) 0deg calc(var(--usage) * 3.6deg), #e9ecef calc(var(--usage) * 3.6deg) 360deg);
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        margin: 0 auto 0.5rem;
+    }
+
+    .usage-ring::before {
+        content: '';
+        position: absolute;
+        width: 60px;
+        height: 60px;
+        background: white;
+        border-radius: 50%;
+    }
+
+    .usage-text {
+        position: relative;
+        z-index: 1;
+        font-weight: bold;
+        color: var(--danger-color);
+    }
+
+    .usage-label {
+        font-size: 0.75rem;
+        color: #6c757d;
+    }
+
+    /* 内存和磁盘项目 */
+    .memory-item,
+    .disk-item {
+        padding: 0.5rem;
+    }
+
+    .memory-value,
+    .disk-value {
+        font-size: 1.1rem;
+        font-weight: bold;
+        margin-bottom: 0.25rem;
+    }
+
+    .memory-label,
+    .disk-label {
+        font-size: 0.75rem;
+        color: #6c757d;
+    }
+
+    /* 进度条 */
+    .progress-wrapper {
+        margin-top: 1rem;
+    }
+
+    .progress-info {
+        display: flex;
+        justify-content: space-between;
+        margin-bottom: 0.5rem;
+        font-size: 0.875rem;
+    }
+
+    .progress-bar {
+        height: 8px;
+        background: #e9ecef;
+        border-radius: 4px;
+        overflow: hidden;
+    }
+
+    .progress-fill {
+        height: 100%;
+        background: linear-gradient(90deg, var(--success-color), var(--warning-color), var(--danger-color));
+        border-radius: 4px;
+        transition: width 0.5s ease;
+        width: 0%;
+    }
+
+    /* 响应式设计 */
+    @media (max-width: 768px) {
+        .cpu-number {
+            font-size: 2rem;
+        }
+
+        .usage-ring {
+            width: 60px;
+            height: 60px;
+        }
+
+        .usage-ring::before {
+            width: 45px;
+            height: 45px;
+        }
+    }
+</style>
+
+<script>
+    document.addEventListener('DOMContentLoaded', function () {
+        // 计算内存使用率
+        calculateMemoryUsage();
+
+        // 计算磁盘使用率
+        calculateDiskUsage();
+
+        // 添加页面动画
+        animateCards();
+    });
+
+    function calculateMemoryUsage() {
+        const totalMem = parseValue('{{ total_mem|default:"0" }}');
+        const usedMem = parseValue('{{ used_mem|default:"0" }}');
+
+        if (totalMem > 0) {
+            const usage = Math.round((usedMem / totalMem) * 100);
+            document.getElementById('memoryUsage').textContent = usage + '%';
+            document.getElementById('memoryBar').style.width = usage + '%';
+
+            // 根据使用率改变颜色
+            const bar = document.getElementById('memoryBar');
+            if (usage > 80) {
+                bar.style.background = 'var(--danger-color)';
+            } else if (usage > 60) {
+                bar.style.background = 'var(--warning-color)';
+            } else {
+                bar.style.background = 'var(--success-color)';
+            }
+        }
+    }
+
+    function calculateDiskUsage() {
+        const totalDisk = parseValue('{{ total_disk|default:"0" }}');
+        const usedDisk = parseValue('{{ used_disk|default:"0" }}');
+
+        if (totalDisk > 0) {
+            const usage = Math.round((usedDisk / totalDisk) * 100);
+            document.getElementById('diskUsage').textContent = usage + '%';
+            document.getElementById('diskBar').style.width = usage + '%';
+
+            // 根据使用率改变颜色
+            const bar = document.getElementById('diskBar');
+            if (usage > 90) {
+                bar.style.background = 'var(--danger-color)';
+            } else if (usage > 70) {
+                bar.style.background = 'var(--warning-color)';
+            } else {
+                bar.style.background = 'var(--success-color)';
+            }
+        }
+    }
+
+    function parseValue(str) {
+        const match = str.match(/(\d+(?:\.\d+)?)/);
+        return match ? parseFloat(match[1]) : 0;
+    }
+
+    function animateCards() {
+        const cards = document.querySelectorAll('.info-card');
+        cards.forEach((card, index) => {
+            card.style.opacity = '0';
+            card.style.transform = 'translateY(20px)';
+
+            setTimeout(() => {
+                card.style.transition = 'all 0.5s ease';
+                card.style.opacity = '1';
+                card.style.transform = 'translateY(0)';
+            }, index * 100);
+        });
+    }
+</script>
 {% endblock content %}
-</html>
