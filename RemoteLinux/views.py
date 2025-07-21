@@ -127,17 +127,23 @@ def linux_list_detail(request, id):
         ssh.set_missing_host_key_policy(paramiko.AutoAddPolicy())
         ssh.connect(hostname=REMOTE_HOST, port=REMOTE_PORT, username=REMOTE_USER, password=REMOTE_PWD, compress=True, timeout=8)
         # 系统版本
-        re_cmd = 'cat /etc/redhat-release'
+        t_cmd = 'lsb_release -a|grep ID |awk \'{print $3}\''
+        v_cmd = 'lsb_release -a|grep Release |awk \'{print $2}\''
+        re_cmd = t_cmd + " " + v_cmd
+        print(re_cmd)
         ke_cmd = "uname -a |awk '{print $3}'"
         # 远端执行shell
-        stdin, stdout, stderr = ssh.exec_command(re_cmd)
+        stdin, stdout, stderr = ssh.exec_command(t_cmd)
         # decode()去掉多余的双引号和\n
-        release = stdout.read().decode()
+        type_os = stdout.read().decode()
+        stdin, stdout, stderr = ssh.exec_command(v_cmd)
+        version = stdout.read().decode()
+        release = type_os + " " + version
         # 远端执行shell
         stdin, stdout, stderr = ssh.exec_command(ke_cmd)
         # decode()去掉多余的双引号和\n
         kernel = stdout.read().decode()
-
+        
         # 系统cpu
         cmd_cpu = "lscpu |grep '^CPU(s)' |awk '{print $2}'"
         # 远端执行shell
@@ -175,9 +181,9 @@ def linux_list_detail(request, id):
         intranet_ip = stdout.read().decode()
 
         # 系统磁盘
-        total_cmd = "df -h |awk 'NR==2{print $2}'"
-        used_cmd = "df -h |awk 'NR==2{print $3}'"
-        available_cmd = "df -h |awk 'NR==2{print $4}'"
+        total_cmd = "df -h |grep -w '/'|awk '{print $2}'"
+        used_cmd = "df -h |grep -w '/'|awk '{print $3}'"
+        available_cmd = "df -h |grep -w '/'|awk '{print $4}'"
         # 远端执行shell
         stdin, stdout, stderr = ssh.exec_command(total_cmd)
         # decode()去掉多余的双引号和\n
@@ -241,50 +247,81 @@ def connect_test(request):
 def linux_connect(request, id):
     print(id)
     newlinux = NewLinux.objects.get(id=id)
+    
+    # 初始化变量
+    client = None
+    sshsession = None
+    
     if request.is_websocket():  # 判断websocket连接
         # 打开ssh通道，建立长连接
         # 如果是websocket连接就创建ssh连接，使用paramiko模块创建
         Host = newlinux.linux_ip
-        Prot = newlinux.linux_port
+        Port = newlinux.linux_port  # 修正变量名
         User = newlinux.linux_user
         Pwd = newlinux.linux_passwd
         client = paramiko.SSHClient()   # 创建连接对象
-        client.set_missing_host_key_policy(paramiko.AutoAddPolicy)  # 设置自动添加主机名及主机密钥到本地HostKeys对象，不依赖load_system_host_key的配置。即新建立ssh连接时不需要再输入yes或no进行确认
+        client.set_missing_host_key_policy(paramiko.AutoAddPolicy())  # 设置自动添加主机名及主机密钥到本地HostKeys对象，不依赖load_system_host_key的配置。即新建立ssh连接时不需要再输入yes或no进行确认
+        
         try:   # 用异常抛出判定主机是否成功连接ssh
-            client.connect(hostname=Host, port=Prot, username=User, password=Pwd)  # connect为连接函数
-            mess = f'主机{Prot}连接成功！'
-        except:
-            mess = f'主机{Prot}连接失败！'
+            client.connect(hostname=Host, port=Port, username=User, password=Pwd)  # connect为连接函数
+            mess = f'主机{Host}:{Port}连接成功！'
+            
+            sshsession = client.get_transport().open_session()  # 成功连接后获取ssh通道
+            sshsession.get_pty()  # 获取一个终端
+            sshsession.invoke_shell()  # 激活终端
+            
+            for i in range(2):   # 激活终端后会有信息流，一般都是lastlogin与bath目录，并获取其数据
+                messa = sshsession.recv(1024)
+                request.websocket.send(messa)
+                
+        except Exception as e:
+            mess = f'主机{Host}:{Port}连接失败！错误: {str(e)}'
+            request.websocket.send(mess.encode('utf-8'))
+            return
+            
+        # 从ssh通道获取输出data，并发送到前端
+        def srecv():
+            try:
+                while True:
+                    if sshsession:
+                        sshmess = sshsession.recv(2048)
+                        if not len(sshmess):
+                            # print('退出监听发送循环')
+                            return
+                        request.websocket.send(sshmess)
+                        # print('ssh回复的信息：' + sshmess.decode('utf-8'))
+            except Exception as e:
+                print(f'接收数据错误: {str(e)}')
+                return
 
-        sshsession = client.get_transport().open_session()  # 成功连接后获取ssh通道
-        sshsession.get_pty()  # 获取一个终端
-        sshsession.invoke_shell()  # 激活终端
-        for i in range(2):   # 激活终端后会有信息流，一般都是lastlogin与bath目录，并获取其数据
-            messa = sshsession.recv(1024)
-            request.websocket.send(messa)
+        # 获取前端的shelldata并且发送到服务器执行
+        try:
+            for shell in request.websocket:
+                if not sshsession:
+                    break
+                    
+                deshell = shell.decode('utf-8')
+                # print('deshell:'+deshell)
+                sshsession.send(deshell)
+                
+                # 启用线程监听ssh通道获取输出data，并发送到前端
+                sshrecvthre = Thread(target=srecv, args=())
+                sshrecvthre.daemon = True  # 设置为守护线程
+                sshrecvthre.start()
+                
+        except Exception as e:
+            print(f'处理shell命令错误: {str(e)}')
+        finally:
+            # 清理资源
+            if sshsession:
+                try:
+                    sshsession.close()
+                except:
+                    pass
+            if client:
+                try:
+                    client.close()
+                except:
+                    pass
     else:
         return render(request, 'linux/connect.html', {'newlinux': newlinux})
-
-    # 从ssh通道获取输出data，并发送到前端
-    def srecv():
-        while True:
-            sshmess = sshsession.recv(2048)
-            if not len(sshmess):
-                # print('退出监听发送循环')
-                return
-            request.websocket.send(sshmess)
-            # print('ssh回复的信息：' + sshmess.decode('utf-8'))
-
-    # 获取前端的shelldata并且发送到服务器执行
-    for shell in request.websocket:
-        deshell = shell.decode('utf-8')
-        # print('deshell:'+deshell)
-        # stdin,stdout,stderr = client.exec_command(deshell)
-        # request.websocket.send(stdout.read())
-        # request.websocket.send(stderr.read())
-        sshsession.send(deshell)
-        # while True:
-        #     sshmess = sshsession.recv(2048)
-        #     request.websocket.send(sshmess)
-        #     print('ssh回复的信息：'+sshmess.decode('utf-8'))
-        sshrecvthre = Thread(target=srecv, args=()).start()   # 启用线程监听ssh通道获取输出data，并发送到前端

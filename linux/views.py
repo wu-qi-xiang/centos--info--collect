@@ -77,9 +77,9 @@ def linux(request):
 	outside_ip = re.findall(r'\d+.\d+.\d+.\d+', text.decode('utf-8'))
 	intranet_ip = subprocess.getoutput(intranet_cmd)
 	# 系统磁盘
-	total_cmd = "df -h |awk 'NR==2{print $2}'"
-	used_cmd = "df -h |awk 'NR==2{print $3}'"
-	available_cmd = "df -h |awk 'NR==2{print $4}'"
+	total_cmd = "df -h |grep -w '/'|awk '{print $2}'"
+	used_cmd = "df -h |grep -w '/'|awk '{print $3}'"
+	available_cmd = "df -h |grep -w '/'|awk '{print $4}'"
 	total_disk = subprocess.getoutput(total_cmd)
 	used_disk = subprocess.getoutput(used_cmd)
 	available_disk = subprocess.getoutput(available_cmd)

@@ -107,9 +107,9 @@
                         <th class="text-center sortable" data-sortable="status">
                             <i class="fas fa-signal me-1"></i>状态
                         </th>
-                        <th class="text-center">
-                            <i class="fas fa-clock me-1"></i>最后检查
-                        </th>
+                        <!-- <th class="text-center">
+                            <i class="fas fa-clock me-1"></i>OS类型
+                        </th> -->
                         <th class="text-center" style="width: 280px;">
                             <i class="fas fa-cogs me-1"></i>操作
                         </th>
@@ -164,11 +164,11 @@
                                 <i class="fas fa-spinner fa-spin me-1"></i>检查中
                             </span>
                         </td>
-                        <td class="text-center">
+                        <!-- <td class="text-center">
                             <small class="text-muted last-check" id="lastCheck_{{ server.id }}">
                                 检查中...
                             </small>
-                        </td>
+                        </td> -->
                         <td class="text-center">
                             <div class="btn-group btn-group-sm" role="group">
                                 <a href="{% url 'linux_list_detail' server.id %}"
