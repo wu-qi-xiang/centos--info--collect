@@ -107,9 +107,6 @@
                         <th class="text-center sortable" data-sortable="status">
                             <i class="fas fa-signal me-1"></i>状态
                         </th>
-                        <!-- <th class="text-center">
-                            <i class="fas fa-clock me-1"></i>OS类型
-                        </th> -->
                         <th class="text-center" style="width: 280px;">
                             <i class="fas fa-cogs me-1"></i>操作
                         </th>
@@ -164,11 +161,6 @@
                                 <i class="fas fa-spinner fa-spin me-1"></i>检查中
                             </span>
                         </td>
-                        <!-- <td class="text-center">
-                            <small class="text-muted last-check" id="lastCheck_{{ server.id }}">
-                                检查中...
-                            </small>
-                        </td> -->
                         <td class="text-center">
                             <div class="btn-group btn-group-sm" role="group">
                                 <a href="{% url 'linux_list_detail' server.id %}"
@@ -178,10 +170,6 @@
                                 <a href="{% url 'linux_connect' server.id %}" target="_blank"
                                     class="btn btn-outline-success btn-action" data-tooltip="WebSSH连接">
                                     <i class="fas fa-terminal"></i>
-                                </a>
-                                <a href="{% url 'linux_list_app' server.id %}"
-                                    class="btn btn-outline-primary btn-action" data-tooltip="应用管理">
-                                    <i class="fas fa-apps"></i>
                                 </a>
                                 <a href="{% url 'linux_update' server.id %}" class="btn btn-outline-warning btn-action"
                                     data-tooltip="编辑服务器">
@@ -221,7 +209,7 @@
                     </tr>
                     {% empty %}
                     <tr>
-                        <td colspan="8" class="text-center py-5">
+                        <td colspan="7" class="text-center py-5">
                             <div class="empty-state">
                                 <div class="empty-icon mb-4">
                                     <i class="fas fa-server fa-4x text-muted"></i>
@@ -345,6 +333,8 @@
         </div>
     </div>
 </div>
+
+
 
 <style>
     .server-stats .badge {
@@ -514,7 +504,7 @@
 
         // 这里可以添加批量更新的AJAX请求
         selectedServers.forEach(serverId => {
-            checkServerStatus(serverId);
+            updateServerStatusDisplay(serverId, 'default');
         });
     }
 
@@ -663,46 +653,44 @@
         showNotification('批量导入功能开发中...', 'info');
     }
 
-    // 服务器状态检查
-    function checkServerStatus(serverId) {
+
+
+    // 更新服务器状态显示
+    function updateServerStatusDisplay(serverId, status) {
         const statusBadge = document.getElementById(`status_${serverId}`);
-        const lastCheckElement = document.getElementById(`lastCheck_${serverId}`);
         const statusIndicator = document.querySelector(`[data-server-id="${serverId}"]`);
 
         if (!statusBadge) return;
 
-        // 显示检查中状态
-        statusBadge.innerHTML = '<i class="fas fa-spinner fa-spin me-1"></i>检查中';
-        statusBadge.className = 'badge bg-secondary';
-
-        // 模拟状态检查（实际项目中应该是AJAX请求）
-        setTimeout(() => {
-            const isOnline = Math.random() > 0.3; // 70%概率在线
-            const now = new Date();
-
-            if (isOnline) {
-                statusBadge.innerHTML = '<i class="fas fa-check-circle me-1"></i>在线';
+        switch (status) {
+            case 'online':
+                statusBadge.innerHTML = '<i class="fas fa-check-circle me-1"></i>正常';
                 statusBadge.className = 'badge bg-success';
-                statusIndicator.className = 'status-indicator server-status me-2 status-online';
-            } else {
-                statusBadge.innerHTML = '<i class="fas fa-times-circle me-1"></i>离线';
+                if (statusIndicator) {
+                    statusIndicator.className = 'status-indicator server-status me-2 status-online';
+                }
+                break;
+            case 'offline':
+                statusBadge.innerHTML = '<i class="fas fa-times-circle me-1"></i>失败';
                 statusBadge.className = 'badge bg-danger';
-                statusIndicator.className = 'status-indicator server-status me-2 status-offline';
-            }
-
-            lastCheckElement.textContent = now.toLocaleTimeString();
-        }, 1000 + Math.random() * 2000); // 1-3秒随机延迟
-    }
-
-    // 初始化所有服务器状态检查
-    function initServerStatusCheck() {
-        const serverRows = document.querySelectorAll('.server-row[data-server-id]');
-        serverRows.forEach(row => {
-            const serverId = row.getAttribute('data-server-id');
-            setTimeout(() => {
-                checkServerStatus(serverId);
-            }, Math.random() * 3000); // 随机延迟避免同时请求
-        });
+                if (statusIndicator) {
+                    statusIndicator.className = 'status-indicator server-status me-2 status-offline';
+                }
+                break;
+            case 'error':
+                statusBadge.innerHTML = '<i class="fas fa-exclamation-triangle me-1"></i>错误';
+                statusBadge.className = 'badge bg-warning';
+                if (statusIndicator) {
+                    statusIndicator.className = 'status-indicator server-status me-2 status-warning';
+                }
+                break;
+            default:
+                statusBadge.innerHTML = '<i class="fas fa-spinner fa-spin me-1"></i>检查中';
+                statusBadge.className = 'badge bg-secondary';
+                if (statusIndicator) {
+                    statusIndicator.className = 'status-indicator server-status me-2';
+                }
+        }
     }
 
     // 搜索功能增强
@@ -712,9 +700,6 @@
 
         // 初始化批量操作
         initBatchOperations();
-
-        // 初始化服务器状态检查
-        initServerStatusCheck();
 
         // 搜索建议功能
         let searchTimeout;
@@ -745,22 +730,23 @@
             // Ctrl/Cmd + A 全选服务器
             if ((e.ctrlKey || e.metaKey) && e.key === 'a' && document.activeElement !== searchInput) {
                 e.preventDefault();
-                const selectAllCheckbox = document.getElementById('selectAll');
-                selectAllCheckbox.checked = !selectAllCheckbox.checked;
-                selectAllCheckbox.dispatchEvent(new Event('change'));
+                document.getElementById('selectAll').checked = true;
+                document.getElementById('selectAll').dispatchEvent(new Event('change'));
             }
 
-            // ESC 清空搜索
-            if (e.key === 'Escape' && document.activeElement === searchInput) {
-                searchInput.value = '';
-                showAllRows();
+            // Delete 键删除选中的服务器
+            if (e.key === 'Delete') {
+                const selectedServers = getSelectedServers();
+                if (selectedServers.length > 0) {
+                    batchDelete();
+                }
             }
         });
     });
 
-    // 实时搜索过滤
+    // 表格过滤功能
     function filterTable(query) {
-        const rows = document.querySelectorAll('.server-row');
+        const rows = document.querySelectorAll('.server-row[data-server-id]');
         const lowerQuery = query.toLowerCase();
         let visibleCount = 0;
 
@@ -769,117 +755,42 @@
             const hostname = row.querySelector('.server-hostname').textContent.toLowerCase();
             const ip = row.querySelector('.server-ip').textContent.toLowerCase();
 
-            const isMatch = serverName.includes(lowerQuery) ||
+            const isVisible = serverName.includes(lowerQuery) ||
                 hostname.includes(lowerQuery) ||
                 ip.includes(lowerQuery);
 
-            if (isMatch) {
-                row.style.display = '';
-                visibleCount++;
-            } else {
-                row.style.display = 'none';
-            }
+            row.style.display = isVisible ? '' : 'none';
+            if (isVisible) visibleCount++;
         });
 
-        // 更新搜索结果提示
-        updateSearchResults(visibleCount, query);
+        // 更新表格信息
+        updateTableInfo(visibleCount);
     }
 
     function showAllRows() {
-        const rows = document.querySelectorAll('.server-row');
+        const rows = document.querySelectorAll('.server-row[data-server-id]');
         rows.forEach(row => {
             row.style.display = '';
         });
-
-        // 清除搜索结果提示
-        const searchResults = document.getElementById('searchResults');
-        if (searchResults) {
-            searchResults.remove();
-        }
+        updateTableInfo(rows.length);
     }
 
-    function updateSearchResults(count, query) {
-        let searchResults = document.getElementById('searchResults');
-
-        if (!searchResults) {
-            searchResults = document.createElement('div');
-            searchResults.id = 'searchResults';
-            searchResults.className = 'alert alert-info mt-3';
-            document.querySelector('.search-container').appendChild(searchResults);
+    function updateTableInfo(count) {
+        const tableInfo = document.querySelector('.table-info small');
+        if (tableInfo) {
+            tableInfo.textContent = `显示 ${count} 条记录`;
         }
-
-        if (count === 0) {
-            searchResults.innerHTML = `
-            <i class="fas fa-search me-2"></i>
-            未找到包含 "<strong>${query}</strong>" 的服务器
-            <button type="button" class="btn-close float-end" onclick="clearSearch()"></button>
-        `;
-            searchResults.className = 'alert alert-warning mt-3';
-        } else {
-            searchResults.innerHTML = `
-            <i class="fas fa-filter me-2"></i>
-            找到 <strong>${count}</strong> 台包含 "<strong>${query}</strong>" 的服务器
-            <button type="button" class="btn-close float-end" onclick="clearSearch()"></button>
-        `;
-            searchResults.className = 'alert alert-info mt-3';
-        }
-    }
-
-    function clearSearch() {
-        const searchInput = document.querySelector('input[name="search"]');
-        searchInput.value = '';
-        showAllRows();
     }
 
     // 通知函数
     function showNotification(message, type = 'info', duration = 5000) {
-        if (window.showNotification) {
-            window.showNotification(message, type, duration);
+        if (window.app && window.app.notifications) {
+            window.app.notifications.show(message, type, duration);
         } else {
             // 降级方案
             alert(message);
         }
     }
-
-    // 定期刷新服务器状态
-    setInterval(() => {
-        if (!document.hidden) {
-            initServerStatusCheck();
-        }
-    }, 30000); // 每30秒刷新一次
-
-    // 页面可见性变化时刷新状态
-    document.addEventListener('visibilitychange', () => {
-        if (!document.hidden) {
-            setTimeout(initServerStatusCheck, 1000);
-        }
-    });
-
-<!-- // Ctrl/Cmd + A 全选服务器 -->
-if ((e.ctrlKey || e.metaKey) && e.key === 'a' && document.activeElement !== searchInput) {
-e.preventDefault();
-document.getElementById('selectAll').checked = true;
-document.getElementById('selectAll').dispatchEvent(new Event('change'));
-}
-
-// Delete 键删除选中的服务器
-if (e.key === 'Delete') {
-const selectedServers = getSelectedServers();
-if (selectedServers.length > 0) {
-batchDelete();
-}
-}
-});
-
-// 定期刷新服务器状态
-setInterval(() => {
-if (!document.hidden) {
-initServerStatusCheck();
-}
-}, 60000); // 每分钟刷新一次
-});
-
-
 </script>
 
 {% endblock content %}

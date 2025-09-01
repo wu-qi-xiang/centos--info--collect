@@ -47,7 +47,9 @@ def index(request):
 	plt.legend((u"当前用户密码列表", u"所有的密码列表", u"服务器列表"), loc='best', prop=myfont)
 	plt.savefig('./static/images/rectangle.jpg', bbox_inches='tight')
 	plt.close()
-	return render(request, "linux/index.html")
+
+	content = {'nwl' : nwl, 'pwd' : pwd}
+	return render(request, "linux/index.html", content)
 
 
 def linux(request):
@@ -130,7 +132,7 @@ def search(request):
 		for list in newlinux:
 			sum = sum + 1
 
-		content = {'newlinux': newlinux, 'keyword': keyword, "pages": pages, "pagenum": pagenum,"sum": sum}
+		content = {'newlinux': newlinux, 'keyword': keyword, "pages": pages, "pagenum": pagenum, "sum": sum}
 		return render(request, 'linux/detail.html', content)
 	else:
 		return HttpResponse("非GET请求")

@@ -5,53 +5,572 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <meta name="description" content="Linux服务器监控系统 - 用户登录">
-    <title>用户登录 - Linux监控系统</title>
+    <meta name="description" content="Linux服务器监控系统 - 专业的服务器管理平台">
+    <title>登录 - Linux监控系统</title>
     
     <!-- CSS文件 -->
     <link rel="stylesheet" href="{% static 'bootstrap/css/bootstrap.css' %}">
     <link rel="stylesheet" href="{% static 'css/custom.css' %}">
-    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.0.0/css/all.min.css">
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css">
     
-    <!-- 预连接到外部资源 -->
-    <link rel="preconnect" href="https://cdnjs.cloudflare.com">
+    <style>
+        :root {
+            --primary-gradient: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            --secondary-gradient: linear-gradient(135deg, #f093fb 0%, #f5576c 100%);
+            --success-gradient: linear-gradient(135deg, #4facfe 0%, #00f2fe 100%);
+            --glass-bg: rgba(255, 255, 255, 0.1);
+            --glass-border: rgba(255, 255, 255, 0.2);
+            --text-primary: #2d3748;
+            --text-secondary: #718096;
+            --shadow-lg: 0 20px 25px -5px rgba(0, 0, 0, 0.1), 0 10px 10px -5px rgba(0, 0, 0, 0.04);
+        }
+
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }
+
+        body {
+            font-family: 'Inter', -apple-system, BlinkMacSystemFont, sans-serif;
+            background: var(--primary-gradient);
+            min-height: 100vh;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            position: relative;
+            overflow: hidden;
+        }
+
+        /* 背景动画 */
+        .bg-animation {
+            position: absolute;
+            top: 0;
+            left: 0;
+            width: 100%;
+            height: 100%;
+            overflow: hidden;
+            z-index: 0;
+        }
+
+        .floating-shapes {
+            position: absolute;
+            width: 100%;
+            height: 100%;
+        }
+
+        .shape {
+            position: absolute;
+            background: rgba(255, 255, 255, 0.1);
+            border-radius: 50%;
+            animation: float 6s ease-in-out infinite;
+        }
+
+        .shape:nth-child(1) {
+            width: 80px;
+            height: 80px;
+            top: 20%;
+            left: 10%;
+            animation-delay: 0s;
+        }
+
+        .shape:nth-child(2) {
+            width: 120px;
+            height: 120px;
+            top: 60%;
+            right: 10%;
+            animation-delay: 2s;
+        }
+
+        .shape:nth-child(3) {
+            width: 60px;
+            height: 60px;
+            bottom: 20%;
+            left: 20%;
+            animation-delay: 4s;
+        }
+
+        @keyframes float {
+            0%, 100% { transform: translateY(0px) rotate(0deg); }
+            50% { transform: translateY(-20px) rotate(180deg); }
+        }
+
+        /* 主容器 */
+        .login-container {
+            position: relative;
+            z-index: 1;
+            width: 100%;
+            max-width: 1200px;
+            margin: 0 auto;
+            padding: 2rem;
+            display: grid;
+            grid-template-columns: 1fr 1fr;
+            gap: 4rem;
+            align-items: center;
+        }
+
+        /* 左侧信息区域 */
+        .info-section {
+            color: white;
+            padding: 2rem;
+        }
+
+        .brand-logo {
+            display: flex;
+            align-items: center;
+            margin-bottom: 2rem;
+        }
+
+        .logo-icon {
+            width: 60px;
+            height: 60px;
+            background: var(--glass-bg);
+            border: 1px solid var(--glass-border);
+            border-radius: 16px;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            margin-right: 1rem;
+            backdrop-filter: blur(10px);
+        }
+
+        .logo-icon i {
+            font-size: 24px;
+            color: white;
+        }
+
+        .brand-text h1 {
+            font-size: 2rem;
+            font-weight: 700;
+            margin-bottom: 0.5rem;
+        }
+
+        .brand-text p {
+            opacity: 0.8;
+            font-size: 1rem;
+        }
+
+        .features-list {
+            margin-top: 3rem;
+        }
+
+        .feature-item {
+            display: flex;
+            align-items: center;
+            margin-bottom: 1.5rem;
+            padding: 1rem;
+            background: var(--glass-bg);
+            border: 1px solid var(--glass-border);
+            border-radius: 12px;
+            backdrop-filter: blur(10px);
+            transition: all 0.3s ease;
+        }
+
+        .feature-item:hover {
+            transform: translateX(10px);
+            background: rgba(255, 255, 255, 0.15);
+        }
+
+        .feature-icon {
+            width: 48px;
+            height: 48px;
+            background: var(--success-gradient);
+            border-radius: 12px;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            margin-right: 1rem;
+        }
+
+        .feature-icon i {
+            font-size: 20px;
+            color: white;
+        }
+
+        .feature-content h3 {
+            font-size: 1.1rem;
+            font-weight: 600;
+            margin-bottom: 0.25rem;
+        }
+
+        .feature-content p {
+            opacity: 0.8;
+            font-size: 0.9rem;
+        }
+
+        /* 右侧登录表单 */
+        .login-form-section {
+            background: rgba(255, 255, 255, 0.95);
+            backdrop-filter: blur(20px);
+            border: 1px solid rgba(255, 255, 255, 0.3);
+            border-radius: 24px;
+            padding: 3rem;
+            box-shadow: var(--shadow-lg);
+        }
+
+        .form-header {
+            text-align: center;
+            margin-bottom: 2rem;
+        }
+
+        .form-header h2 {
+            font-size: 1.8rem;
+            font-weight: 700;
+            color: var(--text-primary);
+            margin-bottom: 0.5rem;
+        }
+
+        .form-header p {
+            color: var(--text-secondary);
+            font-size: 1rem;
+        }
+
+        .form-group {
+            margin-bottom: 1.5rem;
+        }
+
+        .form-label {
+            display: block;
+            font-weight: 600;
+            color: var(--text-primary);
+            margin-bottom: 0.5rem;
+            font-size: 0.9rem;
+        }
+
+        .input-wrapper {
+            position: relative;
+        }
+
+        .form-input {
+            width: 100%;
+            padding: 1rem 1rem 1rem 3rem;
+            border: 2px solid #e2e8f0;
+            border-radius: 12px;
+            font-size: 1rem;
+            transition: all 0.3s ease;
+            background: white;
+        }
+
+        .form-input:focus {
+            outline: none;
+            border-color: #667eea;
+            box-shadow: 0 0 0 3px rgba(102, 126, 234, 0.1);
+        }
+
+        .input-icon {
+            position: absolute;
+            left: 1rem;
+            top: 50%;
+            transform: translateY(-50%);
+            color: var(--text-secondary);
+            font-size: 1.1rem;
+        }
+
+        .password-toggle {
+            position: absolute;
+            right: 1rem;
+            top: 50%;
+            transform: translateY(-50%);
+            background: none;
+            border: none;
+            color: var(--text-secondary);
+            cursor: pointer;
+            font-size: 1.1rem;
+            transition: color 0.3s ease;
+        }
+
+        .password-toggle:hover {
+            color: var(--text-primary);
+        }
+
+        .form-options {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            margin-bottom: 2rem;
+        }
+
+        .checkbox-wrapper {
+            display: flex;
+            align-items: center;
+        }
+
+        .checkbox-wrapper input[type="checkbox"] {
+            margin-right: 0.5rem;
+            transform: scale(1.1);
+        }
+
+        .checkbox-wrapper label {
+            color: var(--text-secondary);
+            font-size: 0.9rem;
+        }
+
+        .forgot-link {
+            color: #667eea;
+            text-decoration: none;
+            font-size: 0.9rem;
+            font-weight: 500;
+            transition: color 0.3s ease;
+        }
+
+        .forgot-link:hover {
+            color: #5a67d8;
+        }
+
+        .login-btn {
+            width: 100%;
+            padding: 1rem;
+            background: var(--primary-gradient);
+            border: none;
+            border-radius: 12px;
+            color: white;
+            font-size: 1rem;
+            font-weight: 600;
+            cursor: pointer;
+            transition: all 0.3s ease;
+            position: relative;
+            overflow: hidden;
+        }
+
+        .login-btn:hover {
+            transform: translateY(-2px);
+            box-shadow: 0 10px 25px rgba(102, 126, 234, 0.3);
+        }
+
+        .login-btn:active {
+            transform: translateY(0);
+        }
+
+        .login-btn.loading {
+            pointer-events: none;
+        }
+
+        .btn-text, .btn-loading {
+            display: flex;
+            align-items: center;
+            justify-content: center;
+        }
+
+        .btn-loading {
+            display: none;
+        }
+
+        .login-btn.loading .btn-text {
+            display: none;
+        }
+
+        .login-btn.loading .btn-loading {
+            display: flex;
+        }
+
+        .spinner {
+            width: 20px;
+            height: 20px;
+            border: 2px solid rgba(255, 255, 255, 0.3);
+            border-top: 2px solid white;
+            border-radius: 50%;
+            animation: spin 1s linear infinite;
+            margin-right: 0.5rem;
+        }
+
+        @keyframes spin {
+            0% { transform: rotate(0deg); }
+            100% { transform: rotate(360deg); }
+        }
+
+        .divider {
+            text-align: center;
+            margin: 2rem 0;
+            position: relative;
+        }
+
+        .divider::before {
+            content: '';
+            position: absolute;
+            top: 50%;
+            left: 0;
+            right: 0;
+            height: 1px;
+            background: #e2e8f0;
+        }
+
+        .divider span {
+            background: white;
+            padding: 0 1rem;
+            color: var(--text-secondary);
+            font-size: 0.9rem;
+        }
+
+        .register-link {
+            text-align: center;
+            margin-top: 1.5rem;
+        }
+
+        .register-link p {
+            color: var(--text-secondary);
+            font-size: 0.9rem;
+        }
+
+        .register-link a {
+            color: #667eea;
+            text-decoration: none;
+            font-weight: 600;
+            transition: color 0.3s ease;
+        }
+
+        .register-link a:hover {
+            color: #5a67d8;
+        }
+
+        .error-message {
+            background: #fed7d7;
+            border: 1px solid #feb2b2;
+            color: #c53030;
+            padding: 1rem;
+            border-radius: 12px;
+            margin-bottom: 1.5rem;
+            display: flex;
+            align-items: center;
+        }
+
+        .error-message i {
+            margin-right: 0.5rem;
+        }
+
+        /* 响应式设计 */
+        @media (max-width: 768px) {
+            .login-container {
+                grid-template-columns: 1fr;
+                gap: 2rem;
+                padding: 1rem;
+            }
+
+            .info-section {
+                text-align: center;
+                padding: 1rem;
+            }
+
+            .features-list {
+                margin-top: 2rem;
+            }
+
+            .feature-item {
+                flex-direction: column;
+                text-align: center;
+                padding: 1.5rem;
+            }
+
+            .feature-icon {
+                margin-right: 0;
+                margin-bottom: 1rem;
+            }
+
+            .login-form-section {
+                padding: 2rem;
+            }
+
+            .brand-text h1 {
+                font-size: 1.5rem;
+            }
+        }
+
+        /* 加载动画 */
+        .fade-in {
+            animation: fadeIn 0.6s ease-out;
+        }
+
+        @keyframes fadeIn {
+            from {
+                opacity: 0;
+                transform: translateY(20px);
+            }
+            to {
+                opacity: 1;
+                transform: translateY(0);
+            }
+        }
+    </style>
 </head>
 
-<body class="auth-body">
-    <!-- 背景装饰 -->
-    <div class="auth-background">
-        <div class="auth-shapes">
-            <div class="shape shape-1"></div>
-            <div class="shape shape-2"></div>
-            <div class="shape shape-3"></div>
+<body>
+    <!-- 背景动画 -->
+    <div class="bg-animation">
+        <div class="floating-shapes">
+            <div class="shape"></div>
+            <div class="shape"></div>
+            <div class="shape"></div>
         </div>
     </div>
 
-    <div class="auth-container">
-        <div class="auth-card">
-            <!-- 品牌标识 -->
-            <div class="auth-header">
-                <div class="auth-logo">
+    <div class="login-container fade-in">
+        <!-- 左侧信息区域 -->
+        <div class="info-section">
+            <div class="brand-logo">
+                <div class="logo-icon">
                     <i class="fas fa-server"></i>
                 </div>
-                <h1 class="auth-title">Linux监控系统</h1>
-                <p class="auth-subtitle">欢迎回来，请登录您的账户</p>
+                <div class="brand-text">
+                    <h1>Linux监控系统</h1>
+                    <p>专业的服务器管理平台</p>
+                </div>
             </div>
 
-            <!-- 登录表单 -->
-            <form class="auth-form" action="/login/" method="post" id="loginForm">
+            <div class="features-list">
+                <div class="feature-item">
+                    <div class="feature-icon">
+                        <i class="fas fa-shield-alt"></i>
+                    </div>
+                    <div class="feature-content">
+                        <h3>安全可靠</h3>
+                        <p>企业级安全防护，保障数据安全</p>
+                    </div>
+                </div>
+
+                <div class="feature-item">
+                    <div class="feature-icon">
+                        <i class="fas fa-chart-line"></i>
+                    </div>
+                    <div class="feature-content">
+                        <h3>实时监控</h3>
+                        <p>7×24小时实时监控服务器状态</p>
+                    </div>
+                </div>
+
+                <div class="feature-item">
+                    <div class="feature-icon">
+                        <i class="fas fa-mobile-alt"></i>
+                    </div>
+                    <div class="feature-content">
+                        <h3>移动支持</h3>
+                        <p>随时随地管理您的服务器</p>
+                    </div>
+                </div>
+            </div>
+        </div>
+
+        <!-- 右侧登录表单 -->
+        <div class="login-form-section">
+            <div class="form-header">
+                <h2>欢迎回来</h2>
+                <p>请登录您的账户继续使用</p>
+            </div>
+
+            <form action="/login/" method="post" id="loginForm">
                 {% csrf_token %}
                 
-                <div class="form-group-custom">
-                    <label class="form-label-custom" for="user">
-                        <i class="fas fa-user me-2"></i>用户名
-                    </label>
-                    <div class="input-group-auth">
-                        <span class="input-group-icon">
-                            <i class="fas fa-user"></i>
-                        </span>
+                {% if error %}
+                <div class="error-message">
+                    <i class="fas fa-exclamation-circle"></i>
+                    {{ error }}
+                </div>
+                {% endif %}
+
+                <div class="form-group">
+                    <label class="form-label" for="user">用户名</label>
+                    <div class="input-wrapper">
+                        <i class="input-icon fas fa-user"></i>
                         <input type="text" 
-                               class="form-control-auth" 
+                               class="form-input" 
                                id="user" 
                                name="user" 
                                placeholder="请输入用户名"
@@ -60,16 +579,12 @@
                     </div>
                 </div>
 
-                <div class="form-group-custom">
-                    <label class="form-label-custom" for="password">
-                        <i class="fas fa-lock me-2"></i>密码
-                    </label>
-                    <div class="input-group-auth">
-                        <span class="input-group-icon">
-                            <i class="fas fa-lock"></i>
-                        </span>
+                <div class="form-group">
+                    <label class="form-label" for="password">密码</label>
+                    <div class="input-wrapper">
+                        <i class="input-icon fas fa-lock"></i>
                         <input type="password" 
-                               class="form-control-auth" 
+                               class="form-input" 
                                id="password" 
                                name="pwd" 
                                placeholder="请输入密码"
@@ -82,126 +597,90 @@
                 </div>
 
                 <div class="form-options">
-                    <div class="form-check-custom">
-                        <input type="checkbox" class="form-check-input" id="remember" name="remember">
-                        <label class="form-check-label" for="remember">
-                            记住我
-                        </label>
+                    <div class="checkbox-wrapper">
+                        <input type="checkbox" id="remember" name="remember">
+                        <label for="remember">记住我</label>
                     </div>
-                    <a href="#" class="forgot-password">忘记密码？</a>
+                    <a href="#" class="forgot-link">忘记密码？</a>
                 </div>
 
-                {% if error %}
-                <div class="alert alert-danger auth-error" role="alert">
-                    <i class="fas fa-exclamation-circle me-2"></i>
-                    {{ error }}
-                </div>
-                {% endif %}
-
-                <button type="submit" class="btn-auth btn-primary" id="loginBtn">
+                <button type="submit" class="login-btn" id="loginBtn">
                     <span class="btn-text">
-                        <i class="fas fa-sign-in-alt me-2"></i>登录
+                        <i class="fas fa-sign-in-alt" style="margin-right: 0.5rem;"></i>
+                        登录
                     </span>
-                    <span class="btn-loading" style="display: none;">
-                        <i class="fas fa-spinner fa-spin me-2"></i>登录中...
+                    <span class="btn-loading">
+                        <div class="spinner"></div>
+                        登录中...
                     </span>
                 </button>
 
-                <div class="auth-divider">
+                <div class="divider">
                     <span>或</span>
                 </div>
 
-                <div class="auth-links">
-                    <p class="text-center">
-                        还没有账户？
-                        <a href="{% url 'userprofile:register' %}" class="auth-link">
-                            立即注册
-                        </a>
-                    </p>
+                <div class="register-link">
+                    <p>还没有账户？ <a href="{% url 'userprofile:register' %}">立即注册</a></p>
                 </div>
             </form>
         </div>
-
-        <!-- 系统信息 -->
-        <div class="auth-info">
-            <div class="info-item">
-                <i class="fas fa-shield-alt"></i>
-                <span>安全可靠</span>
-            </div>
-            <div class="info-item">
-                <i class="fas fa-clock"></i>
-                <span>7×24小时监控</span>
-            </div>
-            <div class="info-item">
-                <i class="fas fa-chart-line"></i>
-                <span>实时数据分析</span>
-            </div>
-        </div>
     </div>
 
-    <!-- JavaScript文件 -->
+    <!-- JavaScript -->
     <script src="{% static 'jquery/jquery-3.4.1.js' %}"></script>
     <script src="{% static 'bootstrap/js/bootstrap.js' %}"></script>
     
     <script>
-    document.addEventListener('DOMContentLoaded', function() {
-        const loginForm = document.getElementById('loginForm');
-        const loginBtn = document.getElementById('loginBtn');
-        const togglePassword = document.getElementById('togglePassword');
-        const passwordInput = document.getElementById('password');
-        
-        // 密码显示/隐藏切换
-        togglePassword.addEventListener('click', function() {
-            const type = passwordInput.getAttribute('type') === 'password' ? 'text' : 'password';
-            passwordInput.setAttribute('type', type);
-            
-            const icon = this.querySelector('i');
-            icon.className = type === 'password' ? 'fas fa-eye' : 'fas fa-eye-slash';
-        });
-        
-        // 表单提交处理
-        loginForm.addEventListener('submit', function(e) {
-            const btnText = loginBtn.querySelector('.btn-text');
-            const btnLoading = loginBtn.querySelector('.btn-loading');
-            
-            btnText.style.display = 'none';
-            btnLoading.style.display = 'inline-flex';
-            loginBtn.disabled = true;
-            
-            // 如果有验证错误，恢复按钮状态
-            setTimeout(() => {
-                if (document.querySelector('.auth-error')) {
-                    btnText.style.display = 'inline-flex';
-                    btnLoading.style.display = 'none';
-                    loginBtn.disabled = false;
-                }
-            }, 100);
-        });
-        
-        // 输入框焦点效果
-        const inputs = document.querySelectorAll('.form-control-auth');
-        inputs.forEach(input => {
-            input.addEventListener('focus', function() {
-                this.parentNode.classList.add('focused');
+        document.addEventListener('DOMContentLoaded', function() {
+            const loginForm = document.getElementById('loginForm');
+            const loginBtn = document.getElementById('loginBtn');
+            const togglePassword = document.getElementById('togglePassword');
+            const passwordInput = document.getElementById('password');
+            const userInput = document.getElementById('user');
+
+            // 密码显示/隐藏切换
+            togglePassword.addEventListener('click', function() {
+                const type = passwordInput.getAttribute('type') === 'password' ? 'text' : 'password';
+                passwordInput.setAttribute('type', type);
+                
+                const icon = this.querySelector('i');
+                icon.className = type === 'password' ? 'fas fa-eye' : 'fas fa-eye-slash';
             });
-            
-            input.addEventListener('blur', function() {
-                if (!this.value) {
-                    this.parentNode.classList.remove('focused');
+
+            // 表单提交处理
+            loginForm.addEventListener('submit', function(e) {
+                loginBtn.classList.add('loading');
+                
+                // 如果有验证错误，恢复按钮状态
+                setTimeout(() => {
+                    if (document.querySelector('.error-message')) {
+                        loginBtn.classList.remove('loading');
+                    }
+                }, 100);
+            });
+
+            // 输入框焦点效果
+            const inputs = document.querySelectorAll('.form-input');
+            inputs.forEach(input => {
+                input.addEventListener('focus', function() {
+                    this.style.borderColor = '#667eea';
+                    this.style.boxShadow = '0 0 0 3px rgba(102, 126, 234, 0.1)';
+                });
+                
+                input.addEventListener('blur', function() {
+                    this.style.borderColor = '#e2e8f0';
+                    this.style.boxShadow = 'none';
+                });
+            });
+
+            // 键盘快捷键
+            document.addEventListener('keydown', function(e) {
+                if (e.key === 'Enter' && document.activeElement === userInput) {
+                    passwordInput.focus();
+                    e.preventDefault();
                 }
             });
-            
-            // 初始化已有值的输入框
-            if (input.value) {
-                input.parentNode.classList.add('focused');
-            }
         });
-        
-        // 页面加载动画
-        setTimeout(() => {
-            document.querySelector('.auth-card').classList.add('show');
-        }, 100);
-    });
     </script>
 </body>
 </html>
