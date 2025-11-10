@@ -1,796 +1,273 @@
 {% extends "base.html" %}
-{% load staticfiles %}
+{% load static %}
 
-{% block title %}服务器列表 - Linux监控系统{% endblock %}
+{% block title %}服务器管理 - Linux监控系统{% endblock %}
 
 {% block content %}
-<div class="container-fluid px-4">
-    <!-- 页面标题和统计 -->
-    <div class="row mb-4">
-        <div class="col-12">
-            <div class="d-flex justify-content-between align-items-center">
-                <div>
-                    <h1 class="h3 mb-0">
-                        <i class="fas fa-server me-2"></i>服务器管理
-                    </h1>
-                    <p class="text-muted mb-0">管理和监控您的Linux服务器</p>
-                </div>
-                <div class="d-flex align-items-center gap-3">
-                    <div class="server-stats">
-                        <span class="badge bg-primary fs-6">
-                            <i class="fas fa-server me-1"></i>
-                            总计: <strong>{{ sum|default:0 }}</strong>
-                        </span>
+<!-- 添加CSRF令牌供JavaScript使用 -->
+<input type="hidden" name="csrfmiddlewaretoken" value="{{ csrf_token }}">
+
+<!-- 覆盖默认容器样式 -->
+<style>
+    .main-content {
+        padding: 0 !important;
+    }
+
+    .container-fluid {
+        padding: 0 !important;
+        max-width: none !important;
+    }
+</style>
+
+<div class="neo-dashboard">
+    <!-- 浮动粒子背景 -->
+    <div class="particle-background">
+        <div class="particle"></div>
+        <div class="particle"></div>
+        <div class="particle"></div>
+        <div class="particle"></div>
+        <div class="particle"></div>
+    </div>
+
+    <!-- 顶部状态栏 -->
+    <div class="neo-header">
+        <div class="header-glass">
+            <div class="brand-zone">
+                <div class="brand-orb">
+                    <div class="orb-inner">
+                        <i class="fas fa-server"></i>
                     </div>
+                    <div class="orb-pulse"></div>
+                </div>
+                <div class="brand-text">
+                    <h1 class="brand-title">Server Hub</h1>
+                    <span class="brand-subtitle">Infrastructure Management</span>
+                </div>
+            </div>
+
+            <div class="metrics-cluster">
+                <div class="metric-orb total-orb">
+                    <div class="orb-content">
+                        <div class="metric-icon">
+                            <i class="fas fa-database"></i>
+                        </div>
+                        <div class="metric-value">{{ sum|default:0 }}</div>
+                        <div class="metric-label">Total</div>
+                    </div>
+                    <div class="orb-glow"></div>
+                </div>
+
+                <div class="metric-orb online-orb">
+                    <div class="orb-content">
+                        <div class="metric-icon">
+                            <i class="fas fa-circle"></i>
+                        </div>
+                        <div class="metric-value" id="onlineCount">0</div>
+                        <div class="metric-label">Online</div>
+                    </div>
+                    <div class="orb-glow online-glow"></div>
+                </div>
+
+                <div class="metric-orb offline-orb">
+                    <div class="orb-content">
+                        <div class="metric-icon">
+                            <i class="fas fa-circle"></i>
+                        </div>
+                        <div class="metric-value" id="offlineCount">0</div>
+                        <div class="metric-label">Offline</div>
+                    </div>
+                    <div class="orb-glow offline-glow"></div>
                 </div>
             </div>
         </div>
     </div>
 
-    <!-- 搜索和操作栏 -->
-    <div class="search-container">
-        <div class="row align-items-center">
-            <div class="col-md-8">
-                <form class="search-form" method="get" action="/search/" id="search_form">
-                    <div class="input-group">
-                        <span class="input-group-text">
+    <!-- 控制面板 -->
+    <div class="neo-controls">
+        <div class="controls-glass">
+            <div class="search-pod">
+                <form method="get" action="{% url 'search' %}" class="search-form">
+                    <div class="search-container">
+                        <div class="search-icon">
                             <i class="fas fa-search"></i>
-                        </span>
-                        <input type="search" class="form-control search-input" placeholder="搜索服务器名称、IP地址或主机名..."
-                            name="search" value="{{ keyword|default:'' }}" autocomplete="off">
-                        <button class="btn btn-outline-primary" type="submit">
-                            <i class="fas fa-search me-1"></i>搜索
+                        </div>
+                        <input type="search" class="search-input" placeholder="Search servers..." name="search"
+                            value="{{ keyword|default:'' }}">
+                        <button type="submit" class="search-submit">
+                            <i class="fas fa-arrow-right"></i>
                         </button>
                     </div>
                 </form>
             </div>
-            <div class="col-md-4 text-end">
-                <div class="btn-group" role="group">
-                    <a href="{% url 'linux_create' %}" class="btn btn-success btn-custom">
-                        <i class="fas fa-plus me-1"></i>添加服务器
-                    </a>
-                    <button type="button" class="btn btn-outline-secondary" onclick="refreshServerList()">
-                        <i class="fas fa-sync-alt me-1"></i>刷新
-                    </button>
-                </div>
-            </div>
-        </div>
-    </div>
 
-    <!-- 批量操作栏 -->
-    <div class="batch-actions" id="batchActions" style="display: none;">
-        <div class="d-flex align-items-center justify-content-between">
-            <div class="batch-info">
-                <span class="badge bg-primary me-2">
-                    <span id="selectedCount">0</span> 台服务器已选择
-                </span>
-            </div>
-            <div class="batch-buttons">
-                <button type="button" class="btn btn-outline-success btn-sm me-2" onclick="batchConnect()">
-                    <i class="fas fa-terminal me-1"></i>批量连接
-                </button>
-                <button type="button" class="btn btn-outline-warning btn-sm me-2" onclick="batchUpdate()">
-                    <i class="fas fa-sync me-1"></i>批量更新
-                </button>
-                <button type="button" class="btn btn-outline-danger btn-sm" onclick="batchDelete()">
-                    <i class="fas fa-trash me-1"></i>批量删除
-                </button>
-            </div>
-        </div>
-    </div>
-
-    <!-- 服务器列表表格 -->
-    <div class="table-responsive">
-        <div class="table-modern">
-            <table class="table table-hover mb-0" id="serverTable" data-modern
-                data-options='{"sortable": true, "searchable": true}'>
-                <thead>
-                    <tr>
-                        <th class="text-center" style="width: 50px;">
-                            <div class="form-check">
-                                <input class="form-check-input" type="checkbox" id="selectAll">
-                                <label class="form-check-label" for="selectAll"></label>
-                            </div>
-                        </th>
-                        <th class="text-center" style="width: 60px;">
-                            <i class="fas fa-hashtag"></i>
-                        </th>
-                        <th data-sortable="name" class="sortable">
-                            <i class="fas fa-tag me-1"></i>服务器名称
-                        </th>
-                        <th data-sortable="hostname" class="sortable">
-                            <i class="fas fa-desktop me-1"></i>主机名
-                        </th>
-                        <th data-sortable="ip" class="sortable">
-                            <i class="fas fa-globe me-1"></i>IP地址
-                        </th>
-                        <th class="text-center sortable" data-sortable="status">
-                            <i class="fas fa-signal me-1"></i>状态
-                        </th>
-                        <th class="text-center" style="width: 280px;">
-                            <i class="fas fa-cogs me-1"></i>操作
-                        </th>
-                    </tr>
-                </thead>
-                <tbody>
-                    {% for server in pages %}
-                    <tr class="server-row" data-server-id="{{ server.id }}" data-server-name="{{ server.linux_name }}">
-                        <td class="text-center">
-                            <div class="form-check">
-                                <input class="form-check-input server-checkbox" type="checkbox" value="{{ server.id }}"
-                                    id="server_{{ server.id }}" data-batch>
-                                <label class="form-check-label" for="server_{{ server.id }}"></label>
-                            </div>
-                        </td>
-                        <td class="text-center">
-                            <span class="badge bg-light text-dark server-index">
-                                {{ forloop.counter|add:pagenum }}
-                            </span>
-                        </td>
-                        <td>
-                            <div class="d-flex align-items-center">
-                                <div class="server-avatar me-3">
-                                    <i class="fas fa-server text-primary"></i>
-                                </div>
-                                <div class="server-info">
-                                    <div class="server-name">{{ server.linux_name }}</div>
-                                    {% if server.linux_app %}
-                                    <small class="text-muted server-desc">
-                                        <i class="fas fa-cogs me-1"></i>{{ server.linux_app|truncatechars:30 }}
-                                    </small>
-                                    {% endif %}
-                                </div>
-                            </div>
-                        </td>
-                        <td>
-                            <code class="server-hostname">{{ server.linux_hostname|default:"未设置" }}</code>
-                        </td>
-                        <td>
-                            <div class="d-flex align-items-center">
-                                <span class="status-indicator server-status me-2" data-server-id="{{ server.id }}"
-                                    data-tooltip="服务器状态"></span>
-                                <code class="server-ip">{{ server.linux_ip }}</code>
-                                <button class="btn btn-link btn-sm ms-2 copy-btn"
-                                    onclick="copyToClipboard('{{ server.linux_ip }}')" data-tooltip="复制IP地址">
-                                    <i class="fas fa-copy"></i>
-                                </button>
-                            </div>
-                        </td>
-                        <td class="text-center">
-                            <span class="badge server-status-badge" id="status_{{ server.id }}">
-                                <i class="fas fa-spinner fa-spin me-1"></i>检查中
-                            </span>
-                        </td>
-                        <td class="text-center">
-                            <div class="btn-group btn-group-sm" role="group">
-                                <a href="{% url 'linux_list_detail' server.id %}"
-                                    class="btn btn-outline-info btn-action" data-tooltip="查看详细信息">
-                                    <i class="fas fa-info-circle"></i>
-                                </a>
-                                <a href="{% url 'linux_connect' server.id %}" target="_blank"
-                                    class="btn btn-outline-success btn-action" data-tooltip="WebSSH连接">
-                                    <i class="fas fa-terminal"></i>
-                                </a>
-                                <a href="{% url 'linux_update' server.id %}" class="btn btn-outline-warning btn-action"
-                                    data-tooltip="编辑服务器">
-                                    <i class="fas fa-edit"></i>
-                                </a>
-                                <div class="btn-group" role="group">
-                                    <button type="button" class="btn btn-outline-secondary btn-action dropdown-toggle"
-                                        data-bs-toggle="dropdown" aria-expanded="false" data-tooltip="更多操作">
-                                        <i class="fas fa-ellipsis-v"></i>
-                                    </button>
-                                    <ul class="dropdown-menu">
-                                        <li>
-                                            <a class="dropdown-item" href="#"
-                                                onclick="exportServerInfo('{{ server.id }}')">
-                                                <i class="fas fa-download me-2"></i>导出信息
-                                            </a>
-                                        </li>
-                                        <li>
-                                            <a class="dropdown-item" href="#"
-                                                onclick="duplicateServer('{{ server.id }}')">
-                                                <i class="fas fa-clone me-2"></i>复制配置
-                                            </a>
-                                        </li>
-                                        <li>
-                                            <hr class="dropdown-divider">
-                                        </li>
-                                        <li>
-                                            <a class="dropdown-item text-danger" href="#"
-                                                onclick="confirmDelete('{{ server.id }}', '{{ server.linux_name }}')">
-                                                <i class="fas fa-trash me-2"></i>删除服务器
-                                            </a>
-                                        </li>
-                                    </ul>
-                                </div>
-                            </div>
-                        </td>
-                    </tr>
-                    {% empty %}
-                    <tr>
-                        <td colspan="7" class="text-center py-5">
-                            <div class="empty-state">
-                                <div class="empty-icon mb-4">
-                                    <i class="fas fa-server fa-4x text-muted"></i>
-                                </div>
-                                <h5 class="text-muted mb-3">暂无服务器</h5>
-                                <p class="text-muted mb-4">开始添加您的第一台服务器来管理和监控</p>
-                                <div class="empty-actions">
-                                    <a href="{% url 'linux_create' %}" class="btn btn-primary btn-lg me-3">
-                                        <i class="fas fa-plus me-2"></i>添加服务器
-                                    </a>
-                                    <button type="button" class="btn btn-outline-secondary btn-lg"
-                                        onclick="showImportModal()">
-                                        <i class="fas fa-upload me-2"></i>批量导入
-                                    </button>
-                                </div>
-                            </div>
-                        </td>
-                    </tr>
-                    {% endfor %}
-                </tbody>
-            </table>
-        </div>
-    </div>
-
-    <!-- 表格工具栏 -->
-    <div class="table-toolbar">
-        <div class="d-flex justify-content-between align-items-center">
-            <div class="table-info">
-                <small class="text-muted">
-                    显示 {{ pages.start_index }}-{{ pages.end_index }} 条，共 {{ pages.paginator.count }} 条记录
-                </small>
-            </div>
-            <div class="table-actions">
-                <div class="btn-group btn-group-sm" role="group">
-                    <button type="button" class="btn btn-outline-secondary" onclick="exportTableData()"
-                        data-tooltip="导出数据">
-                        <i class="fas fa-download"></i>
-                    </button>
-                    <button type="button" class="btn btn-outline-secondary" onclick="refreshServerList()"
-                        data-tooltip="刷新列表">
+            <div class="action-pods">
+                <button class="neo-btn refresh-btn" onclick="refreshServers()">
+                    <div class="btn-content">
                         <i class="fas fa-sync-alt"></i>
-                    </button>
-                    <button type="button" class="btn btn-outline-secondary" onclick="toggleTableView()"
-                        data-tooltip="切换视图">
-                        <i class="fas fa-th-list"></i>
-                    </button>
-                </div>
-            </div>
-        </div>
-    </div>
+                        <span>Refresh</span>
+                    </div>
+                    <div class="btn-ripple"></div>
+                </button>
 
-    <!-- 分页导航 -->
-    {% if pages.has_other_pages %}
-    <div class="pagination-custom">
-        <nav aria-label="服务器列表分页">
-            <ul class="pagination pagination-sm mb-0">
-                {% if pages.has_previous %}
-                <li class="page-item">
-                    <a class="page-link"
-                        href="?page={{ pages.previous_page_number }}{% if keyword %}&search={{ keyword }}{% endif %}">
-                        <i class="fas fa-chevron-left"></i>
-                    </a>
-                </li>
-                {% endif %}
-
-                {% for page_num in pages.paginator.page_range %}
-                {% if page_num == pages.number %}
-                <li class="page-item active">
-                    <span class="page-link current">{{ page_num }}</span>
-                </li>
-                {% else %}
-                <li class="page-item">
-                    <a class="page-link" href="?page={{ page_num }}{% if keyword %}&search={{ keyword }}{% endif %}">
-                        {{ page_num }}
-                    </a>
-                </li>
-                {% endif %}
-                {% endfor %}
-
-                {% if pages.has_next %}
-                <li class="page-item">
-                    <a class="page-link"
-                        href="?page={{ pages.next_page_number }}{% if keyword %}&search={{ keyword }}{% endif %}">
-                        <i class="fas fa-chevron-right"></i>
-                    </a>
-                </li>
-                {% endif %}
-            </ul>
-
-            <div class="pagination-info ms-3">
-                <small class="text-muted">
-                    第 {{ pages.number }} 页，共 {{ pages.paginator.num_pages }} 页
-                </small>
-            </div>
-        </nav>
-    </div>
-    {% endif %}
-</div>
-
-<!-- 删除确认模态框 -->
-<div class="modal fade" id="deleteModal" tabindex="-1" aria-labelledby="deleteModalLabel" aria-hidden="true">
-    <div class="modal-dialog">
-        <div class="modal-content">
-            <div class="modal-header">
-                <h5 class="modal-title" id="deleteModalLabel">
-                    <i class="fas fa-exclamation-triangle text-warning me-2"></i>
-                    确认删除
-                </h5>
-                <button type="button" class="btn-close" data-bs-dismiss="modal" aria-label="关闭"></button>
-            </div>
-            <div class="modal-body">
-                <p>您确定要删除服务器 <strong id="serverName"></strong> 吗？</p>
-                <p class="text-muted small">此操作不可撤销，请谨慎操作。</p>
-            </div>
-            <div class="modal-footer">
-                <button type="button" class="btn btn-secondary" data-bs-dismiss="modal">取消</button>
-                <a href="#" id="confirmDeleteBtn" class="btn btn-danger">
-                    <i class="fas fa-trash me-1"></i>确认删除
+                <a href="{% url 'linux_create' %}" class="neo-btn primary-btn">
+                    <div class="btn-content">
+                        <i class="fas fa-plus"></i>
+                        <span>Add Server</span>
+                    </div>
+                    <div class="btn-ripple"></div>
                 </a>
             </div>
         </div>
     </div>
+
+    <!-- 服务器网格 -->
+    <div class="servers-grid">
+        {% for server in pages %}
+        <div class="server-card" data-server-id="{{ server.id }}">
+            <div class="card-glass">
+                <!-- 卡片头部 -->
+                <div class="card-header">
+                    <div class="server-avatar-zone">
+                        <div class="avatar-orb">
+                            <i class="fas fa-server"></i>
+                        </div>
+                        <div class="status-ring" id="status_{{ server.id }}">
+                            <div class="status-dot"></div>
+                        </div>
+                    </div>
+
+                    <div class="server-info">
+                        <h3 class="server-name">{{ server.linux_name }}</h3>
+                        <span class="server-id">#{{ server.id }}</span>
+                    </div>
+
+                    <div class="card-actions">
+                        <div class="action-dropdown">
+                            <button class="action-trigger">
+                                <i class="fas fa-ellipsis-v"></i>
+                            </button>
+                            <div class="action-menu">
+                                <a href="{% url 'linux_connect' server.id %}" target="_blank"
+                                    class="action-item connect">
+                                    <i class="fas fa-terminal"></i>
+                                    <span>SSH Connect</span>
+                                </a>
+                                <a href="{% url 'linux_list_detail' server.id %}" class="action-item info">
+                                    <i class="fas fa-info-circle"></i>
+                                    <span>Details</span>
+                                </a>
+                                <a href="{% url 'linux_update' server.id %}" class="action-item edit">
+                                    <i class="fas fa-edit"></i>
+                                    <span>Edit</span>
+                                </a>
+                                <button class="action-item delete"
+                                    onclick="confirmDelete('{{ server.id }}', '{{ server.linux_name }}')">
+                                    <i class="fas fa-trash"></i>
+                                    <span>Delete</span>
+                                </button>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+
+                <!-- 卡片内容 -->
+                <div class="card-content">
+                    <div class="info-row">
+                        <div class="info-label">IP Address</div>
+                        <div class="info-value ip-value">
+                            <code>{{ server.linux_ip }}</code>
+                            <button class="copy-btn" onclick="copyToClipboard('{{ server.linux_ip }}')">
+                                <i class="fas fa-copy"></i>
+                            </button>
+                        </div>
+                    </div>
+
+                    <div class="info-row">
+                        <div class="info-label">Hostname</div>
+                        <div class="info-value">{{ server.linux_hostname|default:"--" }}</div>
+                    </div>
+
+                    <div class="info-row">
+                        <div class="info-label">Services</div>
+                        <div class="info-value">
+                            {% if server.linux_app %}
+                            <span class="service-badge">{{ server.linux_app|truncatechars:15 }}</span>
+                            {% else %}
+                            <span class="service-badge empty">No services</span>
+                            {% endif %}
+                        </div>
+                    </div>
+                </div>
+
+                <!-- 卡片底部 -->
+                <div class="card-footer">
+                    <div class="connection-test">
+                        <button class="test-btn" onclick="testConnection('{{ server.id }}')">
+                            <i class="fas fa-wifi"></i>
+                            <span>Test Connection</span>
+                        </button>
+                    </div>
+                </div>
+            </div>
+        </div>
+        {% empty %}
+        <div class="empty-state">
+            <div class="empty-glass">
+                <div class="empty-icon">
+                    <i class="fas fa-server"></i>
+                </div>
+                <h3 class="empty-title">No Servers Found</h3>
+                <p class="empty-message">Start by adding your first server to begin monitoring</p>
+                <a href="{% url 'linux_create' %}" class="neo-btn primary-btn">
+                    <div class="btn-content">
+                        <i class="fas fa-plus"></i>
+                        <span>Add First Server</span>
+                    </div>
+                    <div class="btn-ripple"></div>
+                </a>
+            </div>
+        </div>
+        {% endfor %}
+    </div>
+
+    <!-- 分页控制 -->
+    {% if pages.has_other_pages %}
+    <div class="pagination-zone">
+        <div class="pagination-glass">
+            <div class="pagination-info">
+                <span>Showing {{ pages.start_index }}-{{ pages.end_index }} of {{ pages.paginator.count }}
+                    servers</span>
+            </div>
+
+            <div class="pagination-controls">
+                {% if pages.has_previous %}
+                <a href="?page={{ pages.previous_page_number }}{% if keyword %}&search={{ keyword }}{% endif %}"
+                    class="page-orb">
+                    <i class="fas fa-chevron-left"></i>
+                </a>
+                {% endif %}
+
+                {% for page_num in pages.paginator.page_range %}
+                {% if page_num == pages.number %}
+                <span class="page-orb active">{{ page_num }}</span>
+                {% else %}
+                <a href="?page={{ page_num }}{% if keyword %}&search={{ keyword }}{% endif %}" class="page-orb">{{
+                    page_num }}</a>
+                {% endif %}
+                {% endfor %}
+
+                {% if pages.has_next %}
+                <a href="?page={{ pages.next_page_number }}{% if keyword %}&search={{ keyword }}{% endif %}"
+                    class="page-orb">
+                    <i class="fas fa-chevron-right"></i>
+                </a>
+                {% endif %}
+            </div>
+        </div>
+    </div>
+    {% endif %}
 </div>
 
-
-
-<style>
-    .server-stats .badge {
-        padding: 0.5rem 1rem;
-    }
-
-    .server-avatar {
-        width: 40px;
-        height: 40px;
-        background: rgba(0, 123, 255, 0.1);
-        border-radius: 50%;
-        display: flex;
-        align-items: center;
-        justify-content: center;
-    }
-
-    .server-row:hover {
-        background-color: rgba(0, 123, 255, 0.05);
-    }
-
-    .empty-state {
-        padding: 3rem 1rem;
-    }
-
-    .pagination-custom {
-        position: relative;
-        bottom: auto;
-        left: auto;
-        transform: none;
-        background: white;
-        padding: 1rem;
-        border-radius: var(--border-radius);
-        box-shadow: var(--box-shadow);
-        margin-top: 2rem;
-        display: flex;
-        justify-content: center;
-        align-items: center;
-    }
-
-    .pagination-custom .pagination {
-        margin: 0;
-    }
-
-    .pagination-custom .page-link {
-        border-radius: 50%;
-        width: 40px;
-        height: 40px;
-        display: flex;
-        align-items: center;
-        justify-content: center;
-        margin: 0 0.25rem;
-        border: 1px solid #dee2e6;
-        color: #6c757d;
-    }
-
-    .pagination-custom .page-item.active .page-link {
-        background-color: var(--danger-color);
-        border-color: var(--danger-color);
-        color: white;
-        transform: scale(1.1);
-    }
-
-    .btn-action {
-        width: 36px;
-        height: 36px;
-        display: inline-flex;
-        align-items: center;
-        justify-content: center;
-        padding: 0;
-    }
-
-    @media (max-width: 768px) {
-        .search-container .row {
-            flex-direction: column;
-            gap: 1rem;
-        }
-
-        .search-container .col-md-4 {
-            text-align: left !important;
-        }
-
-        .btn-group {
-            width: 100%;
-        }
-
-        .btn-group .btn {
-            flex: 1;
-        }
-
-        .table-responsive {
-            font-size: 0.875rem;
-        }
-
-        .btn-action {
-            width: 32px;
-            height: 32px;
-        }
-    }
-</style>
-
-<script>
-    // 删除确认功能
-    function confirmDelete(serverId, serverName) {
-        document.getElementById('serverName').textContent = serverName;
-        document.getElementById('confirmDeleteBtn').href = `/linux/delete/${serverId}/`;
-
-        const modal = new bootstrap.Modal(document.getElementById('deleteModal'));
-        modal.show();
-    }
-
-    // 刷新服务器列表
-    function refreshServerList() {
-        location.reload();
-    }
-
-    // 批量操作功能
-    function initBatchOperations() {
-        const selectAllCheckbox = document.getElementById('selectAll');
-        const serverCheckboxes = document.querySelectorAll('.server-checkbox');
-        const batchActions = document.getElementById('batchActions');
-        const selectedCount = document.getElementById('selectedCount');
-
-        // 全选/取消全选
-        selectAllCheckbox.addEventListener('change', function () {
-            serverCheckboxes.forEach(checkbox => {
-                checkbox.checked = this.checked;
-            });
-            updateBatchActions();
-        });
-
-        // 单个选择
-        serverCheckboxes.forEach(checkbox => {
-            checkbox.addEventListener('change', function () {
-                updateBatchActions();
-
-                // 更新全选状态
-                const checkedCount = document.querySelectorAll('.server-checkbox:checked').length;
-                selectAllCheckbox.checked = checkedCount === serverCheckboxes.length;
-                selectAllCheckbox.indeterminate = checkedCount > 0 && checkedCount < serverCheckboxes.length;
-            });
-        });
-
-        function updateBatchActions() {
-            const checkedBoxes = document.querySelectorAll('.server-checkbox:checked');
-            const count = checkedBoxes.length;
-
-            selectedCount.textContent = count;
-            batchActions.style.display = count > 0 ? 'block' : 'none';
-        }
-    }
-
-    // 批量操作函数
-    function batchConnect() {
-        const selectedServers = getSelectedServers();
-        if (selectedServers.length === 0) return;
-
-        selectedServers.forEach(serverId => {
-            window.open(`/linux/connect/${serverId}/`, '_blank');
-        });
-    }
-
-    function batchUpdate() {
-        const selectedServers = getSelectedServers();
-        if (selectedServers.length === 0) return;
-
-        showNotification(`正在更新 ${selectedServers.length} 台服务器状态...`, 'info');
-
-        // 这里可以添加批量更新的AJAX请求
-        selectedServers.forEach(serverId => {
-            updateServerStatusDisplay(serverId, 'default');
-        });
-    }
-
-    function batchDelete() {
-        const selectedServers = getSelectedServers();
-        if (selectedServers.length === 0) return;
-
-        const serverNames = selectedServers.map(serverId => {
-            const row = document.querySelector(`tr[data-server-id="${serverId}"]`);
-            return row.getAttribute('data-server-name');
-        });
-
-        if (confirm(`确定要删除以下 ${selectedServers.length} 台服务器吗？\n\n${serverNames.join('\n')}\n\n此操作不可撤销！`)) {
-            // 这里可以添加批量删除的AJAX请求
-            showNotification(`正在删除 ${selectedServers.length} 台服务器...`, 'warning');
-        }
-    }
-
-    function getSelectedServers() {
-        const checkedBoxes = document.querySelectorAll('.server-checkbox:checked');
-        return Array.from(checkedBoxes).map(checkbox => checkbox.value);
-    }
-
-    // 复制到剪贴板
-    function copyToClipboard(text) {
-        navigator.clipboard.writeText(text).then(() => {
-            showNotification(`已复制: ${text}`, 'success', 2000);
-        }).catch(() => {
-            // 降级方案
-            const textArea = document.createElement('textarea');
-            textArea.value = text;
-            document.body.appendChild(textArea);
-            textArea.select();
-            document.execCommand('copy');
-            document.body.removeChild(textArea);
-            showNotification(`已复制: ${text}`, 'success', 2000);
-        });
-    }
-
-    // 导出服务器信息
-    function exportServerInfo(serverId) {
-        const row = document.querySelector(`tr[data-server-id="${serverId}"]`);
-        const serverName = row.getAttribute('data-server-name');
-        const serverData = {
-            id: serverId,
-            name: serverName,
-            hostname: row.querySelector('.server-hostname').textContent,
-            ip: row.querySelector('.server-ip').textContent,
-            exportTime: new Date().toISOString()
-        };
-
-        const blob = new Blob([JSON.stringify(serverData, null, 2)], { type: 'application/json' });
-        const url = URL.createObjectURL(blob);
-        const a = document.createElement('a');
-        a.href = url;
-        a.download = `server_${serverName}_${new Date().toISOString().split('T')[0]}.json`;
-        document.body.appendChild(a);
-        a.click();
-        document.body.removeChild(a);
-        URL.revokeObjectURL(url);
-
-        showNotification(`服务器 ${serverName} 信息已导出`, 'success');
-    }
-
-    // 复制服务器配置
-    function duplicateServer(serverId) {
-        const row = document.querySelector(`tr[data-server-id="${serverId}"]`);
-        const serverName = row.getAttribute('data-server-name');
-
-        if (confirm(`确定要复制服务器 "${serverName}" 的配置吗？`)) {
-            // 这里可以添加复制配置的逻辑
-            showNotification(`正在复制服务器 ${serverName} 的配置...`, 'info');
-
-            // 跳转到创建页面并预填数据
-            window.location.href = `/linux/create/?duplicate=${serverId}`;
-        }
-    }
-
-    // 导出表格数据
-    function exportTableData() {
-        const table = document.getElementById('serverTable');
-        const rows = table.querySelectorAll('tbody tr');
-        const data = [];
-
-        rows.forEach(row => {
-            if (row.cells.length > 1) { // 排除空状态行
-                data.push({
-                    序号: row.querySelector('.server-index').textContent,
-                    服务器名称: row.querySelector('.server-name').textContent,
-                    主机名: row.querySelector('.server-hostname').textContent,
-                    IP地址: row.querySelector('.server-ip').textContent,
-                    导出时间: new Date().toLocaleString()
-                });
-            }
-        });
-
-        const csv = convertToCSV(data);
-        const blob = new Blob([csv], { type: 'text/csv;charset=utf-8;' });
-        const url = URL.createObjectURL(blob);
-        const a = document.createElement('a');
-        a.href = url;
-        a.download = `servers_${new Date().toISOString().split('T')[0]}.csv`;
-        document.body.appendChild(a);
-        a.click();
-        document.body.removeChild(a);
-        URL.revokeObjectURL(url);
-
-        showNotification('服务器列表已导出', 'success');
-    }
-
-    function convertToCSV(data) {
-        if (data.length === 0) return '';
-
-        const headers = Object.keys(data[0]);
-        const csvContent = [
-            headers.join(','),
-            ...data.map(row => headers.map(header => `"${row[header]}"`).join(','))
-        ].join('\n');
-
-        return '\ufeff' + csvContent; // 添加BOM以支持中文
-    }
-
-    // 切换表格视图
-    let isCardView = false;
-    function toggleTableView() {
-        const tableContainer = document.querySelector('.table-responsive');
-        const toggleBtn = document.querySelector('[onclick="toggleTableView()"] i');
-
-        if (isCardView) {
-            // 切换回表格视图
-            tableContainer.classList.remove('card-view');
-            toggleBtn.className = 'fas fa-th-list';
-            isCardView = false;
-            showNotification('已切换到表格视图', 'info', 2000);
-        } else {
-            // 切换到卡片视图
-            tableContainer.classList.add('card-view');
-            toggleBtn.className = 'fas fa-table';
-            isCardView = true;
-            showNotification('已切换到卡片视图', 'info', 2000);
-        }
-    }
-
-    // 显示导入模态框
-    function showImportModal() {
-        showNotification('批量导入功能开发中...', 'info');
-    }
-
-
-
-    // 更新服务器状态显示
-    function updateServerStatusDisplay(serverId, status) {
-        const statusBadge = document.getElementById(`status_${serverId}`);
-        const statusIndicator = document.querySelector(`[data-server-id="${serverId}"]`);
-
-        if (!statusBadge) return;
-
-        switch (status) {
-            case 'online':
-                statusBadge.innerHTML = '<i class="fas fa-check-circle me-1"></i>正常';
-                statusBadge.className = 'badge bg-success';
-                if (statusIndicator) {
-                    statusIndicator.className = 'status-indicator server-status me-2 status-online';
-                }
-                break;
-            case 'offline':
-                statusBadge.innerHTML = '<i class="fas fa-times-circle me-1"></i>失败';
-                statusBadge.className = 'badge bg-danger';
-                if (statusIndicator) {
-                    statusIndicator.className = 'status-indicator server-status me-2 status-offline';
-                }
-                break;
-            case 'error':
-                statusBadge.innerHTML = '<i class="fas fa-exclamation-triangle me-1"></i>错误';
-                statusBadge.className = 'badge bg-warning';
-                if (statusIndicator) {
-                    statusIndicator.className = 'status-indicator server-status me-2 status-warning';
-                }
-                break;
-            default:
-                statusBadge.innerHTML = '<i class="fas fa-spinner fa-spin me-1"></i>检查中';
-                statusBadge.className = 'badge bg-secondary';
-                if (statusIndicator) {
-                    statusIndicator.className = 'status-indicator server-status me-2';
-                }
-        }
-    }
-
-    // 搜索功能增强
-    document.addEventListener('DOMContentLoaded', function () {
-        const searchForm = document.getElementById('search_form');
-        const searchInput = searchForm.querySelector('input[name="search"]');
-
-        // 初始化批量操作
-        initBatchOperations();
-
-        // 搜索建议功能
-        let searchTimeout;
-        searchInput.addEventListener('input', function () {
-            clearTimeout(searchTimeout);
-            const query = this.value.trim();
-
-            if (query.length > 2) {
-                searchTimeout = setTimeout(() => {
-                    // 实时搜索过滤
-                    filterTable(query);
-                }, 300);
-            } else if (query.length === 0) {
-                // 清空搜索时显示所有行
-                showAllRows();
-            }
-        });
-
-        // 快捷键支持
-        document.addEventListener('keydown', function (e) {
-            // Ctrl/Cmd + K 聚焦搜索框
-            if ((e.ctrlKey || e.metaKey) && e.key === 'k') {
-                e.preventDefault();
-                searchInput.focus();
-                searchInput.select();
-            }
-
-            // Ctrl/Cmd + A 全选服务器
-            if ((e.ctrlKey || e.metaKey) && e.key === 'a' && document.activeElement !== searchInput) {
-                e.preventDefault();
-                document.getElementById('selectAll').checked = true;
-                document.getElementById('selectAll').dispatchEvent(new Event('change'));
-            }
-
-            // Delete 键删除选中的服务器
-            if (e.key === 'Delete') {
-                const selectedServers = getSelectedServers();
-                if (selectedServers.length > 0) {
-                    batchDelete();
-                }
-            }
-        });
-    });
-
-    // 表格过滤功能
-    function filterTable(query) {
-        const rows = document.querySelectorAll('.server-row[data-server-id]');
-        const lowerQuery = query.toLowerCase();
-        let visibleCount = 0;
-
-        rows.forEach(row => {
-            const serverName = row.querySelector('.server-name').textContent.toLowerCase();
-            const hostname = row.querySelector('.server-hostname').textContent.toLowerCase();
-            const ip = row.querySelector('.server-ip').textContent.toLowerCase();
-
-            const isVisible = serverName.includes(lowerQuery) ||
-                hostname.includes(lowerQuery) ||
-                ip.includes(lowerQuery);
-
-            row.style.display = isVisible ? '' : 'none';
-            if (isVisible) visibleCount++;
-        });
-
-        // 更新表格信息
-        updateTableInfo(visibleCount);
-    }
-
-    function showAllRows() {
-        const rows = document.querySelectorAll('.server-row[data-server-id]');
-        rows.forEach(row => {
-            row.style.display = '';
-        });
-        updateTableInfo(rows.length);
-    }
-
-    function updateTableInfo(count) {
-        const tableInfo = document.querySelector('.table-info small');
-        if (tableInfo) {
-            tableInfo.textContent = `显示 ${count} 条记录`;
-        }
-    }
-
-    // 通知函数
-    function showNotification(message, type = 'info', duration = 5000) {
-        if (window.app && window.app.notifications) {
-            window.app.notifications.show(message, type, duration);
-        } else {
-            // 降级方案
-            alert(message);
-        }
-    }
-</script>
-
-{% endblock content %}
+<!-- 引入Neo Dashboard JavaScript -->
+<script src="{% static 'js/neo-dashboard.js' %}"></script>
+{% endblock %}

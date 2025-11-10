@@ -1,0 +1,284 @@
+1. k8s的基础原理
+namespaces原理:
+Linux 内核包含了不同类型的 namespace。每个 namespace 都有自己的独特属性。
+namespace是Linux提供的一种内核级别环境隔离的方法, 包含以下
+user namespace: 拥有自己的一组用户 ID 和组 ID,用于分配给进程。这意味着进程可以在其 user namespace 中拥有 root 权限,而不需要在其他 user namespace 中获得。
+process ID (PID) namespace:将一组 PID 分配给独立于其他 namespace 中的一组 PID 的进程。在新的 namespace 中创建的第一个进程分得 PID 1,子进程被分配给后续的 PID。
+                 如果子进程使用自己的 PID namespace 创建,则它在该 namespace 中使用 PID 1, 在父进程的 namespace 中使用自己的 PID。请参见下面的示例。
+network namespace:拥有独立的网络栈: 自己的专用路由表、IP 地址集、套接字列表、连接跟踪表、防火墙及其他网络相关资源。
+mount namespace:拥有一个独立的挂载点列表,并对该 namespace 中的进程可见。这意味着您可以在 mount namespace 中挂载和卸载文件系统,而不会影响主机文件系统。
+interprocess communication (IPC) namespace:拥有自己的 IPC 资源,例如 POSIX 消息队列。
+UNIX Time‑Sharing (UTS) namespace:允许单个系统对不同的进程显示不同的主机名和域名。
+
+cgroups原理:
+cgroups是Linux内核的一个特性, 用于限制、记录和隔离一组进程的资源使用,CPU、内存、磁盘 I/O、网络等.
+cgroups 具有以下特性: 可以在/sys/fs/cgroups里面查看具体信息
+资源限制 —— 您可以配置 cgroups, 从而限制进程可以对特定资源(例如内存或 CPU)的使用量。
+优先级 —— 当资源发生冲突时, 您可以控制一个进程相比另一个cgroups中的进程可以使用的资源量(CPU、磁盘或网络)。
+记录审计 —— 在cgroup级别监控和报告资源限制。
+控制 —— 您可以使用单个命令更改 cgroups 中所有进程的状态(冻结、停止或重新启动)。
+
+k8s的容器现象:
+mount namespace: 容器会自动生成并挂载rootfs,也叫change root, 实现容器内部的文件和宿主机不一样。
+
+相关问题
+① cgroups在k8s中的作用?
+  在k8s中, cgroups用来确保每个pod和容器都有明确的资源限额, 并且这些限额不会被其他容器或系统进程超越, 有助于提高系统稳定性和公平性
+② 如何确保服务获取优先的资源分配？
+  为关键服务设置更高的Qos类别, 确保他们用足够的资源请求。
+  也可以为服务设置静态优先级priorityClass, 来提高服务的调度优先级。
+  
+  
+2. k8s的网络
+基础网络原理
+overlay: 报文中对容器ip, 进行封装一层宿主机ip和mac地址,然后通过宿主机网络就行通信, 有损耗。 示例: Flannel的vxlan模式, calico的ipip模式。
+underlay: 通过增加路由表, 可以让网络直接跳转到容器ip。 示例: Flannel的host-gw模式、calico的bgp模式
+dokcer网络: 容器的eth0----(veth pair创建2个虚拟网卡)连接docker0-----(路由表转到)宿主机
+
+路由
+IP route: 默认查看main表的route规则
+ip rule ls : 查看全部路由表规则
+ip route show table 123 : 查看路由表123的规则
+
+
+iptables:
+查看表和链: iptables -L <CHAIN> -t <TABLE> -v
+查看所有规则: iptables -L -n -v
+五张表:
+raw 用于配置数据包, raw 中的数据包不会被系统跟踪。
+filter 是用于存放所有与防火墙相关操作的默认表。
+nat 用于 网络地址转换(例如：端口转发)。
+mangle 用于对特定数据包的修改(参考损坏数据包)。
+security 用于强制访问控制 网络规则。
+五条链路：
+PREROUTING: 处理数据包进入路由之前的操作, 用于目标地址转换(DNAT)
+INPUT: 处理输入数据包
+OUTPUT: 处理所有出站数据包
+POSTROUTING: 处理数据包离开路由之后的操作 (SNAT)
+FORWARD: 数据包转发
+
+对于服务端来说,接收报文过程
+先进入PREROUTING链处理(raw、mangle、nat表对应的PREROUTING规则依次匹配), 根据路由判断数据报文发给本机, 
+报文进入INPUT链处理(mangle、nat、filter、security表对应的INPUT规则依次匹配), 如果没有被拦截则报文被应用程序处理
+
+
+
+
+cni原理
+cni是k8s用于实现网络的标准接口, 完成对k8s网络的管理。
+主要功能: 配置网络, 清理网络。分配pod的ip地址
+网络创建流程:
+1. kubernetes先创建pause容器生成对应的network namespace
+2. 调用网络driver,根据具体配置调用CNI插件
+3. CNI插件给pause容器配置网络, pod中其他的容器共用pause容器的网络
+
+
+calico  
+ipip模式, 采用overlay覆盖网络, 采用隧道网络封装数据包, 封装一层节点ip的原/目地址。 类似于flannel的vxlan模式
+BGP模式, 全网互联方式, 集群中的所有节点之间都会相互建立连接用于路由交换
+         RR路由反射方式, 将集群中的2个节点做路由放射器, 其他节点只需要和这2个节点做对等连接用于路由交换。
+Flannel, 采用overlay覆盖网络, 将数据包装在另一个网络包里面就行路由转发和通行。
+UDP模式, 采用overlay覆盖网络, 主机ip和容器ip对应关系存在etcd中。通过flannel udp进程在udp中封装, 内核态和用户态频繁切换, 存在一定的性能损耗
+vxlan模式, 采用overlay覆盖网络, 在内核态通过vtep设备完成封包和解包, 
+host-gw模式, 采用underlay网络, 将每个flannel子网转发地址设置成子网对应的主机节点ip地址, 直接通过路由转发到容器对应的节点。需要保证节点互相网络通畅。
+
+
+service创建的实现原理
+① 用户使用通过kubectl客户端发起创建service资源对象请求至api-server。
+② api-server对请求用户鉴权、准入控制操作, 然后将该请求事件写入到etcd存储中。
+③ Endpoint-controller通过list-watch机制获取到server资源信息并创建endpoint, 并将结果通过调用api-server写入etcd。
+④ kube-proxy通过list-watch机制, 获取endpoint和server的资源变化, 同步每个节点的iptables规则或者是ipvs规则
+
+ipvs
+过kubectl客户端发起创建service资源对象请求至api-server。
+Endpoint-controller通过获取的service和pod资源对象生成对应的Endpoint资源对象, 并将结果通过调用api-server写入etcd。
+api-server将相关service资源信息和Endpoint资源信息返回给kube-proxy, 每个节点上kube-proxy组件进程生成节点系统iptables规则或ipvs规则。
+相关问题
+
+
+3. k8s的cri原理
+cri是k8s提供的一种标准接口, 用于与不同的运行时集成, 实现k8s与多种不同的运行时通信, 从而实现容器的生命周期管理
+cri是一个抽象层, 定义了一组grpc接口, 规范了容器的创建, 停止和删除等生命周期管理, 以及镜像拉取, 列出和删除等操作.
+   接口: podsandboxservice和runtimeservice, 容器运行时需要实现前2个接口, 以便实现k8s与kubelet进行通行
+主要组件: 
+kubelet: k8s节点上的主要代理, 负责管理节点上的容器和pod, kubelet使用cri接口与底层运行时进行通信
+容器运行时: 实现cri接口的具体容器运行时, 与kubelet进行通信
+工作流程:
+podsandboxservice用于管理pod的生命周期
+runtimeservice用于管理容器的生命周期
+主要的运行时: docker通过dockershim   containerd  cri-o  kata
+
+
+4. k8s的csi原理
+存储插件包括三部分: CSI Identity(对外暴露插件信息), CSI Controller(attach), CSI Node(插件创建之后在node节点上生成, mount)
+PVcontroller绑定pv和pvc(可以设置延迟绑定)。 ADController存储attach    动态创建: sc就是pv的模板
+远端存储挂载：后端远程存储---(存储插件)attach到node节点(ADController调用CSI Controller实现)-----mount到node节点的目录(VMReconciler调用CSI Node实现)-----挂载映射到容器目录。
+安装基于CSI的存储插件: api-server安装对应的存储插件----插件创建csidriver驱动-----创建sc(填写provisioner存储插件,大小,类型)  
+创建pvc: csi-provisioner对pvc状态进行watch---csi驱动创建valume---csi驱动插件创建pv----pv控制器对pv和pvc进行绑定
+绑定pod: kubelet对pod状态watch,创建volumeAttachment资源----AD控制器把pod进行attach到node节点---csi驱动插件进行pod的mount对应的pvc
+相关问题
+什么是延迟绑定？
+   延迟绑定场景, kube-schedule先不等待PVC和PV绑定, 先预调度node, 然后把预调度结果写到PVC注解中, 
+pvc控制接获取到预调度az信息后, 再完成pvc创建和pv绑定。所以延迟绑定时延迟了pvc和pv绑定阶段。
+
+5. codedns原理
+1. 查看容器的/etc/reslove
+2. 查看coredns的cm文件, 查看dns的转发流程
+   CoreDNS的DSL支持多种指令, 包括:
+   -kubernetes: 将Kubernetes服务名称解析为集群中的IP地
+   - server: 定义一个DNS服务器
+   - forward: 将查询转发到其他DNS服务器
+   - cache: 启用DNS缓存 
+   - log: 记录DNS查询日志
+   - errors: 定义错误处理方式
+   - rewrite: 重写查询
+
+相关问题:
+在宿主机进入容器ns使用ping命令
+1. 找到要执行命令的容器
+   docker ps |grep ${pod_name}
+   获取容器containerID
+2.  docker inspect ${containerID} |grep Pid
+   获取容器Pid
+3.  进入容器pid空间执行命令
+   nsenter -t $Pid -n nslookup XXX
+
+
+6. openkruise功能
+   OpenKruise 是一个基于 Kubernetes 的扩展套件,主要聚焦于云原生应用的自动化,比如 部署、发布、运维以及可用性防护
+   ① 增强版本的Workloads, 新增了如原地升级(修改当前pod)、可配置的扩缩容/发布策略, 指定缩容,灰度发布等。
+   ② 提供按标签或者命名空间的sidecar功能
+   ③ 丰富的调度策略,按可用区打散调度,节点按一定比例调度。
+   ④ 镜像预热功能, 有个imgaepulljob
+7. ci/cd
+    jenkins通过k8s插件实现动态agent实现ci/cd
+    gitlab使用gitlab-runner实现ci/cd
+8. 监控,hpa,第三方参数hpa
+   prometheus结合对应中间件的exporter实现对中间件的监控
+   prometheus+adapter实现采集第三方指标用作hpa
+   性能问题:
+   prometheus的瓶颈在大数据量交互上, 出现瓶颈需要对接第三方存储, 然后grafana对接第三方读取数据
+   prometheus + alertmanager实现告警
+
+   搭建监控系统的方案
+   1. 监控范围和监控指标
+      基础设施监控: 节点和容器的cpu,内存,磁盘io,网络io
+      服务监控: 服务的健康状态, 接口的qps,响应时间和错误率
+      业务监控: 订单量, 日活量, 订单超时量。
+   2. 技术选型
+      指标采集: prometheus
+      指标暴露: node-exporter, kube-state-metrics, cadvisor, 中间件的exporter
+      可视化: Grafana
+      告警: alertmanager
+      链路追踪: jaeger, Zipkin
+   3. 告警分级
+      p0: 系统级别的问题, 比如节点宕机, 服务不可用. 10分钟内处理
+      p1: 业务级别的问题, 比如订单超时, 订单量减少。 30分钟处理
+      p2: 资源问题, 比如cpu, 内存, 磁盘io, 网络io。 1小时处理
+   
+
+9. 日志
+   相关问题
+   日志采集
+   K8S系统的组件日志
+   K8S里面部署的应用程序日志 -标准输出 -日志文件
+搭建日志系统的方案
+
+10. terraform
+   Terraform是一个可以对接公有云
+   可以用来管理多层次的资源。从上层的软件配置到底层的网络、系统配置都可以使用Terraform统一进行管理。
+   Provider: 每个 Provider 代表一个服务提供商, Terraform 通过插件机制与Provider进行交互。Provider通过关键字 "provider" 进行声明
+   Resource: 是Teraform中最重要的元素, 通过关键字 "resource" 进行声明。Provider中支持的云服务都有一个或多个资源与之对应
+
+11. etcd基础知识
+    etcd在k8s集群中的作用: k8s将所有资源状态都存储在etcd中。
+    备份: 每天晚上12点定期备份etcd。
+    etcd性能优化: 使用ssd盘, 降低io延迟; 确保网络带宽; 
+    etcd集群脑裂怎么处理: 确保网络正常, 确保大多数节点工作正常, 手动移除和重新添加节点。
+    
+12. istio
+    virtualService--->定义路由规则
+    Destinationrule--->定义字策略
+    gateway--->入口流量控制
+    serviceEntry--->外部服务访问
+
+    
+13. k8s迁移
+   成熟的方案使用velero工具
+   注意事项: k8s集群版本差异问题, 需要更新yaml的kind版本
+   1. 存储迁移 2 velero工具安装 3 原数据备份 4 数据恢复
+                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                             
+14. python处理k8s
+    python调用k8s的包, 进行批量操作k8s资源。
+
+15. k8s认证
+    1.21以后, 新建sa, clusterrole权限设置, 创建clusterrolebinding绑定sa和clusterrole, 手动创建同名secret。                                                   
+    配置kube-config的context, user, cluster。
+    双向认证,需要带客户端证书访问。
+    HTTPS证书认证: 此方式最严格, 基于CA根证书签名的双向数字证书认证方式。比如kube-controller-manager、kubelet等
+    HTTP Token认证: 通过一个Token来识别合法用户。比如serviceaccount
+    HTTP Base认证: 通过用户名+密码的方式认证。
+
+16. FQA
+① oom问题
+  解决: 监控内存使用情况, 合理配置request和limit; 优化代码, 减少对象堆积, 增加垃圾回收频率, 合理配置新老生代堆内存
+② 探针配置问题
+  现象: pod一直重启, 存活探针检查失败
+  解决: 应用启动时间较长, 未设置启动探针, 调整存活探针的检查次数和时间。
+③ 节点资源不足, pod被驱逐
+  解决: 监控节点资源, 新增节点的自动扩缩容, 设置命名空间配额resourcequota
+④ java问题处理
+  现象: 监控显示java服务的内存使用率过高
+  解决: 配置gc参数, 分析gc日志, 根据日志合理分配容器limit的内存资源,堆内存和堆外内存。
+
+实际问题：
+1.问题: 集群资源过载, master节点扩容之后发现nginx-ingress服务不可用
+  原因: 排查发现nginx-ingress在oom重启,客户创建了9000+的configmap资源, nignx-ingress-controller服务会对configmap进行list/watch操作,
+        所以服务出现了oom现象,导致服务不可用
+  解决: 对nginx-ingress服务进行扩容, 服务恢复正常。增加资源数量告警,保证集群资源正常。
+
+  
+
+17. 优化建议
+中间件深度调优与高可用架构设计
+对以下核心中间件进行云端适配与参数级调优
+    - Redis: 持久化策略、集群模式、缓存穿透/雪崩防护、大Key治理
+    - RabbitMQ: 队列堆积处理、镜像队列配置、死信机制、消费者并发控制
+    - FastDFS / MinIO: 对象存储迁移方案设计,静态资源访问加速与权限管控
+    - MySQL + MyCat: 主从复制延迟优化、读写分离策略、分库分表方案评审与实施
+    - Tomcat/Nginx: 连接池调优、反向代理规则优化、HTTPS卸载与HTTP/2支持
+    构建跨可用区的高可用架构,保障核心组件在单点故障下的自动恢复能力
+
+   
+18. kubernetes-operator实践
+    使用kubebuilder构建operator, 创建项目和api, 编辑crd和控制器代码, 最后生成crd并生成operator的镜像。
+    问题: dockerfile中使用国内的go代理地址
+
+19. nginx的参数详解
+
+20. 链路追踪
+可观测性体系建设与智能运维
+- 搭建统一的日志采集(ELK/SLS)、指标监控(Prometheus+Grafana/Zabbix)、链路追踪(SkyWalking/Jaeger)三位一体的Observability平台;
+- 实现对应用性能(APM)、系统健康状态、中间件运行指标的可视化展示,并设置动态告警阈值;
+- 定期输出《系统运行分析报告》,识别瓶颈点(如慢查询、线程阻塞、GC频繁等),提出针对性优化建议并推动改进闭环。
+
+21. 安全
+安全合规与灾备机制建设】
+- 主导云上安全体系建设,涵盖网络安全(WAF、DDoS防护)、主机安全(防病毒、入侵检测)、身份权限管理(RBAC、IAM);
+- 设计并实施多层次数据备份策略：本地快照 + 异地容灾 + 跨云备份,确保RTO < 15分钟,RPO < 5分钟;
+- 建立Web应用防火墙规则、SQL注入/XSS攻击防御机制,定期开展渗透测试与漏洞扫描;
+- 遵循等保2.0或ISO 27001标准,完善日志审计、操作留痕、敏感信息加密等合规要求。
+
+
+
+
+
+finops 
+aiops
+Istio
+operators编写
+spring boot应用容器化
+arms实现全链路监控
+knative实现自动缩容服务
+keda ----Kubernetes Event Driven Autoscaler --- 弹性伸缩, 可以基于第三方服务指标, k8s事件, 级联扩容
+vpa
