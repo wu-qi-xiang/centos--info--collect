@@ -1,0 +1,32 @@
+{% extends "base.html" %}
+{% load static %}
+
+{% block title %}{{ vue_page_title }}{% endblock %}
+
+{% block extra_css %}
+<link rel="stylesheet" href="{% static 'css/ops-vue-pages.css' %}?v=20260702-search">
+{% if vue_page_kind == "webssh" %}
+<link rel="stylesheet" href="{% static 'xterm/css/xterm.css' %}">
+{% endif %}
+{% endblock %}
+
+{% block content %}
+<div id="ops-vue-root" class="ops-vue-page">
+    <div class="vue-loading">
+        <div class="spinner-border text-primary" role="status"></div>
+        <span>加载页面...</span>
+    </div>
+</div>
+<script id="ops-vue-payload" type="application/json">{{ vue_page_payload|safe }}</script>
+{% if vue_page_kind == "password-list" %}<span class="d-none">••••••••</span>{% endif %}
+{% if vue_page_kind == "password-list" %}{% for item in pages %}<span class="d-none" data-system-name="{{ item.system_name }}"></span>{% endfor %}{% endif %}
+<noscript>此页面需要启用 JavaScript。</noscript>
+{% endblock %}
+
+{% block script %}
+{% if vue_page_kind == "webssh" %}
+<script src="{% static 'xterm/js/xterm.js' %}"></script>
+{% endif %}
+<script src="{% static 'vendor/vue.global.prod.js' %}?v=3"></script>
+<script src="{% static 'js/ops-vue-pages.js' %}?v=20260702-search"></script>
+{% endblock %}

@@ -14,6 +14,9 @@ Including another URLconf
     2. Add a URL to urlpatterns:  path('blog/', include('blog.urls'))
 """
 from django.contrib import admin
+from django.conf import settings
+from django.conf.urls.static import static
+from django.http import HttpResponse
 from django.urls import path, include
 from linux.views import index, linux, search  # url导入views
 # from RemoteLinux.views import linux_create, linux_detail, linux_list_detail, linux_update, linux_delete, connect_test
@@ -29,6 +32,8 @@ urlpatterns = [
     path('admin/', admin.site.urls),
     path('search/', search, name='search'),
     path('create/', views.linux_create, name='linux_create'),
+    path('import/', views.linux_import, name='linux_import'),
+    path('import/template/', views.linux_import_template, name='linux_import_template'),
     path('detail/', views.linux_detail, name='linux_detail'),
     path('connect/<int:id>/', views.linux_connect, name='linux_connect'),
     path('list_detail/<int:id>/', views.linux_list_detail, name='linux_list_detail'),
@@ -36,8 +41,15 @@ urlpatterns = [
     path('linux_update/<int:id>/', views.linux_update, name='linux_update'),
     path('linux_delete/<int:id>/', views.linux_delete, name='linux_delete'),
     path('connect_test/', views.connect_test, name='connect_test'),
+    path('api/server/<int:id>/status/', views.server_status, name='server_status'),
     path('linux_copy/', views.linux_copy, name='copy_form'),
     path('userprofile/', include('userprofile.urls', namespace='userprofile')),
     path('monitor/', include('monitor.urls', namespace='monitor')),
     path('password/', include('password.urls', namespace='password')),
+    path('devops/', include('devops.urls', namespace='devops')),
+    path('aiops/', include('aiops.urls', namespace='aiops')),
+    path('favicon.ico', lambda request: HttpResponse(status=204), name='favicon'),
 ]
+
+if settings.DEBUG:
+    urlpatterns += static(settings.MEDIA_URL, document_root=settings.MEDIA_ROOT)

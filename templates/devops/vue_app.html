@@ -1,0 +1,23 @@
+{% extends "base.html" %}
+{% load static %}
+
+{% block title %}DevOps控制台{% endblock %}
+
+{% block extra_css %}
+<link rel="stylesheet" href="{% static 'css/devops-vue.css' %}?v=20260622">
+{% endblock %}
+
+{% block content %}
+<div id="devops-vue-root" class="devops-vue-shell">
+    <div class="vue-loading">
+        <div class="spinner-border text-primary" role="status"></div>
+        <span>加载 DevOps 控制台...</span>
+    </div>
+</div>
+<noscript>DevOps 控制台需要启用 JavaScript。</noscript>
+{% endblock %}
+
+{% block script %}
+<script src="{% static 'vendor/vue.global.prod.js' %}?v=3"></script>
+<script src="{% static 'js/devops-vue.js' %}?v=20260622"></script>
+{% endblock %}

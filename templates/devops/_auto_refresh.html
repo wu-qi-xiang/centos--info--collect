@@ -1,0 +1,7 @@
+{% if object.status == "pending" or object.status == "running" %}
+<script>
+    setTimeout(function () {
+        window.location.reload();
+    }, 5000);
+</script>
+{% endif %}

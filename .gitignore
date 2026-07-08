@@ -1,7 +1,17 @@
 centos/
 venv/
+.venv/
 db.sqlite3
 *.pyc
+__pycache__/
 */*/*/__pycache__/
 */*/__pycache__/
 */__pycache__/
+.DS_Store
+.idea/
+.vscode/
+.playwright-mcp/
+logs/
+uploads/
+docs/audit-screenshots/
+.env

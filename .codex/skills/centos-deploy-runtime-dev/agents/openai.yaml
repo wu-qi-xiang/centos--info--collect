@@ -1,0 +1,4 @@
+interface:
+  display_name: "CentOS Runtime Dev"
+  short_description: "Develop settings, environment, Docker, Compose, Kubernetes, and runtime checks."
+  default_prompt: "Use this skill for centos--info--collect runtime configuration, deployment, or production check changes."

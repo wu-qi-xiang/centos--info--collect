@@ -5,25 +5,18 @@
 
 {% block content %}
 <div class="container-fluid px-4">
-    <!-- 页面标题 -->
-    <div class="row mb-4">
-        <div class="col-12">
-            <div class="d-flex align-items-center">
-                <a href="{% url 'linux_detail' %}" class="btn btn-outline-secondary me-3" data-tooltip="返回服务器列表">
-                    <i class="fas fa-arrow-left"></i>
-                </a>
-                <div>
-                    <h1 class="h3 mb-0">
-                        <i class="fas fa-plus-circle me-2 text-success"></i>添加服务器
-                    </h1>
-                    <p class="text-muted mb-0">配置新的Linux服务器连接信息</p>
-                </div>
-            </div>
+    <div class="ops-page-header">
+        <div>
+            <h1 class="ops-page-title"><i class="fas fa-plus-circle me-2 text-primary"></i>添加服务器</h1>
+            <p class="ops-page-subtitle">配置新的 Linux 服务器连接信息。</p>
+        </div>
+        <div class="ops-header-actions">
+            <a href="{% url 'linux_detail' %}" class="btn btn-outline-secondary"><i class="fas fa-arrow-left me-1"></i>返回服务器列表</a>
         </div>
     </div>
 
     <div class="row justify-content-center">
-        <div class="col-lg-8 col-xl-6">
+        <div class="col-lg-10 col-xl-8">
             <!-- 表单卡片 -->
             <div class="card-modern" data-validate>
                 <div class="form-header">
@@ -40,6 +33,7 @@
 
                 <form id="serverForm" method="post" action="." enctype="multipart/form-data" data-autosave>
                     {% csrf_token %}
+                    {% include "includes/form_errors.html" %}
 
                     <!-- 基本信息 -->
                     <div class="form-section">
@@ -54,7 +48,7 @@
                                         <i class="fas fa-tag me-2"></i>服务器名称 <span class="text-danger">*</span>
                                     </label>
                                     <input type="text" class="form-control-custom" id="linux_name" name="linux_name"
-                                        placeholder="例如: Web-Server-01" required data-tooltip="为服务器设置一个易识别的名称">
+                                        placeholder="例如: Web-Server-01" value="{{ request.POST.linux_name }}" required data-tooltip="为服务器设置一个易识别的名称">
                                     <small class="form-text text-muted">
                                         <i class="fas fa-lightbulb me-1"></i>建议使用有意义的名称，如 Web-Server-01
                                     </small>
@@ -66,7 +60,7 @@
                                         <i class="fas fa-globe me-2"></i>IP地址 <span class="text-danger">*</span>
                                     </label>
                                     <input type="text" class="form-control-custom" id="linux_ip" name="linux_ip"
-                                        placeholder="例如: 192.168.1.100" required
+                                        placeholder="例如: 192.168.1.100" value="{{ request.POST.linux_ip }}" required
                                         pattern="^(?:(?:25[0-5]|2[0-4][0-9]|[01]?[0-9][0-9]?)\.){3}(?:25[0-5]|2[0-4][0-9]|[01]?[0-9][0-9]?)$"
                                         data-tooltip="服务器的IP地址">
                                     <small class="form-text text-muted">
@@ -83,7 +77,7 @@
                                         <i class="fas fa-desktop me-2"></i>主机名
                                     </label>
                                     <input type="text" class="form-control-custom" id="linux_hostname"
-                                        name="linux_hostname" placeholder="例如: web-server-01" data-tooltip="服务器的主机名">
+                                        name="linux_hostname" placeholder="例如: web-server-01" value="{{ request.POST.linux_hostname }}" data-tooltip="服务器的主机名">
                                     <small class="form-text text-muted">
                                         <i class="fas fa-info-circle me-1"></i>可选，用于标识服务器
                                     </small>
@@ -95,7 +89,7 @@
                                         <i class="fas fa-plug me-2"></i>SSH端口
                                     </label>
                                     <input type="number" class="form-control-custom" id="linux_port" name="linux_port"
-                                        placeholder="22" value="22" min="1" max="65535" data-tooltip="SSH服务端口，默认为22">
+                                        placeholder="22" value="{{ request.POST.linux_port|default:'22' }}" min="1" max="65535" data-tooltip="SSH服务端口，默认为22">
                                     <small class="form-text text-muted">
                                         <i class="fas fa-info-circle me-1"></i>默认SSH端口为22
                                     </small>
@@ -111,13 +105,28 @@
                         </h5>
 
                         <div class="row">
+                            <div class="col-md-12">
+                                <div class="form-group-custom">
+                                    <label class="form-label-custom">
+                                        <i class="fas fa-shield-alt me-2"></i>认证方式
+                                    </label>
+                                    <div class="btn-group w-100" role="group" aria-label="SSH认证方式">
+                                        <input type="radio" class="btn-check" name="linux_auth_type" id="authPassword"
+                                            value="password" autocomplete="off" {% if request.POST.linux_auth_type != "key" %}checked{% endif %}>
+                                        <label class="btn btn-outline-primary" for="authPassword">密码</label>
+                                        <input type="radio" class="btn-check" name="linux_auth_type" id="authKey"
+                                            value="key" autocomplete="off" {% if request.POST.linux_auth_type == "key" %}checked{% endif %}>
+                                        <label class="btn btn-outline-primary" for="authKey">SSH Key</label>
+                                    </div>
+                                </div>
+                            </div>
                             <div class="col-md-6">
                                 <div class="form-group-custom">
                                     <label class="form-label-custom" for="linux_user">
                                         <i class="fas fa-user me-2"></i>用户名 <span class="text-danger">*</span>
                                     </label>
                                     <input type="text" class="form-control-custom" id="linux_user" name="linux_user"
-                                        placeholder="例如: root" required data-tooltip="SSH登录用户名">
+                                        placeholder="例如: root" value="{{ request.POST.linux_user }}" required data-tooltip="SSH登录用户名">
                                     <small class="form-text text-muted">
                                         <i class="fas fa-shield-alt me-1"></i>建议使用具有管理权限的用户
                                     </small>
@@ -137,8 +146,34 @@
                                         </button>
                                     </div>
                                     <small class="form-text text-muted">
-                                        <i class="fas fa-lock me-1"></i>密码将被安全存储
+                                        <i class="fas fa-lock me-1"></i>密码将加密存储；SSH Key 模式可作为 sudo 或私钥补充密码
                                     </small>
+                                </div>
+                            </div>
+                        </div>
+
+                        <div class="row" id="privateKeyFields" style="display: none;">
+                            <div class="col-md-12">
+                                <div class="form-group-custom">
+                                    <label class="form-label-custom" for="linux_private_key">
+                                        <i class="fas fa-file-signature me-2"></i>SSH私钥 <span class="text-danger">*</span>
+                                    </label>
+                                    <textarea class="form-control-custom" id="linux_private_key" name="linux_private_key"
+                                        rows="8" placeholder="-----BEGIN OPENSSH PRIVATE KEY-----"
+                                        data-tooltip="粘贴PEM/OpenSSH格式私钥内容"></textarea>
+                                    <small class="form-text text-muted">
+                                        <i class="fas fa-lock me-1"></i>私钥内容会加密存储
+                                    </small>
+                                </div>
+                            </div>
+                            <div class="col-md-12">
+                                <div class="form-group-custom">
+                                    <label class="form-label-custom" for="linux_private_key_passphrase">
+                                        <i class="fas fa-key me-2"></i>私钥口令
+                                    </label>
+                                    <input type="password" class="form-control-custom" id="linux_private_key_passphrase"
+                                        name="linux_private_key_passphrase" placeholder="私钥无口令可留空"
+                                        data-tooltip="私钥passphrase，可选">
                                 </div>
                             </div>
                         </div>
@@ -156,7 +191,7 @@
                             </label>
                             <textarea class="form-control-custom" id="linux_app" name="linux_app" rows="4"
                                 placeholder="例如: Nginx, MySQL, Redis, Docker..."
-                                data-tooltip="描述服务器上运行的主要服务"></textarea>
+                                data-tooltip="描述服务器上运行的主要服务">{{ request.POST.linux_app }}</textarea>
                             <small class="form-text text-muted">
                                 <i class="fas fa-info-circle me-1"></i>可选，用于记录服务器用途和运行的服务
                             </small>
@@ -241,7 +276,9 @@
                 <h5 class="modal-title" id="testModalLabel">
                     <i class="fas fa-plug me-2"></i>连接测试
                 </h5>
-                <button type="button" class="btn-close" data-bs-dismiss="modal" aria-label="关闭"></button>
+                <button type="button" class="close" data-dismiss="modal" aria-label="关闭">
+                    <span aria-hidden="true">&times;</span>
+                </button>
             </div>
             <div class="modal-body">
                 <div id="testProgress" class="text-center">
@@ -253,7 +290,7 @@
                 <div id="testResult" style="display: none;"></div>
             </div>
             <div class="modal-footer">
-                <button type="button" class="btn btn-secondary" data-bs-dismiss="modal">关闭</button>
+                <button type="button" class="btn btn-secondary" data-dismiss="modal">关闭</button>
             </div>
         </div>
     </div>
@@ -268,11 +305,34 @@
         const submitBtn = document.getElementById('submitBtn');
         const togglePasswordBtn = document.getElementById('togglePassword');
         const passwordInput = document.getElementById('linux_passwd');
+        const privateKeyFields = document.getElementById('privateKeyFields');
+        const privateKeyInput = document.getElementById('linux_private_key');
         const progressBar = document.getElementById('formProgress');
         const progressCount = document.getElementById('progressCount');
 
         // 必填字段
-        const requiredFields = ['linux_name', 'linux_ip', 'linux_user', 'linux_passwd'];
+        const requiredFields = ['linux_name', 'linux_ip', 'linux_user'];
+
+        function currentAuthType() {
+            const selected = document.querySelector('input[name="linux_auth_type"]:checked');
+            return selected ? selected.value : 'password';
+        }
+
+        function requiredCredentialFields() {
+            return currentAuthType() === 'key' ? ['linux_private_key'] : ['linux_passwd'];
+        }
+
+        function updateAuthFields() {
+            const keyAuth = currentAuthType() === 'key';
+            privateKeyFields.style.display = keyAuth ? 'block' : 'none';
+            passwordInput.required = !keyAuth;
+            privateKeyInput.required = keyAuth;
+            if (!keyAuth) {
+                privateKeyInput.value = '';
+                document.getElementById('linux_private_key_passphrase').value = '';
+            }
+            updateFormProgress();
+        }
 
         // 密码显示/隐藏切换
         togglePasswordBtn.addEventListener('click', function () {
@@ -286,19 +346,20 @@
         // 表单进度更新
         function updateFormProgress() {
             let filledCount = 0;
-            requiredFields.forEach(fieldName => {
+            const fields = requiredFields.concat(requiredCredentialFields());
+            fields.forEach(fieldName => {
                 const field = document.getElementById(fieldName);
                 if (field && field.value.trim()) {
                     filledCount++;
                 }
             });
 
-            const percentage = (filledCount / requiredFields.length) * 100;
+            const percentage = (filledCount / fields.length) * 100;
             progressBar.style.width = percentage + '%';
-            progressCount.textContent = `${filledCount}/${requiredFields.length}`;
+            progressCount.textContent = `${filledCount}/${fields.length}`;
 
             // 更新提交按钮状态
-            submitBtn.disabled = filledCount < requiredFields.length;
+            submitBtn.disabled = filledCount < fields.length;
         }
 
         // 监听表单字段变化
@@ -310,6 +371,18 @@
                     validateField(this);
                 });
             }
+        });
+        ['linux_passwd', 'linux_private_key'].forEach(fieldName => {
+            const field = document.getElementById(fieldName);
+            if (field) {
+                field.addEventListener('input', updateFormProgress);
+                field.addEventListener('blur', function () {
+                    validateField(this);
+                });
+            }
+        });
+        document.querySelectorAll('input[name="linux_auth_type"]').forEach(field => {
+            field.addEventListener('change', updateAuthFields);
         });
 
         // 字段验证
@@ -368,7 +441,7 @@
         // 连接测试
         testBtn.addEventListener('click', function () {
             // 验证必要字段
-            const requiredForTest = ['linux_ip', 'linux_user', 'linux_passwd'];
+            const requiredForTest = ['linux_ip', 'linux_user'].concat(requiredCredentialFields());
             let canTest = true;
 
             requiredForTest.forEach(fieldName => {
@@ -384,8 +457,7 @@
             if (!canTest) return;
 
             // 显示测试模态框
-            const modal = new bootstrap.Modal(document.getElementById('testModal'));
-            modal.show();
+            $('#testModal').modal('show');
 
             // 执行连接测试
             const formData = new FormData(form);
@@ -444,7 +516,7 @@
 
             // 验证所有必填字段
             let isValid = true;
-            requiredFields.forEach(fieldName => {
+            requiredFields.concat(requiredCredentialFields()).forEach(fieldName => {
                 const field = document.getElementById(fieldName);
                 if (!validateField(field)) {
                     isValid = false;
@@ -466,6 +538,7 @@
         });
 
         // 初始化进度
+        updateAuthFields();
         updateFormProgress();
 
         // IP地址格式化
@@ -481,108 +554,13 @@
             if (value < 1) this.value = 1;
         });
     });
-</script>
-// 通知函数
-function showNotification(message, type = 'info', duration = 5000) {
-if (window.app && window.app.notifications) {
-window.app.notifications.show(message, type, duration);
-} else {
-alert(message);
-}
-}
+    // 通知函数
+    function showNotification(message, type = 'info', duration = 5000) {
+        if (window.app && window.app.notifications) {
+            window.app.notifications.show(message, type, duration);
+        } else {
+            alert(message);
+        }
+    }
 </script>
 {% endblock script %}
-
-<style>
-    /* 现代化表单增强样式 */
-    .form-header {
-        padding: 2rem 2rem 1rem;
-        background: linear-gradient(135deg, var(--primary-50), var(--primary-100));
-        border-radius: var(--border-radius-lg) var(--border-radius-lg) 0 0;
-        border-bottom: 1px solid var(--border-color);
-    }
-
-    .form-icon {
-        width: 60px;
-        height: 60px;
-        background: linear-gradient(135deg, var(--primary-500), var(--primary-600));
-        border-radius: 50%;
-        display: flex;
-        align-items: center;
-        justify-content: center;
-        color: white;
-        box-shadow: 0 4px 15px rgba(37, 99, 235, 0.3);
-    }
-
-    .help-section .card-custom {
-        background: var(--bg-light);
-        border: 1px solid var(--border-color);
-        border-radius: var(--border-radius-lg);
-        box-shadow: 0 2px 10px rgba(0, 0, 0, 0.05);
-    }
-
-    .help-item {
-        margin-bottom: 1.5rem;
-    }
-
-    .help-item h6 {
-        color: var(--text-primary);
-        font-weight: 600;
-        margin-bottom: 0.75rem;
-    }
-
-    .help-list {
-        list-style: none;
-        padding-left: 0;
-        margin-bottom: 0;
-    }
-
-    .help-list li {
-        padding: 0.25rem 0;
-        color: var(--text-secondary);
-        position: relative;
-        padding-left: 1.5rem;
-    }
-
-    .help-list li::before {
-        content: '✓';
-        position: absolute;
-        left: 0;
-        color: var(--success-color);
-        font-weight: bold;
-    }
-
-    .connection-result {
-        margin: 1.5rem 0;
-        padding: 1rem;
-        border-radius: var(--border-radius);
-        background: var(--bg-primary);
-        border-left: 4px solid var(--info-color);
-    }
-
-    /* 响应式优化 */
-    @media (max-width: 768px) {
-        .form-header {
-            padding: 1.5rem 1rem 1rem;
-            text-align: center;
-        }
-
-        .form-header .d-flex {
-            flex-direction: column;
-            align-items: center;
-        }
-
-        .form-icon {
-            margin-bottom: 1rem;
-        }
-
-        .action-buttons {
-            flex-direction: column;
-            gap: 0.75rem;
-        }
-
-        .action-buttons .btn {
-            width: 100%;
-        }
-    }
-</style>

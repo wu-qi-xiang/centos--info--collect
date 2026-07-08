@@ -1,0 +1,4 @@
+interface:
+  display_name: "CentOS AIOps Dev"
+  short_description: "Develop AIOps dashboards, webhooks, and LLM fallback analysis."
+  default_prompt: "Use this skill for centos--info--collect AIOps dashboard, webhook, or alert analysis changes."

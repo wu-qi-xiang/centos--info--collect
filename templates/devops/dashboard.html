@@ -1,0 +1,46 @@
+{% extends "base.html" %}
+
+{% block title %}DevOps平台 - Linux监控系统{% endblock %}
+
+{% block content %}
+<div class="container-fluid px-4">
+    <h1 class="h3 mb-3"><i class="fas fa-tools me-2"></i>DevOps平台</h1>
+    {% include "devops/_nav.html" %}
+
+    <div class="row g-3 mb-4">
+        <div class="col-md-3"><div class="card"><div class="card-body"><div class="text-muted">主机</div><h3>{{ host_count }}</h3></div></div></div>
+        <div class="col-md-3"><div class="card"><div class="card-body"><div class="text-muted">分组</div><h3>{{ group_count }}</h3></div></div></div>
+        <div class="col-md-3"><div class="card"><div class="card-body"><div class="text-muted">未处理告警</div><h3>{{ open_alert_count }}</h3></div></div></div>
+        <div class="col-md-3"><div class="card"><div class="card-body"><div class="text-muted">批量任务</div><h3>{{ task_count }}</h3></div></div></div>
+    </div>
+
+    <div class="row g-3">
+        <div class="col-lg-6">
+            <div class="card">
+                <div class="card-header">最近命令</div>
+                <div class="card-body table-responsive">
+                    <table class="table table-sm">
+                        <tr><th>主机</th><th>状态</th><th>命令</th></tr>
+                        {% for item in recent_commands %}
+                        <tr><td>{{ item.host.linux_name }}</td><td>{{ item.get_status_display }}</td><td><code>{{ item.command|truncatechars:60 }}</code></td></tr>
+                        {% empty %}<tr><td colspan="3" class="text-muted">暂无记录</td></tr>{% endfor %}
+                    </table>
+                </div>
+            </div>
+        </div>
+        <div class="col-lg-6">
+            <div class="card">
+                <div class="card-header">最近告警</div>
+                <div class="card-body table-responsive">
+                    <table class="table table-sm">
+                        <tr><th>主机</th><th>级别</th><th>状态</th><th>内容</th></tr>
+                        {% for item in recent_alerts %}
+                        <tr><td>{{ item.host.linux_name|default:"-" }}</td><td>{{ item.level }}</td><td>{{ item.status }}</td><td>{{ item.message|truncatechars:50 }}</td></tr>
+                        {% empty %}<tr><td colspan="4" class="text-muted">暂无告警</td></tr>{% endfor %}
+                    </table>
+                </div>
+            </div>
+        </div>
+    </div>
+</div>
+{% endblock %}

@@ -1,0 +1,138 @@
+{% extends "base.html" %}
+
+{% block title %}安全策略 - DevOps平台{% endblock %}
+
+{% block content %}
+<div class="container-fluid px-4">
+    <h1 class="h3 mb-3">安全策略</h1>
+    {% include "devops/_nav.html" %}
+
+    <div class="row g-3 mb-3">
+        <div class="col-lg-4">
+            <div class="card"><div class="card-header">新增命令策略</div><div class="card-body">
+                <form method="post" action="{% url 'devops:policy_create' %}">
+                    {% csrf_token %}
+                    <div class="mb-3"><label class="form-label">名称</label>{{ policy_form.name }}</div>
+                    <div class="mb-3"><label class="form-label">匹配内容</label>{{ policy_form.pattern }}</div>
+                    <div class="mb-3"><label class="form-label">动作</label>{{ policy_form.action }}</div>
+                    <div class="mb-3"><label class="form-label">启用</label>{{ policy_form.enabled }}</div>
+                    <div class="mb-3"><label class="form-label">原因</label>{{ policy_form.reason }}</div>
+                    <button class="btn btn-primary" type="submit">保存策略</button>
+                </form>
+            </div></div>
+        </div>
+        <div class="col-lg-8">
+            <div class="card"><div class="card-header">命令策略</div><div class="card-body table-responsive">
+                <table class="table table-sm align-middle">
+                    <tr><th>名称</th><th>匹配</th><th>动作</th><th>启用</th><th>原因</th><th>操作</th></tr>
+                    {% for policy in policies %}
+                    <tr>
+                        <td>
+                            <form id="policy-update-{{ policy.id }}" method="post" action="{% url 'devops:policy_update' policy.id %}">{% csrf_token %}</form>
+                            <input form="policy-update-{{ policy.id }}" name="name" class="form-control form-control-sm" value="{{ policy.name }}">
+                        </td>
+                        <td><input form="policy-update-{{ policy.id }}" name="pattern" class="form-control form-control-sm" value="{{ policy.pattern }}"></td>
+                        <td>
+                            <select form="policy-update-{{ policy.id }}" name="action" class="form-select form-select-sm">
+                                <option value="block" {% if policy.action == "block" %}selected{% endif %}>拦截</option>
+                                <option value="require_admin" {% if policy.action == "require_admin" %}selected{% endif %}>仅管理员</option>
+                                <option value="allow" {% if policy.action == "allow" %}selected{% endif %}>允许</option>
+                            </select>
+                        </td>
+                        <td><input form="policy-update-{{ policy.id }}" name="enabled" type="checkbox" {% if policy.enabled %}checked{% endif %}></td>
+                        <td><input form="policy-update-{{ policy.id }}" name="reason" class="form-control form-control-sm" value="{{ policy.reason }}"></td>
+                        <td><button form="policy-update-{{ policy.id }}" class="btn btn-sm btn-outline-primary" type="submit">保存</button></td>
+                    </tr>
+                    {% empty %}<tr><td colspan="6" class="text-muted">暂无策略</td></tr>{% endfor %}
+                </table>
+            </div></div>
+        </div>
+    </div>
+
+    <div class="row g-3">
+        <div class="col-lg-4">
+            <div class="card mb-3"><div class="card-header">审批策略</div><div class="card-body">
+                <form method="post" action="{% url 'devops:setting_update' %}">
+                    {% csrf_token %}
+                    <div class="form-check mb-2">
+                        {{ setting_form.force_deploy_approval }}
+                        <label class="form-check-label" for="{{ setting_form.force_deploy_approval.id_for_label }}">发布强制审批</label>
+                    </div>
+                    <div class="form-check mb-3">
+                        {{ setting_form.force_rollback_approval }}
+                        <label class="form-check-label" for="{{ setting_form.force_rollback_approval.id_for_label }}">回滚强制审批</label>
+                    </div>
+                    <button class="btn btn-primary" type="submit">保存审批策略</button>
+                    <div class="text-muted small mt-2">高危命令会自动转入审批，不受此开关影响。</div>
+                </form>
+            </div></div>
+            <div class="card"><div class="card-header">设置用户角色</div><div class="card-body">
+                <form method="post" action="{% url 'devops:role_set' %}">
+                    {% csrf_token %}
+                    <div class="mb-3"><label class="form-label">用户</label>{{ role_form.user }}</div>
+                    <div class="mb-3"><label class="form-label">角色</label>{{ role_form.role }}</div>
+                    <button class="btn btn-primary" type="submit">保存角色</button>
+                </form>
+            </div></div>
+        </div>
+        <div class="col-lg-8">
+            <div class="card"><div class="card-header">角色列表</div><div class="card-body table-responsive">
+                <table class="table table-sm">
+                    <tr><th>用户</th><th>角色</th><th>更新时间</th></tr>
+                    {% for item in roles %}
+                    <tr><td>{{ item.user.user }}</td><td>{{ item.get_role_display }}</td><td>{{ item.updated_at|date:"Y-m-d H:i:s" }}</td></tr>
+                    {% empty %}<tr><td colspan="3" class="text-muted">未配置角色时，系统兼容为管理员模式</td></tr>{% endfor %}
+                </table>
+            </div></div>
+        </div>
+    </div>
+
+    <div class="row g-3 mt-1">
+        <div class="col-lg-4">
+            <div class="card mb-3"><div class="card-header">模块权限</div><div class="card-body">
+                <form method="post" action="{% url 'devops:module_permission_set' %}">
+                    {% csrf_token %}
+                    <div class="mb-3"><label class="form-label">用户</label>{{ module_permission_form.user }}</div>
+                    <div class="mb-3"><label class="form-label">模块</label>{{ module_permission_form.module }}</div>
+                    <div class="mb-3"><label class="form-label">角色</label>{{ module_permission_form.role }}</div>
+                    <button class="btn btn-primary" type="submit">保存模块权限</button>
+                    <div class="text-muted small mt-2">未配置模块权限时沿用用户全局角色。</div>
+                </form>
+            </div></div>
+            <div class="card"><div class="card-header">主机范围</div><div class="card-body">
+                <form method="post" action="{% url 'devops:host_scope_set' %}">
+                    {% csrf_token %}
+                    <div class="mb-3"><label class="form-label">用户</label>{{ host_scope_form.user }}</div>
+                    <div class="mb-3"><label class="form-label">可访问主机组</label>{{ host_scope_form.groups }}</div>
+                    <div class="mb-3"><label class="form-label">可访问主机标签</label>{{ host_scope_form.tags }}</div>
+                    <button class="btn btn-primary" type="submit">保存主机范围</button>
+                    <div class="text-muted small mt-2">未配置主机范围时可访问全部主机；配置后只允许访问所选主机组或标签。</div>
+                </form>
+            </div></div>
+        </div>
+        <div class="col-lg-8">
+            <div class="card mb-3"><div class="card-header">模块权限列表</div><div class="card-body table-responsive">
+                <table class="table table-sm">
+                    <tr><th>用户</th><th>模块</th><th>角色</th><th>更新时间</th></tr>
+                    {% for item in module_permissions %}
+                    <tr><td>{{ item.user.user }}</td><td>{{ item.get_module_display }}</td><td>{{ item.get_role_display }}</td><td>{{ item.updated_at|date:"Y-m-d H:i:s" }}</td></tr>
+                    {% empty %}<tr><td colspan="4" class="text-muted">暂无模块权限覆盖</td></tr>{% endfor %}
+                </table>
+            </div></div>
+            <div class="card"><div class="card-header">主机范围列表</div><div class="card-body table-responsive">
+                <table class="table table-sm">
+                    <tr><th>用户</th><th>主机组</th><th>主机标签</th><th>更新时间</th></tr>
+                    {% for item in host_scopes %}
+                    <tr>
+                        <td>{{ item.user.user }}</td>
+                        <td>{% for group in item.groups.all %}{{ group.name }}{% if not forloop.last %}, {% endif %}{% empty %}<span class="text-muted">空范围</span>{% endfor %}</td>
+                        <td>{% for tag in item.tags.all %}{{ tag.name }}{% if not forloop.last %}, {% endif %}{% empty %}<span class="text-muted">空范围</span>{% endfor %}</td>
+                        <td>{{ item.updated_at|date:"Y-m-d H:i:s" }}</td>
+                    </tr>
+                    {% empty %}<tr><td colspan="4" class="text-muted">暂无主机范围限制</td></tr>{% endfor %}
+                </table>
+            </div></div>
+        </div>
+    </div>
+</div>
+{% endblock %}

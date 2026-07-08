@@ -1,0 +1,163 @@
+version: 1
+default_skill: centos-feature-dev
+execution_policy:
+  plan_required: true
+  implementation_owner: subagent
+  main_agent_role:
+    - plan
+    - delegate
+    - review
+    - integrate
+    - validate
+    - report
+routes:
+  devops_api:
+    triggers:
+      - devops api
+      - /devops/api
+      - json endpoint
+    skills:
+      - centos-feature-dev
+      - centos-devops-automation-dev
+    references:
+      - references/devops-api-dictionary.md
+      - references/test-patterns.md
+      - references/documentation-rules.md
+      - references/review-checklist.md
+    tests:
+      - .venv/bin/python manage.py test devops
+      - .venv/bin/python manage.py check
+  devops_workflow:
+    triggers:
+      - command execution
+      - batch task
+      - deployment
+      - rollback
+      - approval
+      - file distribution
+    skills:
+      - centos-feature-dev
+      - centos-devops-automation-dev
+    references:
+      - references/devops-state-models.md
+      - references/change-recipes.md
+      - references/security-checkpoints.md
+      - references/test-patterns.md
+    tests:
+      - .venv/bin/python manage.py test devops
+      - .venv/bin/python manage.py check
+  host_inventory:
+    triggers:
+      - host field
+      - ssh
+      - webssh
+      - host import
+    skills:
+      - centos-feature-dev
+      - centos-host-ssh-dev
+    references:
+      - references/change-recipes.md
+      - references/security-checkpoints.md
+      - references/test-patterns.md
+    tests:
+      - .venv/bin/python manage.py test RemoteLinux
+      - .venv/bin/python manage.py check
+  auth:
+    triggers:
+      - login
+      - logout
+      - register
+      - session
+      - user password
+    skills:
+      - centos-feature-dev
+      - centos-auth-user-dev
+    references:
+      - references/django-legacy-standards.md
+      - references/security-checkpoints.md
+      - references/test-patterns.md
+    tests:
+      - .venv/bin/python manage.py test userprofile
+      - .venv/bin/python manage.py check
+  monitoring:
+    triggers:
+      - monitor
+      - alert
+      - metric
+      - crontab
+      - threshold
+    skills:
+      - centos-feature-dev
+      - centos-monitor-alert-dev
+    references:
+      - references/devops-state-models.md
+      - references/test-patterns.md
+      - references/security-checkpoints.md
+    tests:
+      - .venv/bin/python manage.py test monitor
+      - .venv/bin/python manage.py test devops
+      - .venv/bin/python manage.py check
+  aiops:
+    triggers:
+      - aiops
+      - alertmanager
+      - llm
+      - root cause
+    skills:
+      - centos-feature-dev
+      - centos-aiops-dev
+    references:
+      - references/aiops-llm-contract.md
+      - references/security-checkpoints.md
+      - references/test-patterns.md
+      - references/ui-standards.md
+    tests:
+      - .venv/bin/python manage.py test aiops
+      - .venv/bin/python manage.py check
+  frontend:
+    triggers:
+      - template
+      - vue
+      - static js
+      - css
+      - ui
+    skills:
+      - centos-feature-dev
+      - centos-frontend-ui-dev
+    references:
+      - references/ui-standards.md
+      - references/test-patterns.md
+      - references/security-checkpoints.md
+    tests:
+      - .venv/bin/python manage.py check
+  runtime:
+    triggers:
+      - settings
+      - env
+      - docker
+      - compose
+      - k8s
+      - gunicorn
+    skills:
+      - centos-feature-dev
+      - centos-deploy-runtime-dev
+    references:
+      - references/runtime-env-dictionary.md
+      - references/documentation-rules.md
+      - references/security-checkpoints.md
+    tests:
+      - .venv/bin/python manage.py check
+  password_vault:
+    triggers:
+      - password vault
+      - secret reveal
+      - password manager
+    skills:
+      - centos-feature-dev
+      - centos-password-vault-dev
+    references:
+      - references/security-checkpoints.md
+      - references/test-patterns.md
+    tests:
+      - .venv/bin/python manage.py test password
+      - .venv/bin/python manage.py check

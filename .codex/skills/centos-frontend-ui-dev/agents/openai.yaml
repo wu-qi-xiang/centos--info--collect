@@ -1,0 +1,4 @@
+interface:
+  display_name: "CentOS Frontend Dev"
+  short_description: "Develop Django templates, Vue pages, static JS/CSS, and operations UI."
+  default_prompt: "Use this skill for centos--info--collect template, Vue, static CSS/JS, or UI changes."

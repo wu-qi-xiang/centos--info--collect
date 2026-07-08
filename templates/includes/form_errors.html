@@ -1,0 +1,12 @@
+{% if form and form.errors %}
+<div class="alert alert-danger" role="alert">
+    <strong>提交失败，请检查以下内容：</strong>
+    <ul class="mb-0 mt-2">
+        {% for field, errors in form.errors.items %}
+            {% for error in errors %}
+                <li>{% if field != "__all__" %}{{ field }}：{% endif %}{{ error }}</li>
+            {% endfor %}
+        {% endfor %}
+    </ul>
+</div>
+{% endif %}

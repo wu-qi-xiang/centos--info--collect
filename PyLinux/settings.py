@@ -11,20 +11,24 @@ https://docs.djangoproject.com/en/2.1/ref/settings/
 """
 
 import os
+import sys
+from django.core.exceptions import ImproperlyConfigured
 
 # Build paths inside the project like this: os.path.join(BASE_DIR, ...)
 BASE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+DJANGO_ENV = os.environ.get('DJANGO_ENV', 'development')
 
 # Quick-start development settings - unsuitable for production
 # See https://docs.djangoproject.com/en/2.1/howto/deployment/checklist/
 
 # SECURITY WARNING: keep the secret key used in production secret!
-SECRET_KEY = 'l%8v=yn(q619e5n!go8z5)@)v99+lb5g9%a#^!e#-c)$h=dyq-'
+SECRET_KEY = os.environ.get('DJANGO_SECRET_KEY', 'django-insecure-change-me')
+DATA_ENCRYPTION_KEY = os.environ.get('DATA_ENCRYPTION_KEY', '')
 
 # SECURITY WARNING: don't run with debug turned on in production!
-DEBUG = True
+DEBUG = os.environ.get('DJANGO_DEBUG', 'True').lower() in ('1', 'true', 'yes', 'on')
 
-ALLOWED_HOSTS = ['*']
+ALLOWED_HOSTS = os.environ.get('DJANGO_ALLOWED_HOSTS', '*').split(',')
 
 # Application definition
 
@@ -39,9 +43,11 @@ INSTALLED_APPS = [
 	'linux',
 	'RemoteLinux',
 	'monitor',
-	'userprofile',
-	'password',
-]
+		'userprofile',
+		'password',
+		'devops',
+		'aiops',
+	]
 
 MIDDLEWARE = [
 	'django.middleware.security.SecurityMiddleware',
@@ -77,12 +83,62 @@ WSGI_APPLICATION = 'PyLinux.wsgi.application'
 # Database
 # https://docs.djangoproject.com/en/2.1/ref/settings/#databases
 
-DATABASES = {
-	'default': {
-		'ENGINE': 'django.db.backends.sqlite3',
-		'NAME': os.path.join(BASE_DIR, 'db.sqlite3'),
+def env_int(environ, key, default):
+	value = environ.get(key, '')
+	if value == '':
+		return default
+	try:
+		return int(value)
+	except (TypeError, ValueError):
+		raise ImproperlyConfigured('%s 必须是整数' % key)
+
+
+def database_config_from_env(environ, base_dir=BASE_DIR):
+	engine_name = environ.get('DB_ENGINE', 'sqlite').strip()
+	engine_aliases = {
+		'': 'django.db.backends.sqlite3',
+		'sqlite': 'django.db.backends.sqlite3',
+		'sqlite3': 'django.db.backends.sqlite3',
+		'mysql': 'django.db.backends.mysql',
+		'postgres': 'django.db.backends.postgresql',
+		'postgresql': 'django.db.backends.postgresql',
 	}
-}
+	engine = engine_aliases.get(engine_name.lower(), engine_name)
+	if not engine.startswith('django.db.backends.'):
+		raise ImproperlyConfigured('DB_ENGINE 不受支持：%s' % engine_name)
+
+	if engine == 'django.db.backends.sqlite3':
+		return {
+			'default': {
+				'ENGINE': engine,
+				'NAME': environ.get('DB_NAME', os.path.join(base_dir, 'db.sqlite3')),
+			},
+		}
+
+	db_name = environ.get('DB_NAME', '').strip()
+	if not db_name:
+		raise ImproperlyConfigured('使用非 SQLite 数据库时必须配置 DB_NAME')
+
+	config = {
+		'ENGINE': engine,
+		'NAME': db_name,
+		'CONN_MAX_AGE': env_int(environ, 'DB_CONN_MAX_AGE', 60),
+	}
+	for env_key, db_key in (
+		('DB_USER', 'USER'),
+		('DB_PASSWORD', 'PASSWORD'),
+		('DB_HOST', 'HOST'),
+		('DB_PORT', 'PORT'),
+	):
+		value = environ.get(env_key)
+		if value:
+			config[db_key] = value
+	if environ.get('DB_CHARSET'):
+		config['OPTIONS'] = {'charset': environ.get('DB_CHARSET')}
+	return {'default': config}
+
+
+DATABASES = database_config_from_env(os.environ)
 
 # Password validation
 # https://docs.djangoproject.com/en/2.1/ref/settings/#auth-password-validators
@@ -122,15 +178,18 @@ STATICFILES_DIRS = (
     os.path.join(BASE_DIR, "static"),
 )
 STATIC_URL = '/static/'
+STATIC_ROOT = os.environ.get('DJANGO_STATIC_ROOT', os.path.join(BASE_DIR, 'staticfiles'))
+MEDIA_ROOT = os.path.join(BASE_DIR, 'uploads')
+MEDIA_URL = '/uploads/'
 
 # 邮箱配置
 EMAIL_BACKEND = 'django.core.mail.backends.smtp.EmailBackend'
-EMAIL_HOST = 'smtp.qq.com'    # QQ邮箱SMTP服务器
-EMAIL_PORT = 587       # QQ邮箱SMTP服务端口
-EMAIL_HOST_USER = '774727549@qq.com'  # 我的邮箱帐号
-EMAIL_HOST_PASSWORD = 'qlfwkpesbjmvbfeh'   # 密码j
-EMAIL_USE_TLS = True                       # 必须为True
-EMAIL_USE_SSL = False
+EMAIL_HOST = os.environ.get('EMAIL_HOST', 'smtp.qq.com')    # QQ邮箱SMTP服务器
+EMAIL_PORT = int(os.environ.get('EMAIL_PORT', '587'))       # QQ邮箱SMTP服务端口
+EMAIL_HOST_USER = os.environ.get('EMAIL_HOST_USER', '')  # 邮箱帐号
+EMAIL_HOST_PASSWORD = os.environ.get('EMAIL_HOST_PASSWORD', '')   # 邮箱授权码
+EMAIL_USE_TLS = os.environ.get('EMAIL_USE_TLS', 'True').lower() in ('1', 'true', 'yes', 'on')
+EMAIL_USE_SSL = os.environ.get('EMAIL_USE_SSL', 'False').lower() in ('1', 'true', 'yes', 'on')
 EMAIL_SSL_CERTFILE = None
 EMAIL_SSL_KEYFILE = None
 DEFAULT_FROM_EMAIL = EMAIL_HOST_USER
@@ -140,3 +199,15 @@ EMAIL_TIMEOUT = 8
 CRONJOBS = [
 	('*/1 * * * *', 'monitor.crontab.monitor_send_email', '>>/tmp/test.log'),
 ]
+
+DEVOPS_SYNC_TASKS = 'test' in sys.argv
+DEVOPS_TASK_RETRY_COUNT = int(os.environ.get('DEVOPS_TASK_RETRY_COUNT', '0'))
+DEVOPS_SSH_CONNECT_TIMEOUT_SECONDS = int(os.environ.get('DEVOPS_SSH_CONNECT_TIMEOUT_SECONDS', '10'))
+DEVOPS_COMMAND_TIMEOUT_SECONDS = int(os.environ.get('DEVOPS_COMMAND_TIMEOUT_SECONDS', '60'))
+DEVOPS_COMMAND_OUTPUT_MAX_BYTES = int(os.environ.get('DEVOPS_COMMAND_OUTPUT_MAX_BYTES', '204800'))
+WEBSSH_SESSION_TIMEOUT_SECONDS = int(os.environ.get('WEBSSH_SESSION_TIMEOUT_SECONDS', '1800'))
+NOTIFICATION_DEDUP_SECONDS = int(os.environ.get('NOTIFICATION_DEDUP_SECONDS', '300'))
+NOTIFICATION_RETRY_COUNT = int(os.environ.get('NOTIFICATION_RETRY_COUNT', '0'))
+NOTIFICATION_TIMEOUT_SECONDS = int(os.environ.get('NOTIFICATION_TIMEOUT_SECONDS', '5'))
+AUDIT_LOG_RETENTION_DAYS = int(os.environ.get('AUDIT_LOG_RETENTION_DAYS', '0'))
+METRIC_SAMPLE_RETENTION_DAYS = int(os.environ.get('METRIC_SAMPLE_RETENTION_DAYS', '30'))

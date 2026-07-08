@@ -1,138 +1,98 @@
 from django.shortcuts import render, redirect
-from django.db.models import Q
-from django.http import HttpResponse
-import subprocess
-import re
-import urllib.request
-from django.core.paginator import Paginator, PageNotAnInteger, EmptyPage, InvalidPage
-# 增加柱状图
-import matplotlib.pyplot as plt
-from matplotlib.font_manager import *
+from django.http import HttpResponseNotAllowed
+from django.core.paginator import Paginator
+from PyLinux.security import security_context
+from PyLinux.vue import render_vue_page
 from RemoteLinux.models import NewLinux
+from RemoteLinux.views import _filter_hosts, _host_list_payload
 from password.models import Password
+from devops.services import visible_hosts_for_request
+from .collectors import collect_local_detail
+from userprofile.decorators import session_login_required
 
 
 # from . import models
 # Create your views here.
 
 
+@session_login_required
 def index(request):
-	# 增加柱状图
 	pwd = Password.objects.filter(auther=request.session.get('user_name')).count()
-	passwd = Password.objects.all().count()
-	nwl = NewLinux.objects.all().count()
-	plt.switch_backend('agg')
-	plt.figure(figsize=(5, 3.37))
-	plt.style.use('seaborn')
-	myfont = FontProperties(fname='./static/Font/simhei.ttf')
-	width = 0.3
-	# 增加矩形图
-	rects1 = plt.bar('1', pwd, width=width)
-	rects2 = plt.bar('2', passwd, width=width)
-	rects3 = plt.bar('3', nwl, width=width)
-	# 增加矩形上的数字
-
-	def add_labels(rects):
-		for rect in rects:
-			height = rect.get_height()
-			plt.text(rect.get_x() + rect.get_width() / 2, height, height, ha='center', va='bottom')
-			# rect.set_edgecolor('white')
-	add_labels(rects1)
-	add_labels(rects2)
-	add_labels(rects3)
-	plt.title(u'服务器信息', fontproperties=myfont)
-	plt.xlabel(u'名称', fontproperties=myfont)
-	plt.ylabel(u'数量', fontproperties=myfont)
-	# 增加图例
-	plt.legend((u"当前用户密码列表", u"所有的密码列表", u"服务器列表"), loc='best', prop=myfont)
-	plt.savefig('./static/images/rectangle.jpg', bbox_inches='tight')
-	plt.close()
-
+	nwl = visible_hosts_for_request(request).count()
 	content = {'nwl' : nwl, 'pwd' : pwd}
-	return render(request, "linux/index.html", content)
+	content.update(security_context(request))
+	return render_vue_page(request, 'dashboard', '工作台', {
+		'subtitle': '服务器资产、密码与自动化入口',
+		'counts': {'hosts': nwl, 'passwords': pwd},
+		'actions': [
+			{'label': '服务器列表', 'url': '/detail/'},
+			{'label': '密码管理', 'url': '/password/'},
+			{'label': 'DevOps', 'url': '/devops/', 'class': 'btn-primary'},
+		],
+	}, content)
 
 
+@session_login_required
 def linux(request):
-	# 系统cpu
-	cpu_cmd = "lscpu |grep '^CPU(s)' |awk '{print $2}'"
-	cpu = subprocess.getoutput(cpu_cmd)
-	# 系统内存
-	total_cmd = "free -h |grep Mem |awk '{print $2}'"
-	used_cmd = "free -h |grep Mem |awk '{print $3}'"
-	free_cmd = "free -h |grep Mem |awk '{print $4}'"
-	available_cmd = "free -h |grep Mem |awk '{print $7}'"
-	total_mem = subprocess.getoutput(total_cmd)
-	used_mem = subprocess.getoutput(used_cmd)
-	free_mem = subprocess.getoutput(free_cmd)
-	available_mem = subprocess.getoutput(available_cmd)
-	# 系统版本
-	re_cmd = 'cat /etc/redhat-release'
-	ke_cmd = "uname -a |awk '{print $3}'"
-	release = subprocess.getoutput(re_cmd)
-	kernel = subprocess.getoutput(ke_cmd)
-	# 系统IP
-	# outside_cmd = "curl ifconfig.me"
-	url = urllib.request.urlopen("http://txt.go.sohu.com/ip/soip")
-	text = url.read()
-	intranet_cmd = "ip addr |grep eth0 |awk -F '/' 'NR == 2 {print $1}'|awk '{print $2}'"
-	# outside_ip1 = subprocess.getoutput(outside_cmd)
-	outside_ip = re.findall(r'\d+.\d+.\d+.\d+', text.decode('utf-8'))
-	intranet_ip = subprocess.getoutput(intranet_cmd)
-	# 系统磁盘
-	total_cmd = "df -h |grep -w '/'|awk '{print $2}'"
-	used_cmd = "df -h |grep -w '/'|awk '{print $3}'"
-	available_cmd = "df -h |grep -w '/'|awk '{print $4}'"
-	total_disk = subprocess.getoutput(total_cmd)
-	used_disk = subprocess.getoutput(used_cmd)
-	available_disk = subprocess.getoutput(available_cmd)
-
-	content = {'total_mem': total_mem,
-			   'used_mem': used_mem,
-			   'free_mem': free_mem,
-			   'available_mem': available_mem,
-			   'cpu': cpu,
-			   'release': release,
-			   'kernel': kernel,
-			   'outside_ip': outside_ip,
-			   'intranet_ip': intranet_ip,
-			   'total_disk': total_disk,
-			   'used_disk': used_disk,
-			   'available_disk': available_disk}
-
-	return render(request, 'linux/local.html', content)
+	content = collect_local_detail()
+	content.update(security_context(request))
+	items = [
+		{'label': 'CPU 核数', 'value': content.get('cpu')},
+		{'label': '总内存', 'value': content.get('total_mem')},
+		{'label': '已用内存', 'value': content.get('used_mem')},
+		{'label': '可用内存', 'value': content.get('available_mem')},
+		{'label': '系统版本', 'value': content.get('release')},
+		{'label': '内核', 'value': content.get('kernel')},
+		{'label': '内网 IP', 'value': content.get('intranet_ip')},
+		{'label': '公网 IP', 'value': ', '.join(content.get('outside_ip') or []) or '未获取'},
+		{'label': '总磁盘', 'value': content.get('total_disk')},
+		{'label': '已用磁盘', 'value': content.get('used_disk')},
+		{'label': '可用磁盘', 'value': content.get('available_disk')},
+	]
+	return render_vue_page(request, 'local-linux', '本机 Linux', {
+		'subtitle': '本机系统信息',
+		'items': items,
+	}, content)
 
 
+@session_login_required
 def search(request):
-	global search
-	keyword = request.GET.get('search')
-	if keyword:
-		search = keyword
-		newlinux = NewLinux.objects.filter(Q(linux_name__icontains=keyword) | Q(linux_ip__icontains=keyword) | Q(linux_hostname__icontains=keyword) | Q(linux_app__icontains=keyword))
-	else:
-		keyword = search
-		newlinux = NewLinux.objects.filter(Q(linux_name__icontains=keyword) | Q(linux_ip__icontains=keyword) | Q(linux_hostname__icontains=keyword) | Q(linux_app__icontains=keyword))
+	if request.method != "GET":
+		return HttpResponseNotAllowed(["GET"])
+	keyword = (request.GET.get('search') or '').strip()
+	newlinux = _filter_hosts(visible_hosts_for_request(request).order_by('id'), keyword)
 	paginator = Paginator(newlinux, 8)
-	if request.method == "GET":
-		page = request.GET.get('page')
-		try:
-			pages = paginator.page(page)
-		# todo: 注意捕获异常
-		except PageNotAnInteger:
-			# 如果请求的页数不是整数, 返回第一页。
-			pages = paginator.page(1)
-		except InvalidPage:
-			# 如果请求的页数不存在, 重定向页面
-			return HttpResponse('找不到页面的内容')
-		except EmptyPage:
-			# 如果请求的页数不在合法的页数范围内，返回结果的最后一页。
-			pages = paginator.page(paginator.num_pages)
-		pagenum = (pages.number - 1) * 8
-		# 增加主机总数
-		sum = 0
-		for list in newlinux:
-			sum = sum + 1
+	page = request.GET.get('page')
+	pages = paginator.get_page(page)
+	pagenum = (pages.number - 1) * 8
+	# 增加主机总数
+	sum = newlinux.count()
 
-		content = {'newlinux': newlinux, 'keyword': keyword, "pages": pages, "pagenum": pagenum, "sum": sum}
-		return render(request, 'linux/detail.html', content)
-	else:
-		return HttpResponse("非GET请求")
+	content = {'newlinux': newlinux, 'keyword': keyword, "pages": pages, "pagenum": pagenum, "sum": sum}
+	content.update(security_context(request))
+	actions = []
+	if content.get('can_manage_hosts'):
+		actions = [
+			{'label': '导入服务器', 'url': '/import/'},
+			{'label': '新增服务器', 'url': '/create/', 'class': 'btn-primary'},
+		]
+	return render_vue_page(
+		request,
+		'host-list',
+		'服务器列表',
+		_host_list_payload(request, pages, sum, keyword, actions, '搜索和查看授权范围内服务器'),
+		content,
+	)
+
+
+def _host_payload(host):
+	return {
+		'id': host.id,
+		'linux_name': host.linux_name,
+		'linux_ip': host.linux_ip,
+		'linux_hostname': host.linux_hostname,
+		'linux_port': host.linux_port,
+		'linux_user': host.linux_user,
+		'linux_auth_type': getattr(host, 'linux_auth_type', 'password'),
+		'linux_app': host.linux_app,
+	}

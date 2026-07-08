@@ -2,10 +2,13 @@ from django.core.paginator import Paginator
 from django.shortcuts import get_object_or_404, render, redirect
 from django.http import HttpResponse, HttpResponseNotAllowed, JsonResponse
 from django.db.models import Q
+from django.middleware.csrf import get_token
+from django.urls import reverse
 
 
 from PyLinux.crypto import decrypt_text, encrypt_text
 from PyLinux.security import security_context
+from PyLinux.vue import form_errors, model_dict, render_vue_page
 from devops.services import audit
 from .models import Password
 from .forms import Password_manage
@@ -43,14 +46,55 @@ def _password_page_context(request, password_queryset, keyword=None):
 	return content
 
 
+def _password_payload(item):
+	return {
+		'id': item.id,
+		'system_name': item.system_name,
+		'account': item.account,
+		'remark': item.remark,
+		'update_url': reverse('password:password_update', args=[item.id]),
+		'reveal_url': reverse('password:password_reveal', args=[item.id]),
+	}
+
+
+def _render_password_list(request, password_queryset, keyword=None):
+	content = _password_page_context(request, password_queryset, keyword)
+	return render_vue_page(request, 'password-list', '密码管理', {
+		'subtitle': '按当前登录用户隔离账号密码记录',
+		'keyword': keyword or '',
+		'passwords': [_password_payload(item) for item in content['pages']],
+		'system_names': [item.system_name for item in content['pages']],
+		'actions': [{'label': '新增密码', 'url': reverse('password:password_create'), 'class': 'btn-primary'}],
+	}, content)
+
+
+def _render_password_form(request, title, action, password=None, form=None, status=200):
+	context = _password_form_context(request, password, form)
+	data = model_dict(password) or {}
+	if request.method == 'POST':
+		data.update({
+			'system_name': request.POST.get('system_name') or data.get('system_name', ''),
+			'account': request.POST.get('account', data.get('account', '')),
+			'remark': request.POST.get('remark', data.get('remark', '')),
+		})
+	return render_vue_page(request, 'password-form', title, {
+		'subtitle': '密码内容不会直接渲染到页面源码',
+		'csrf': get_token(request),
+		'action': action,
+		'password': data,
+		'keep_hint': '留空则保持原密码不变' if password else '',
+		'errors': form_errors(form),
+		'actions': [{'label': '返回列表', 'url': reverse('password:password_manage')}],
+	}, context, status=status)
+
+
 @session_login_required
 def password_manage(request):
 	if request.method != "GET":
 		return HttpResponseNotAllowed(["GET"])
 	# 只显示当前用户管理的账号密码。
 	password = _current_user_passwords(request)
-	content = _password_page_context(request, password)
-	return render(request, "password/password_manage.html", content)
+	return _render_password_list(request, password)
 
 
 @session_login_required
@@ -65,9 +109,9 @@ def password_create(request):
 			audit(request, '创建密码记录', 'Password', password.id, password.system_name)
 			return redirect("password:password_manage")
 		else:
-			return render(request, "password/password_create.html", _password_form_context(request, form=passwd_manage), status=400)
+			return _render_password_form(request, '新增密码', reverse('password:password_create'), form=passwd_manage, status=400)
 	else:
-		return render(request, "password/password_create.html", _password_form_context(request))
+		return _render_password_form(request, '新增密码', reverse('password:password_create'))
 
 
 @session_login_required
@@ -91,9 +135,9 @@ def password_update(request, id):
 			audit(request, '更新密码记录', 'Password', password.id, password.system_name)
 			return redirect("password:password_manage")
 		else:
-			return render(request, 'password/password_update.html', _password_form_context(request, password, passwd_info), status=400)
+			return _render_password_form(request, '编辑密码', reverse('password:password_update', args=[password.id]), password, passwd_info, status=400)
 	else:
-		return render(request, 'password/password_update.html', _password_form_context(request, password))
+		return _render_password_form(request, '编辑密码', reverse('password:password_update', args=[password.id]), password)
 
 
 @session_login_required
@@ -116,8 +160,7 @@ def password_search(request):
 	password = _current_user_passwords(request)
 	if pwd:
 		password = password.filter(Q(system_name__icontains=pwd) | Q(account__icontains=pwd) | Q(remark__icontains=pwd))
-	content = _password_page_context(request, password, pwd)
-	return render(request, 'password/password_manage.html', content)
+	return _render_password_list(request, password, pwd)
 
 
 @session_login_required

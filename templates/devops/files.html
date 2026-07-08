@@ -1,0 +1,46 @@
+{% extends "base.html" %}
+
+{% block title %}文件分发 - DevOps平台{% endblock %}
+
+{% block content %}
+<div class="container-fluid px-4">
+    <h1 class="h3 mb-3">文件分发</h1>
+    {% include "devops/_nav.html" %}
+
+    <div class="card mb-3">
+        <div class="card-body">
+            <div class="alert alert-info py-2">文件分发提交后会在后台执行，可进入详情查看每台主机结果。</div>
+            <form method="post" enctype="multipart/form-data">
+                {% csrf_token %}
+                <div class="row g-3">
+                    <div class="col-md-3"><label class="form-label">任务名称</label>{{ form.name }}</div>
+                    <div class="col-md-3"><label class="form-label">本地文件</label>{{ form.source_file }}</div>
+                    <div class="col-md-3"><label class="form-label">远端路径</label>{{ form.remote_path }}</div>
+                    <div class="col-md-3"><label class="form-label">目标主机</label>{{ form.hosts }}</div>
+                </div>
+                <button class="btn btn-primary mt-3" type="submit">开始分发</button>
+            </form>
+        </div>
+    </div>
+
+    <div class="card">
+        <div class="card-header">分发记录</div>
+        <div class="card-body table-responsive">
+            <table class="table table-hover">
+                <tr><th>时间</th><th>名称</th><th>状态</th><th>主机数</th><th>远端路径</th><th>摘要</th><th>操作</th></tr>
+                {% for item in records %}
+                <tr>
+                    <td>{{ item.created_at|date:"Y-m-d H:i:s" }}</td>
+                    <td>{{ item.name }}</td>
+                    <td>{{ item.get_status_display }}</td>
+                    <td>{{ item.hosts.count }}</td>
+                    <td><code>{{ item.remote_path }}</code></td>
+                    <td>{{ item.summary }}</td>
+                    <td><a class="btn btn-sm btn-outline-primary" href="{% url 'devops:file_distribution_detail' item.id %}">详情</a></td>
+                </tr>
+                {% empty %}<tr><td colspan="7" class="text-muted">暂无分发记录</td></tr>{% endfor %}
+            </table>
+        </div>
+    </div>
+</div>
+{% endblock %}

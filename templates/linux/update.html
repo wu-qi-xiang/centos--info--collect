@@ -1,77 +1,134 @@
-<!DOCTYPE html>
-<html lang="en">
-<head>
-    <meta charset="UTF-8">
-    <title>更新Linux主机信息</title>
-</head>
 {% extends "base.html" %}
 {% load staticfiles %}
+
+{% block title %}编辑服务器 - Linux监控系统{% endblock %}
+
 {% block content %}
-<body>
-<div class="container">
-        </br>
-            <!-- 提交文章的表单 -->
-        <form id="testform" method="post" action="#" enctype="multipart/form-data">
-            <!-- Django中需要POST数据的地方都必须有csrf_token -->
+<div class="ops-page-header">
+    <div>
+        <h1 class="ops-page-title"><i class="fas fa-edit me-2 text-primary"></i>编辑服务器</h1>
+        <p class="ops-page-subtitle">更新 {{ linux.linux_name|default:linux.linux_ip }} 的连接、认证和服务信息。</p>
+    </div>
+    <div class="ops-header-actions">
+        <a href="{% url 'linux_detail' %}" class="btn btn-outline-secondary"><i class="fas fa-arrow-left me-1"></i>返回列表</a>
+        <a href="{% url 'linux_list_detail' linux.id %}" class="btn btn-outline-primary"><i class="fas fa-info-circle me-1"></i>详情</a>
+    </div>
+</div>
+
+<div class="ops-form-layout">
+    <div class="ops-form-main">
+        <div class="ops-form-card">
+            <div class="form-header">
+                <div class="form-icon"><i class="fas fa-server"></i></div>
+                <div>
+                    <h4>服务器配置</h4>
+                    <p>保存后会用于服务器列表、WebSSH 和连接测试。</p>
+                </div>
+            </div>
+
+            <form id="testform" method="post" action="#" enctype="multipart/form-data">
                 {% csrf_token %}
-            <div class="row" style="margin-left: 300px">
-                <div class="form-group">
-                    <label><b>服务器名称</b></label>
-                    <input type="text" class="form-control" id="linux_name" name="linux_name" value="{{ linux.linux_name }}">
-                </div>
-                <div class="col-1"></div>
-                <div class="form-group">
-                    <label><b>主机IP地址</b></label>
-                    <input type="text" class="form-control" id="linux_ip" name="linux_ip" value="{{ linux.linux_ip }}">
-                </div>
-            </div>
+                {% include "includes/form_errors.html" %}
+                <input type="hidden" name="host_id" value="{{ linux.id }}">
 
-            <div class="row" style="margin-left: 300px">
-                <div class="form-group">
-                    <label><b>主机的主机名</b></label>
-                    <input type="text" class="form-control" id="linux_hostname" name="linux_hostname" value="{{ linux.linux_hostname }}">
+                <div class="form-section">
+                    <h5 class="form-section-title"><i class="fas fa-info-circle me-2"></i>基本信息</h5>
+                    <div class="ops-form-grid">
+                        <div class="form-group-custom">
+                            <label class="form-label-custom" for="linux_name">服务器名称</label>
+                            <input type="text" class="form-control-custom" id="linux_name" name="linux_name" value="{{ linux.linux_name }}">
+                        </div>
+                        <div class="form-group-custom">
+                            <label class="form-label-custom" for="linux_ip">主机 IP 地址</label>
+                            <input type="text" class="form-control-custom" id="linux_ip" name="linux_ip" value="{{ linux.linux_ip }}">
+                        </div>
+                        <div class="form-group-custom">
+                            <label class="form-label-custom" for="linux_hostname">主机名</label>
+                            <input type="text" class="form-control-custom" id="linux_hostname" name="linux_hostname" value="{{ linux.linux_hostname }}">
+                        </div>
+                        <div class="form-group-custom">
+                            <label class="form-label-custom" for="linux_port">SSH 端口</label>
+                            <input type="text" class="form-control-custom" id="linux_port" name="linux_port" value="{{ linux.linux_port }}">
+                        </div>
+                    </div>
                 </div>
-                <div class="col-1"></div>
-                <div class="form-group">
-                    <label><b>SSH端口</b></label>
-                    <input type="text" class="form-control" id="linux_port" name="linux_port" value="{{ linux.linux_port }}">
-                </div>
-            </div>
 
-            <div class="row" style="margin-left: 300px">
-                <div class="form-group">
-                    <label><b>用户名</b></label>
-                    <input type="text" class="form-control" id="linux_user" name="linux_user" value="{{ linux.linux_user}}">
-                </div>
-                <div class="col-1"></div>
-                <div class="form-group">
-                    <label><b>密码</b></label>
-                    <input type="password" class="form-control" id="linux_passwd" name="linux_passwd" value="{{ linux.linux_passwd }}">
-                </div>
-            </div>
+                <div class="form-section">
+                    <h5 class="form-section-title"><i class="fas fa-key me-2"></i>认证信息</h5>
+                    <div class="ops-form-grid">
+                        <div class="form-group-custom">
+                            <label class="form-label-custom" for="linux_auth_type">认证方式</label>
+                            <select class="form-control-custom" id="linux_auth_type" name="linux_auth_type">
+                                <option value="password" {% if linux.linux_auth_type != "key" %}selected{% endif %}>密码</option>
+                                <option value="key" {% if linux.linux_auth_type == "key" %}selected{% endif %}>SSH Key</option>
+                            </select>
+                        </div>
+                        <div class="form-group-custom">
+                            <label class="form-label-custom" for="linux_user">用户名</label>
+                            <input type="text" class="form-control-custom" id="linux_user" name="linux_user" value="{{ linux.linux_user}}">
+                        </div>
+                        <div class="form-group-custom">
+                            <label class="form-label-custom" for="linux_passwd">密码</label>
+                            <input type="password" class="form-control-custom" id="linux_passwd" name="linux_passwd" value="" placeholder="留空则保持原密码不变">
+                            <small class="form-text text-muted">密码模式下留空将保持原密码；SSH Key 模式可作为 sudo 或私钥补充密码。</small>
+                        </div>
+                    </div>
 
-            <div class="row" style="margin-left: 300px">
-                <div class="form-group input-xlarge">
-                    <label><b>主机上的服务</b></label>
-                    <textarea type="text" class="form-control" style="width: 260%;line-height: 4" id="linux_app" name="linux_app">{{ linux.linux_app }}</textarea>
+                    <div class="ops-form-grid mt-2" id="private_key_fields">
+                        <div class="form-group-custom ops-span-2">
+                            <label class="form-label-custom" for="linux_private_key">SSH 私钥{% if linux.has_private_key %}（已保存，留空则不修改）{% endif %}</label>
+                            <textarea class="form-control-custom" id="linux_private_key" name="linux_private_key" rows="8" placeholder="-----BEGIN OPENSSH PRIVATE KEY-----"></textarea>
+                        </div>
+                        <div class="form-group-custom ops-span-2" id="private_key_passphrase_fields">
+                            <label class="form-label-custom" for="linux_private_key_passphrase">私钥口令（留空则不修改）</label>
+                            <input type="password" class="form-control-custom" id="linux_private_key_passphrase" name="linux_private_key_passphrase" value="">
+                        </div>
+                    </div>
                 </div>
-            </div>
 
-            <div class="row" style="margin-left: 300px">
-                <!-- 测试按钮 -->
-                <button type="button" class="btn btn-success" style="width: 15%;font-size: 15px;font-weight: bold;" id="ajax_test" >测试连接</button>
-                <!-- 复制按钮 -->
-                <div class="col-1"></div>
-                    <button type="button" class="btn btn-success" style="width: 10%;font-size: 15px;font-weight: bold;" id="copy_form">复制</button>
-                <!-- 提交按钮 -->
-                <div class="col-1"></div>
-                    <button type="submit" class="btn btn-success" style="width: 15%;font-size: 15px;font-weight: bold;">更新</button>
-            </div>
-        </form>
+                <div class="form-section">
+                    <h5 class="form-section-title"><i class="fas fa-cogs me-2"></i>服务信息</h5>
+                    <div class="form-group-custom">
+                        <label class="form-label-custom" for="linux_app">主机上的服务</label>
+                        <textarea class="form-control-custom" id="linux_app" name="linux_app" rows="5">{{ linux.linux_app }}</textarea>
+                    </div>
+                </div>
+
+                <div class="form-actions">
+                    <div class="ops-action-row">
+                        <button type="button" class="btn btn-outline-primary" id="ajax_test"><i class="fas fa-plug me-1"></i>测试连接</button>
+                        <button type="button" class="btn btn-outline-secondary" id="copy_form"><i class="fas fa-copy me-1"></i>复制</button>
+                        <button type="submit" class="btn btn-primary"><i class="fas fa-save me-1"></i>更新服务器</button>
+                    </div>
+                </div>
+            </form>
+        </div>
+    </div>
+
+    <aside class="ops-side-panel">
+        <h2>当前配置</h2>
+        <div class="ops-kv"><span>服务器</span><strong>{{ linux.linux_name|default:"-" }}</strong></div>
+        <div class="ops-kv"><span>IP</span><strong>{{ linux.linux_ip }}</strong></div>
+        <div class="ops-kv"><span>端口</span><strong>{{ linux.linux_port }}</strong></div>
+        <div class="ops-kv"><span>认证</span><strong>{% if linux.linux_auth_type == "key" %}SSH Key{% else %}密码{% endif %}</strong></div>
+    </aside>
 </div>
 {% endblock content %}
+
 {% block script %}
 <script>
+    function toggleAuthFields() {
+        var authType = $('#linux_auth_type').val();
+        var keyMode = authType === 'key';
+        $('#private_key_fields').toggle(keyMode);
+        $('#private_key_passphrase_fields').toggle(keyMode);
+        $('#linux_passwd').prop('required', !keyMode);
+        $('#linux_private_key').prop('required', keyMode && !{{ linux.has_private_key|yesno:"true,false" }});
+    }
+
+    $('#linux_auth_type').change(toggleAuthFields);
+    toggleAuthFields();
+
     $('#ajax_test').click(function () {
         $.ajax({
             url:'/connect_test/',
@@ -81,11 +138,9 @@
             success:function (data) {
                 alert(data);
             }
-            })
-    })
-</script>
+        });
+    });
 
-<script>
     $('#copy_form').click(function () {
         $.ajax({
             url:'/linux_copy/',
@@ -95,10 +150,7 @@
             success:function (data) {
                 alert(data);
             }
-            })
-    })
+        });
+    });
 </script>
-
 {% endblock script %}
-</body>
-</html>

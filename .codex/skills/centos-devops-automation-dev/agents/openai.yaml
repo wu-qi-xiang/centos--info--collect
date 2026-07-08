@@ -1,0 +1,4 @@
+interface:
+  display_name: "CentOS DevOps Dev"
+  short_description: "Develop DevOps APIs, automation workflows, permissions, approvals, and notifications."
+  default_prompt: "Use this skill for centos--info--collect DevOps automation, API, permission, command, deployment, or notification changes."

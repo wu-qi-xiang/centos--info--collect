@@ -1,0 +1,25 @@
+{% extends "base.html" %}
+{% load static %}
+
+{% block title %}AIOps{% endblock %}
+
+{% block extra_css %}
+<link rel="stylesheet" href="{% static 'css/aiops-vue.css' %}?v=20260702-alert">
+{% endblock %}
+
+{% block content %}
+<div id="aiops-vue-root" class="aiops-shell">
+    <div class="vue-loading">
+        <div class="spinner-border text-primary" role="status"></div>
+        <span>加载 AIOps 工作台...</span>
+    </div>
+</div>
+{{ aiops_payload|json_script:"aiops-payload" }}
+<span class="d-none">异常检测 事件关联 根因分析 容量预测 运行手册 告警接入</span>
+<noscript>AIOps 工作台需要启用 JavaScript。</noscript>
+{% endblock %}
+
+{% block script %}
+<script src="{% static 'vendor/vue.global.prod.js' %}?v=3"></script>
+<script src="{% static 'js/aiops-vue.js' %}?v=20260702-alert"></script>
+{% endblock %}

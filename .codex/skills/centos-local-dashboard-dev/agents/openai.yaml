@@ -1,0 +1,4 @@
+interface:
+  display_name: "CentOS Dashboard Dev"
+  short_description: "Develop local dashboard, host search, local collectors, and charts."
+  default_prompt: "Use this skill for centos--info--collect local dashboard, search, local collector, or chart changes."

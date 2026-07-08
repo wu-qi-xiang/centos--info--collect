@@ -1,0 +1,4 @@
+interface:
+  display_name: "CentOS Auth Dev"
+  short_description: "Develop custom login, registration, session, and password behavior."
+  default_prompt: "Use this skill for centos--info--collect auth, login, register, session, or user password changes."

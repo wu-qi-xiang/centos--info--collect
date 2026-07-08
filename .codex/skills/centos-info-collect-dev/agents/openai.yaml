@@ -1,0 +1,4 @@
+interface:
+  display_name: "CentOS Info Collect Dev"
+  short_description: "Develop the centos--info--collect Django monitoring project."
+  default_prompt: "Use this skill when changing or reviewing the centos--info--collect project."

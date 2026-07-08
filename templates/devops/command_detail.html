@@ -1,0 +1,47 @@
+{% extends "base.html" %}
+
+{% block title %}命令详情 - DevOps平台{% endblock %}
+
+{% block content %}
+<div class="container-fluid px-4">
+    <div class="d-flex justify-content-between align-items-center mb-3">
+        <h1 class="h3 mb-0">命令详情</h1>
+        <a class="btn btn-outline-secondary btn-sm" href="{% url 'devops:command_center' %}">返回列表</a>
+    </div>
+    {% include "devops/_nav.html" %}
+
+    <div class="card mb-3">
+        <div class="card-body">
+            <div class="row g-3">
+                <div class="col-md-3"><div class="text-muted">主机</div><strong>{{ record.host.linux_name }}</strong></div>
+                <div class="col-md-3"><div class="text-muted">IP</div><strong>{{ record.host.linux_ip }}</strong></div>
+                <div class="col-md-2"><div class="text-muted">状态</div><strong>{{ record.get_status_display }}</strong></div>
+                <div class="col-md-2"><div class="text-muted">耗时</div><strong>{{ record.duration_ms }}ms</strong></div>
+                <div class="col-md-2"><div class="text-muted">执行人</div><strong>{{ record.created_by|default:"-" }}</strong></div>
+                <div class="col-md-3"><div class="text-muted">重试次数</div><strong>{{ runtime_config.retry_count }}</strong></div>
+                <div class="col-md-3"><div class="text-muted">SSH连接超时</div><strong>{{ runtime_config.ssh_timeout }}秒</strong></div>
+                <div class="col-md-3"><div class="text-muted">命令超时</div><strong>{{ runtime_config.command_timeout }}秒</strong></div>
+            </div>
+            <hr>
+            <div class="text-muted mb-1">命令</div>
+            <pre class="bg-light p-3 mb-0"><code>{{ record.command }}</code></pre>
+        </div>
+    </div>
+
+    <div class="row g-3">
+        <div class="col-lg-6">
+            <div class="card h-100">
+                <div class="card-header">标准输出</div>
+                <div class="card-body"><pre class="bg-light p-3 mb-0">{{ record.output|default:"无输出" }}</pre></div>
+            </div>
+        </div>
+        <div class="col-lg-6">
+            <div class="card h-100">
+                <div class="card-header">错误输出</div>
+                <div class="card-body"><pre class="bg-light p-3 mb-0">{{ record.error|default:"无错误" }}</pre></div>
+            </div>
+        </div>
+    </div>
+</div>
+{% include "devops/_auto_refresh.html" with object=record %}
+{% endblock %}

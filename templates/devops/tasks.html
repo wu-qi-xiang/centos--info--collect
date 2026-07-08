@@ -1,0 +1,36 @@
+{% extends "base.html" %}
+
+{% block title %}批量任务 - DevOps平台{% endblock %}
+
+{% block content %}
+<div class="container-fluid px-4">
+    <h1 class="h3 mb-3">批量任务</h1>
+    {% include "devops/_nav.html" %}
+    <div class="card mb-3"><div class="card-body">
+        <div class="alert alert-info py-2">批量任务提交后会在后台执行，可进入详情查看逐主机结果。</div>
+        <form method="post">
+            {% csrf_token %}
+            <div class="mb-3"><label class="form-label">任务名称</label>{{ form.name }}</div>
+            <div class="mb-3"><label class="form-label">目标主机</label>{{ form.hosts }}</div>
+            <div class="mb-3"><label class="form-label">命令</label>{{ form.command }}</div>
+            <button class="btn btn-danger" type="submit">执行批量任务</button>
+        </form>
+    </div></div>
+    <div class="card"><div class="card-header">任务记录</div><div class="card-body table-responsive">
+        <table class="table">
+            <tr><th>时间</th><th>名称</th><th>状态</th><th>主机数</th><th>摘要</th><th>命令</th><th>操作</th></tr>
+            {% for task in tasks %}
+            <tr>
+                <td>{{ task.created_at|date:"Y-m-d H:i:s" }}</td>
+                <td>{{ task.name }}</td>
+                <td>{{ task.get_status_display }}</td>
+                <td>{{ task.hosts.count }}</td>
+                <td>{{ task.summary }}</td>
+                <td><code>{{ task.command|truncatechars:60 }}</code></td>
+                <td><a class="btn btn-sm btn-outline-primary" href="{% url 'devops:batch_task_detail' task.id %}">详情</a></td>
+            </tr>
+            {% empty %}<tr><td colspan="7" class="text-muted">暂无任务</td></tr>{% endfor %}
+        </table>
+    </div></div>
+</div>
+{% endblock %}

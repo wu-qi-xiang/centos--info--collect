@@ -1,0 +1,94 @@
+{% extends "base.html" %}
+
+{% block title %}主机分组 - DevOps平台{% endblock %}
+
+{% block content %}
+<div class="container-fluid px-4">
+    <h1 class="h3 mb-3">主机分组</h1>
+    {% include "devops/_nav.html" %}
+    <div class="row g-3 mb-3">
+        <div class="col-lg-4">
+            <div class="card"><div class="card-header">新增分组</div><div class="card-body">
+                <form method="post" action="{% url 'devops:group_create' %}">
+                    {% csrf_token %}
+                    <div class="mb-3"><label class="form-label">名称</label>{{ form.name }}</div>
+                    <div class="mb-3"><label class="form-label">说明</label>{{ form.description }}</div>
+                    <div class="mb-3"><label class="form-label">主机</label>{{ form.hosts }}</div>
+                    <button class="btn btn-primary" type="submit">保存</button>
+                </form>
+            </div></div>
+        </div>
+        <div class="col-lg-8">
+            <div class="card"><div class="card-header">分组列表</div><div class="card-body table-responsive">
+                <table class="table table-hover">
+                    <tr><th>名称</th><th>说明</th><th>主机</th><th>创建人</th><th>操作</th></tr>
+                    {% for group in groups %}
+                    <tr>
+                        <td>
+                            <form id="group-update-{{ group.id }}" method="post" action="{% url 'devops:group_update' group.id %}">{% csrf_token %}</form>
+                            <input form="group-update-{{ group.id }}" name="name" class="form-control form-control-sm" value="{{ group.name }}">
+                        </td>
+                        <td><input form="group-update-{{ group.id }}" name="description" class="form-control form-control-sm" value="{{ group.description }}"></td>
+                        <td>
+                            <select form="group-update-{{ group.id }}" name="hosts" class="form-select form-select-sm" multiple>
+                                {% for host in form.hosts.field.queryset %}
+                                <option value="{{ host.id }}" {% if host in group.hosts.all %}selected{% endif %}>{{ host.linux_name }}</option>
+                                {% endfor %}
+                            </select>
+                        </td>
+                        <td>{{ group.created_by }}</td>
+                        <td class="d-flex gap-1">
+                            <button form="group-update-{{ group.id }}" class="btn btn-sm btn-outline-primary" type="submit">保存</button>
+                            <form method="post" action="{% url 'devops:group_delete' group.id %}">{% csrf_token %}<button class="btn btn-sm btn-outline-danger" type="submit">删除</button></form>
+                        </td>
+                    </tr>
+                    {% empty %}<tr><td colspan="5" class="text-muted">暂无分组</td></tr>{% endfor %}
+                </table>
+            </div></div>
+        </div>
+    </div>
+
+    <div class="row g-3">
+        <div class="col-lg-4">
+            <div class="card"><div class="card-header">新增标签</div><div class="card-body">
+                <form method="post" action="{% url 'devops:tag_create' %}">
+                    {% csrf_token %}
+                    <div class="mb-3"><label class="form-label">名称</label>{{ tag_form.name }}</div>
+                    <div class="mb-3"><label class="form-label">颜色</label>{{ tag_form.color }}</div>
+                    <div class="mb-3"><label class="form-label">说明</label>{{ tag_form.description }}</div>
+                    <div class="mb-3"><label class="form-label">主机</label>{{ tag_form.hosts }}</div>
+                    <button class="btn btn-primary" type="submit">保存标签</button>
+                </form>
+            </div></div>
+        </div>
+        <div class="col-lg-8">
+            <div class="card"><div class="card-header">标签列表</div><div class="card-body table-responsive">
+                <table class="table table-hover">
+                    <tr><th>名称</th><th>颜色</th><th>说明</th><th>主机</th><th>操作</th></tr>
+                    {% for tag in tags %}
+                    <tr>
+                        <td>
+                            <form id="tag-update-{{ tag.id }}" method="post" action="{% url 'devops:tag_update' tag.id %}">{% csrf_token %}</form>
+                            <input form="tag-update-{{ tag.id }}" name="name" class="form-control form-control-sm" value="{{ tag.name }}">
+                        </td>
+                        <td><input form="tag-update-{{ tag.id }}" name="color" class="form-control form-control-sm" value="{{ tag.color }}"></td>
+                        <td><input form="tag-update-{{ tag.id }}" name="description" class="form-control form-control-sm" value="{{ tag.description }}"></td>
+                        <td>
+                            <select form="tag-update-{{ tag.id }}" name="hosts" class="form-select form-select-sm" multiple>
+                                {% for host in tag_form.hosts.field.queryset %}
+                                <option value="{{ host.id }}" {% if host in tag.hosts.all %}selected{% endif %}>{{ host.linux_name }}</option>
+                                {% endfor %}
+                            </select>
+                        </td>
+                        <td class="d-flex gap-1">
+                            <button form="tag-update-{{ tag.id }}" class="btn btn-sm btn-outline-primary" type="submit">保存</button>
+                            <form method="post" action="{% url 'devops:tag_delete' tag.id %}">{% csrf_token %}<button class="btn btn-sm btn-outline-danger" type="submit">删除</button></form>
+                        </td>
+                    </tr>
+                    {% empty %}<tr><td colspan="5" class="text-muted">暂无标签</td></tr>{% endfor %}
+                </table>
+            </div></div>
+        </div>
+    </div>
+</div>
+{% endblock %}

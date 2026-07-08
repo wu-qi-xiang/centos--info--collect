@@ -1,0 +1,4 @@
+interface:
+  display_name: "CentOS Host SSH Dev"
+  short_description: "Develop host inventory, SSH credentials, collectors, import, and WebSSH."
+  default_prompt: "Use this skill for centos--info--collect host inventory, SSH, remote collection, import, or WebSSH changes."

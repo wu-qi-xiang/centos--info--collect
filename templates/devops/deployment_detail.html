@@ -1,0 +1,67 @@
+{% extends "base.html" %}
+
+{% block title %}发布详情 - DevOps平台{% endblock %}
+
+{% block content %}
+<div class="container-fluid px-4">
+    <div class="d-flex justify-content-between align-items-center mb-3">
+        <h1 class="h3 mb-0">发布详情</h1>
+        <a class="btn btn-outline-secondary btn-sm" href="{% url 'devops:deployments' %}">返回列表</a>
+    </div>
+    {% include "devops/_nav.html" %}
+
+    <div class="card mb-3">
+        <div class="card-body">
+            <div class="row g-3">
+                <div class="col-md-3"><div class="text-muted">应用</div><strong>{{ release.app.name }}</strong></div>
+                <div class="col-md-2"><div class="text-muted">版本</div><strong>{{ release.version }}</strong></div>
+                <div class="col-md-2"><div class="text-muted">状态</div><strong>{{ release.get_status_display }}</strong></div>
+                <div class="col-md-2"><div class="text-muted">执行人</div><strong>{{ release.created_by|default:"-" }}</strong></div>
+                <div class="col-md-3"><div class="text-muted">摘要</div><strong>{{ release.summary|default:"-" }}</strong></div>
+            </div>
+            <hr>
+            <div class="row g-3">
+                <div class="col-lg-6">
+                    <div class="text-muted mb-1">发布脚本</div>
+                    <pre class="bg-light p-3 mb-0"><code>{{ release.deploy_script }}</code></pre>
+                </div>
+                <div class="col-lg-6">
+                    <div class="text-muted mb-1">回滚脚本</div>
+                    <pre class="bg-light p-3 mb-0"><code>{{ release.rollback_script|default:"未配置" }}</code></pre>
+                </div>
+            </div>
+            <form method="post" action="{% url 'devops:deployment_rollback' release.id %}" class="mt-3">
+                {% csrf_token %}
+                <button class="btn btn-outline-danger" type="submit">执行回滚</button>
+            </form>
+        </div>
+    </div>
+
+    <div class="card">
+        <div class="card-header">执行结果</div>
+        <div class="card-body table-responsive">
+            <table class="table table-sm align-middle">
+                <tr><th>时间</th><th>动作</th><th>主机</th><th>状态</th><th>耗时</th><th>输出</th><th>操作</th></tr>
+                {% for result in results %}
+                <tr>
+                    <td>{{ result.created_at|date:"Y-m-d H:i:s" }}</td>
+                    <td>{{ result.get_action_display }}</td>
+                    <td>{{ result.host.linux_name }}</td>
+                    <td>{{ result.get_status_display }}</td>
+                    <td>{{ result.duration_ms }}ms</td>
+                    <td>{{ result.output|default:result.error|truncatechars:100 }}</td>
+                    <td>
+                        {% if result.command_execution %}
+                        <a class="btn btn-sm btn-outline-primary" href="{% url 'devops:command_detail' result.command_execution.id %}">命令详情</a>
+                        {% else %}
+                        <span class="text-muted">-</span>
+                        {% endif %}
+                    </td>
+                </tr>
+                {% empty %}<tr><td colspan="7" class="text-muted">暂无结果</td></tr>{% endfor %}
+            </table>
+        </div>
+    </div>
+</div>
+{% include "devops/_auto_refresh.html" with object=release %}
+{% endblock %}

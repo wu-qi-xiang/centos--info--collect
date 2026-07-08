@@ -1,0 +1,30 @@
+{% extends "base.html" %}
+
+{% block title %}服务管理 - DevOps平台{% endblock %}
+
+{% block content %}
+<div class="container-fluid px-4">
+    <h1 class="h3 mb-3">服务管理</h1>
+    {% include "devops/_nav.html" %}
+    <div class="card mb-3"><div class="card-body">
+        <form method="post">
+            {% csrf_token %}
+            <div class="mb-3"><label class="form-label">主机</label>{{ form.host }}</div>
+            <div class="mb-3"><label class="form-label">服务名</label>{{ form.service_name }}</div>
+            <div class="mb-3"><label class="form-label">操作</label>{{ form.action }}</div>
+            <button class="btn btn-warning" type="submit">执行服务操作</button>
+        </form>
+    </div></div>
+    {% if result %}
+    <div class="card mb-3"><div class="card-header">本次操作：{{ result.status }}</div><div class="card-body"><pre class="bg-light p-3">{{ result.output }}</pre></div></div>
+    {% endif %}
+    <div class="card"><div class="card-header">服务操作记录</div><div class="card-body table-responsive">
+        <table class="table table-sm">
+            <tr><th>时间</th><th>主机</th><th>服务</th><th>操作</th><th>状态</th><th>输出</th></tr>
+            {% for item in records %}
+            <tr><td>{{ item.created_at|date:"Y-m-d H:i:s" }}</td><td>{{ item.host.linux_name }}</td><td>{{ item.service_name }}</td><td>{{ item.get_action_display }}</td><td>{{ item.status }}</td><td>{{ item.output|truncatechars:80 }}</td></tr>
+            {% empty %}<tr><td colspan="6" class="text-muted">暂无记录</td></tr>{% endfor %}
+        </table>
+    </div></div>
+</div>
+{% endblock %}
