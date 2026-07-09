@@ -52,11 +52,15 @@
                 deployments: [],
                 files: [],
                 notifications: { channels: [], logs: [] },
+                auditLogs: [],
+                approvalComments: {},
+                approvalBusy: null,
                 metrics: null,
                 refreshTimer: null,
                 commandForm: { host_id: '', command: '' },
                 taskForm: { name: '', host_ids: [], command: '' },
                 metricFilters: { host: '', range: '24h' },
+                auditFilters: { q: '', user: '', action: '', target_type: '' },
                 tabs: [
                     { key: 'dashboard', label: '概览', icon: 'fas fa-gauge-high' },
                     { key: 'hosts', label: '主机', icon: 'fas fa-server' },
@@ -67,6 +71,7 @@
                     { key: 'deployments', label: '发布', icon: 'fas fa-rocket', permission: 'deployment' },
                     { key: 'files', label: '文件', icon: 'fas fa-file-arrow-up', permission: 'file' },
                     { key: 'notifications', label: '通知', icon: 'fas fa-bullhorn', permission: 'notification' },
+                    { key: 'audit', label: '审计', icon: 'fas fa-clipboard-list', permission: 'audit' },
                 ],
             };
         },
@@ -85,6 +90,9 @@
             },
             canRunTask() {
                 return this.bootstrap && this.bootstrap.permissions && this.bootstrap.permissions.task;
+            },
+            canDecideApproval() {
+                return this.bootstrap && this.bootstrap.permissions && this.bootstrap.permissions.approval_admin;
             },
             visibleTabs() {
                 const permissions = (this.bootstrap && this.bootstrap.permissions) || {};
@@ -127,7 +135,7 @@
                 this.loading = true;
                 this.error = '';
                 try {
-                    const [bootstrap, dashboard, hosts, commands, tasks, approvals, deployments, files, notifications] = await Promise.all([
+                    const [bootstrap, dashboard, hosts, commands, tasks, approvals, deployments, files] = await Promise.all([
                         apiFetch('/devops/api/bootstrap/'),
                         apiFetch('/devops/api/dashboard/'),
                         apiFetch('/devops/api/hosts/'),
@@ -136,7 +144,6 @@
                         apiFetch('/devops/api/approvals/?limit=50'),
                         apiFetch('/devops/api/deployments/?limit=20'),
                         apiFetch('/devops/api/files/?limit=20'),
-                        apiFetch('/devops/api/notifications/'),
                     ]);
                     this.bootstrap = bootstrap;
                     this.dashboard = dashboard;
@@ -144,14 +151,26 @@
                     this.commands = commands.results || [];
                     this.tasks = tasks.results || [];
                     this.approvals = approvals.results || [];
+                    this.syncApprovalComments();
                     this.deployments = deployments.results || [];
                     this.files = files.results || [];
-                    this.notifications = notifications || { channels: [], logs: [] };
+                    const permissions = (this.bootstrap && this.bootstrap.permissions) || {};
+                    this.notifications = { channels: [], logs: [] };
+                    this.auditLogs = [];
+                    if (permissions.notification) {
+                        this.notifications = await apiFetch('/devops/api/notifications/');
+                    }
+                    if (permissions.audit) {
+                        await this.loadAuditLogs();
+                    }
                     if (!this.visibleTabs.some((tab) => tab.key === this.activeTab)) this.activeTab = 'dashboard';
                     if (!this.commandForm.host_id && this.hosts.length) this.commandForm.host_id = this.hosts[0].id;
                     if (!this.taskForm.host_ids.length && this.hosts.length) this.taskForm.host_ids = [this.hosts[0].id];
                     if (!this.metricFilters.host && this.hosts.length) this.metricFilters.host = this.hosts[0].id;
-                    await this.loadMetrics();
+                    this.metrics = null;
+                    if (permissions.metric) {
+                        await this.loadMetrics();
+                    }
                     this.scheduleStatusRefresh();
                 } catch (error) {
                     this.error = error.message;
@@ -238,6 +257,52 @@
                 const payload = await apiFetch('/devops/api/tasks/?limit=20');
                 this.tasks = payload.results || [];
             },
+            syncApprovalComments() {
+                const comments = {};
+                (this.approvals || []).forEach((item) => {
+                    comments[item.id] = this.approvalComments[item.id] || item.comment || '';
+                });
+                this.approvalComments = comments;
+            },
+            async reloadApprovals() {
+                const [bootstrap, approvals] = await Promise.all([
+                    apiFetch('/devops/api/bootstrap/'),
+                    apiFetch('/devops/api/approvals/?limit=50'),
+                ]);
+                this.bootstrap = bootstrap;
+                this.approvals = approvals.results || [];
+                this.syncApprovalComments();
+            },
+            async decideApproval(item, action) {
+                if (!item || !item.id || this.approvalBusy) return;
+                this.error = '';
+                this.notice = '';
+                this.approvalBusy = item.id;
+                try {
+                    const payload = await apiFetch(`/devops/api/approvals/${item.id}/decide/`, {
+                        method: 'POST',
+                        body: JSON.stringify({
+                            action,
+                            comment: this.approvalComments[item.id] || '',
+                        }),
+                    });
+                    this.notice = `${action === 'approve' ? '已批准' : '已拒绝'}：${payload.approval.title}`;
+                    await this.reloadApprovals();
+                } catch (error) {
+                    this.error = error.message;
+                } finally {
+                    this.approvalBusy = null;
+                }
+            },
+            async loadAuditLogs() {
+                const query = new URLSearchParams({ limit: '50' });
+                Object.keys(this.auditFilters).forEach((key) => {
+                    const value = (this.auditFilters[key] || '').trim();
+                    if (value) query.set(key, value);
+                });
+                const payload = await apiFetch(`/devops/api/audit-logs/?${query.toString()}`);
+                this.auditLogs = payload.results || [];
+            },
             setActiveTab(key, event) {
                 this.activeTab = key;
                 this.$nextTick(() => {
@@ -273,6 +338,7 @@
                     deployments: this.deployments.length,
                     files: this.files.length,
                     notifications: (this.notifications.channels || []).length,
+                    audit: this.auditLogs.length,
                 };
                 return countMap[key] || '';
             },
@@ -489,7 +555,21 @@
                     <div class="vue-panel-body">
                         <div class="vue-command-list" v-if="approvals.length">
                             <div class="vue-command-row" v-for="item in approvals" :key="item.id">
-                                <div class="vue-row-main"><div class="vue-row-title"># [[ item.id ]] · [[ item.title ]]</div><div class="vue-row-meta"><span>[[ item.request_type_label ]]</span><span>申请人 [[ item.requester || '-' ]]</span><span>[[ item.created_at || '-' ]]</span></div><div class="vue-row-note">[[ item.reason || '-' ]]</div></div>
+                                <div class="vue-row-main">
+                                    <div class="vue-row-title"># [[ item.id ]] · [[ item.title ]]</div>
+                                    <div class="vue-row-meta">
+                                        <span>[[ item.request_type_label ]]</span>
+                                        <span>申请人 [[ item.requester || '-' ]]</span>
+                                        <span>[[ item.created_at || '-' ]]</span>
+                                        <span v-if="item.approver">审批人 [[ item.approver ]]</span>
+                                    </div>
+                                    <div class="vue-row-note">[[ item.reason || item.comment || '-' ]]</div>
+                                    <div class="vue-approval-actions" v-if="item.status === 'pending' && canDecideApproval">
+                                        <input class="form-control form-control-sm" maxlength="500" v-model="approvalComments[item.id]" placeholder="审批意见">
+                                        <button class="btn btn-sm btn-success" type="button" :disabled="approvalBusy === item.id" @click="decideApproval(item, 'approve')"><i class="fas fa-check me-1"></i>批准</button>
+                                        <button class="btn btn-sm btn-outline-danger" type="button" :disabled="approvalBusy === item.id" @click="decideApproval(item, 'reject')"><i class="fas fa-xmark me-1"></i>拒绝</button>
+                                    </div>
+                                </div>
                                 <span class="vue-status" :class="statusClass(item.status)"><i :class="statusIcon(item.status)"></i>[[ item.status_label ]]</span>
                             </div>
                         </div>
@@ -547,6 +627,37 @@
                             </div>
                             <div class="vue-empty" v-else>暂无通知日志</div>
                         </div>
+                    </div>
+                </section>
+
+                <section v-if="activeTab === 'audit'" class="vue-panel">
+                    <div class="vue-panel-header">
+                        <h2 class="vue-panel-title"><i class="fas fa-clipboard-list"></i>审计日志</h2>
+                        <span class="vue-panel-count">[[ auditLogs.length ]] 条</span>
+                    </div>
+                    <div class="vue-panel-body">
+                        <form class="vue-filter-row vue-audit-filter" @submit.prevent="loadAuditLogs">
+                            <input class="form-control form-control-sm" v-model="auditFilters.q" placeholder="关键字">
+                            <input class="form-control form-control-sm" v-model="auditFilters.user" placeholder="用户">
+                            <input class="form-control form-control-sm" v-model="auditFilters.action" placeholder="动作">
+                            <input class="form-control form-control-sm" v-model="auditFilters.target_type" placeholder="对象类型">
+                            <button class="btn btn-sm btn-primary" type="submit"><i class="fas fa-search me-1"></i>查询</button>
+                        </form>
+                        <div class="vue-command-list mt-3" v-if="auditLogs.length">
+                            <div class="vue-command-row vue-audit-row" v-for="log in auditLogs" :key="log.id">
+                                <div class="vue-row-main">
+                                    <div class="vue-row-title">[[ log.action || '-' ]]</div>
+                                    <div class="vue-row-meta">
+                                        <span>用户 [[ log.user || '-' ]]</span>
+                                        <span>对象 [[ log.target_type || '-' ]]# [[ log.target_id || '-' ]]</span>
+                                        <span>[[ log.created_at || '-' ]]</span>
+                                        <span>IP [[ log.ip_address || '-' ]]</span>
+                                    </div>
+                                    <div class="vue-row-note vue-audit-detail">[[ log.detail || '-' ]]</div>
+                                </div>
+                            </div>
+                        </div>
+                        <div class="vue-empty" v-else>暂无审计日志</div>
                     </div>
                 </section>
             </div>

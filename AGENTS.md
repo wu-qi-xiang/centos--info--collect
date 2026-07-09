@@ -36,6 +36,25 @@ Before focused work, read the matching project skill under `.codex/skills/`:
 
 Use the smallest relevant skill set. Do not treat this file as a replacement for feature-specific instructions.
 
+## Subagent Workflow
+
+Use subagents for complex project work after the main agent has read the relevant skill instructions and produced a clear plan. Complex work includes new features, optimizations, requirement changes, cross-module fixes, schema/API/runtime changes, security-sensitive changes, frontend flows that require coordinated Python/template/static edits, and any task that needs multiple investigation or implementation tracks.
+
+The main agent is responsible for assigning work, coordinating subagents, collecting and merging their findings, reviewing results, validating the integrated change, and summarizing what changed for the user. It should keep the overall context, decisions, risks, and final report centralized.
+
+Subagents are responsible for completing the concrete requirements assigned to them. They should implement the requested code, tests, documentation, or focused investigation within their stated ownership boundaries, then report files changed, behavior changed, validation results, and any blockers back to the main agent.
+
+When delegating, give each subagent explicit ownership:
+
+- Objective and expected outcome.
+- Files, modules, or responsibility area it may change.
+- Files or areas it must not modify.
+- Required project skill and reference files to read.
+- Security constraints and sensitive data that must not be exposed.
+- Narrow validation commands to run, or the exact reason validation is skipped.
+
+Use `.codex/skills/centos-feature-dev/templates/subagent-task.md` as the default delegation prompt. Direct main-agent edits are reserved for non-development housekeeping or tiny, specific corrections with no design choice, permission impact, schema/API/runtime change, cross-module behavior, or substantive implementation work.
+
 When changing skill files, validate metadata and local references:
 
 ```bash

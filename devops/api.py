@@ -1,4 +1,5 @@
 import json
+import re
 from datetime import timedelta
 
 from django.db import models
@@ -10,6 +11,7 @@ from django.views.decorators.http import require_http_methods
 from .models import (
     AlertEvent,
     ApprovalRequest,
+    AuditLog,
     BatchTask,
     CommandExecution,
     DeploymentRelease,
@@ -29,11 +31,13 @@ from .services import (
     command_denied_message,
     create_command_approval,
     enqueue_background_job,
+    execute_approval_request,
     execute_batch_task,
     execute_command_record,
     evaluate_command_policy,
     has_role,
     latest_metric_map,
+    notify_approval,
     user_role,
     visible_hosts_for_request,
 )
@@ -46,16 +50,26 @@ MODULE_METRIC = DevOpsModulePermission.MODULE_METRIC
 MODULE_FILE = DevOpsModulePermission.MODULE_FILE
 MODULE_DEPLOYMENT = DevOpsModulePermission.MODULE_DEPLOYMENT
 MODULE_SECURITY = DevOpsModulePermission.MODULE_SECURITY
+MODULE_AUDIT = DevOpsModulePermission.MODULE_AUDIT
 NOTIFICATION_RESPONSE_PREVIEW_LENGTH = 300
+SENSITIVE_URL_RE = re.compile(r'https?://[^\s,;]+', re.IGNORECASE)
+SENSITIVE_ENC_RE = re.compile(r'\benc:[^\s,;]+', re.IGNORECASE)
+SENSITIVE_KV_RE = re.compile(
+    r'(?i)(\b(?:secret|password|passwd|token|api[_-]?key|private[_-]?key|key)\b\s*[:=]\s*)([^\s,;&]+)'
+)
 
 
 def api_error(message, status=400, code='bad_request'):
     return JsonResponse({'ok': False, 'code': code, 'message': message}, status=status)
 
 
+def invalid_json_error():
+    return api_error('JSON 格式错误', status=400, code='invalid_json')
+
+
 def api_login_required(view_func):
     def wrapper(request, *args, **kwargs):
-        if not request.session.get('is_login'):
+        if not request.session.get('is_login') or not request.session.get('user_id'):
             return api_error('未登录', status=401, code='unauthorized')
         return view_func(request, *args, **kwargs)
     return wrapper
@@ -233,6 +247,27 @@ def serialize_notification_log(log):
     }
 
 
+def redact_sensitive_text(value):
+    value = value or ''
+    value = SENSITIVE_URL_RE.sub('[redacted-url]', value)
+    value = SENSITIVE_ENC_RE.sub('enc:[redacted]', value)
+    value = SENSITIVE_KV_RE.sub(lambda match: '%s[redacted]' % match.group(1), value)
+    return value
+
+
+def serialize_audit_log(log):
+    return {
+        'id': log.id,
+        'user': log.user,
+        'action': log.action,
+        'target_type': log.target_type,
+        'target_id': log.target_id,
+        'detail': redact_sensitive_text(log.detail),
+        'ip_address': log.ip_address,
+        'created_at': iso(log.created_at),
+    }
+
+
 def limit_queryset(request, queryset, default=50, maximum=200):
     try:
         limit = int(request.GET.get('limit', default))
@@ -264,6 +299,7 @@ def bootstrap(request):
             'deployment': has_role(request, DevOpsRole.ROLE_VIEWER, MODULE_DEPLOYMENT),
             'file': has_role(request, DevOpsRole.ROLE_VIEWER, MODULE_FILE),
             'notification': has_role(request, DevOpsRole.ROLE_VIEWER, MODULE_SECURITY),
+            'audit': has_role(request, DevOpsRole.ROLE_VIEWER, MODULE_AUDIT),
         },
         'counts': {
             'hosts': hosts.count(),
@@ -321,8 +357,11 @@ def commands(request):
         return api_error('没有命令执行权限', status=403, code='forbidden')
     payload = request_json(request)
     if payload is None:
-        return api_error('JSON 格式错误')
-    host = get_object_or_404(visible_hosts, id=payload.get('host_id'))
+        return invalid_json_error()
+    try:
+        host = visible_hosts.get(id=payload.get('host_id'))
+    except (TypeError, ValueError, visible_hosts.model.DoesNotExist):
+        return api_error('目标主机不在当前用户授权范围内', status=403, code='host_forbidden')
     command = (payload.get('command') or '').strip()
     if not command:
         return api_error('命令不能为空')
@@ -358,7 +397,7 @@ def tasks(request):
         return api_error('没有批量任务权限', status=403, code='forbidden')
     payload = request_json(request)
     if payload is None:
-        return api_error('JSON 格式错误')
+        return invalid_json_error()
     host_ids = payload.get('host_ids') or []
     hosts_qs = visible_hosts.filter(id__in=host_ids)
     hosts_list = list(hosts_qs)
@@ -438,6 +477,56 @@ def approvals(request):
 
 
 @api_login_required
+@require_http_methods(['POST'])
+def approval_decide(request, id):
+    if not has_role(request, DevOpsRole.ROLE_ADMIN, MODULE_APPROVAL):
+        return api_error('没有审批管理权限', status=403, code='forbidden')
+    payload = request_json(request)
+    if payload is None:
+        return invalid_json_error()
+    if not isinstance(payload, dict):
+        return api_error('请求参数无效', status=400, code='validation_error')
+    action = (payload.get('action') or '').strip()
+    if action not in ('approve', 'reject'):
+        return api_error('审批动作无效', status=400, code='validation_error')
+    comment = payload.get('comment') or ''
+    if not isinstance(comment, str):
+        comment = str(comment)
+    comment = comment.strip()[:500]
+
+    try:
+        approval = scoped_approval_queryset(visible_hosts_for_request(request)).get(id=id)
+    except ApprovalRequest.DoesNotExist:
+        return api_error('审批不存在', status=404, code='not_found')
+
+    if approval.status != ApprovalRequest.STATUS_PENDING:
+        return api_error('只能处理待审批请求', status=400, code='validation_error')
+
+    approver = request.session.get('user_name') or ''
+    if approval.requester and approval.requester == approver:
+        approval.comment = '申请人与审批人不能为同一人'
+        approval.save(update_fields=['comment'])
+        audit(request, 'API审批自审拦截', 'ApprovalRequest', approval.id, approval.title)
+        return api_error('申请人与审批人不能为同一人', status=400, code='validation_error')
+
+    approval.approver = approver
+    approval.comment = comment
+    approval.decided_at = timezone.now()
+    if action == 'reject':
+        approval.status = ApprovalRequest.STATUS_REJECTED
+        approval.save(update_fields=['approver', 'comment', 'decided_at', 'status'])
+        notify_approval(approval, '拒绝')
+        audit(request, 'API拒绝审批', 'ApprovalRequest', approval.id, approval.title)
+        return JsonResponse({'ok': True, 'approval': serialize_approval(approval)})
+
+    approval.status = ApprovalRequest.STATUS_APPROVED
+    approval.save(update_fields=['approver', 'comment', 'decided_at', 'status'])
+    approval = execute_approval_request(approval, user_role(request))
+    audit(request, 'API批准审批', 'ApprovalRequest', approval.id, approval.title)
+    return JsonResponse({'ok': True, 'approval': serialize_approval(approval)})
+
+
+@api_login_required
 @require_http_methods(['GET'])
 def deployments(request):
     visible_hosts = visible_hosts_for_request(request)
@@ -467,6 +556,8 @@ def files(request):
 @api_login_required
 @require_http_methods(['GET'])
 def notifications(request):
+    if not has_role(request, DevOpsRole.ROLE_VIEWER, MODULE_SECURITY):
+        return api_error('没有通知管理权限', status=403, code='forbidden')
     channels = NotificationChannel.objects.all()
     logs = NotificationLog.objects.select_related('channel')
     channel_id = request.GET.get('channel')
@@ -503,3 +594,29 @@ def notifications(request):
         } for channel in channels],
         'logs': [serialize_notification_log(log) for log in limit_queryset(request, logs)],
     })
+
+
+@api_login_required
+@require_http_methods(['GET'])
+def audit_logs(request):
+    if not has_role(request, DevOpsRole.ROLE_VIEWER, MODULE_AUDIT):
+        return api_error('没有审计日志权限', status=403, code='forbidden')
+    queryset = AuditLog.objects.all()
+    keyword = request.GET.get('q', '').strip()
+    user = request.GET.get('user', '').strip()
+    action = request.GET.get('action', '').strip()
+    target_type = request.GET.get('target_type', '').strip()
+    if keyword:
+        queryset = queryset.filter(
+            models.Q(action__icontains=keyword)
+            | models.Q(detail__icontains=keyword)
+            | models.Q(target_type__icontains=keyword)
+            | models.Q(target_id__icontains=keyword)
+        )
+    if user:
+        queryset = queryset.filter(user__icontains=user)
+    if action:
+        queryset = queryset.filter(action__icontains=action)
+    if target_type:
+        queryset = queryset.filter(target_type__icontains=target_type)
+    return JsonResponse({'ok': True, 'results': [serialize_audit_log(item) for item in limit_queryset(request, queryset)]})

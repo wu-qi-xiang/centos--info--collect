@@ -86,6 +86,18 @@ class DevOpsViewTests(TestCase):
         self.assertEqual(response.status_code, 401)
         self.assertEqual(response.json()['code'], 'unauthorized')
 
+    def test_api_rejects_incomplete_login_session(self):
+        session = self.client.session
+        session['is_login'] = True
+        session.pop('user_id', None)
+        session['user_name'] = self.user.user
+        session.save()
+
+        response = self.client.get(reverse('devops:api_bootstrap'))
+
+        self.assertEqual(response.status_code, 401)
+        self.assertEqual(response.json()['code'], 'unauthorized')
+
     def test_vue_app_requires_login(self):
         self.client.session.flush()
 
@@ -103,6 +115,15 @@ class DevOpsViewTests(TestCase):
         self.assertContains(response, 'DevOps控制台')
         self.assertContains(response, '加载 DevOps 控制台')
 
+    def test_vue_static_includes_approval_decision_controls(self):
+        with open('static/js/devops-vue.js', 'r') as handle:
+            content = handle.read()
+
+        self.assertIn('approvalComments', content)
+        self.assertIn('decideApproval(item, action)', content)
+        self.assertIn('/devops/api/approvals/${item.id}/decide/', content)
+        self.assertIn('canDecideApproval', content)
+
     def test_dashboard_uses_vue_shell(self):
         response = self.client.get(reverse('devops:dashboard'))
 
@@ -110,6 +131,7 @@ class DevOpsViewTests(TestCase):
         self.assertContains(response, 'devops-vue-root')
         self.assertContains(response, 'DevOps 控制台')
         self.assertContains(response, 'devops-vue.js')
+        self.assertContains(response, 'devops-vue.js?v=20260708')
 
     def test_legacy_dashboard_still_available(self):
         response = self.client.get(reverse('devops:legacy_dashboard'))
@@ -126,7 +148,7 @@ class DevOpsViewTests(TestCase):
         self.assertTrue(payload['ok'])
         self.assertEqual(payload['user']['name'], self.user.user)
         self.assertEqual(payload['counts']['hosts'], 1)
-        for key in ('command', 'task', 'approval', 'metric', 'deployment', 'file', 'notification'):
+        for key in ('command', 'task', 'approval', 'metric', 'deployment', 'file', 'notification', 'audit'):
             self.assertIn(key, payload['permissions'])
 
     def test_api_bootstrap_module_permission_flags_respect_overrides(self):
@@ -141,6 +163,11 @@ class DevOpsViewTests(TestCase):
             module=DevOpsModulePermission.MODULE_FILE,
             role=DevOpsRole.ROLE_VIEWER,
         )
+        DevOpsModulePermission.objects.create(
+            user=self.user,
+            module=DevOpsModulePermission.MODULE_AUDIT,
+            role=DevOpsRole.ROLE_VIEWER,
+        )
 
         response = self.client.get(reverse('devops:api_bootstrap'))
 
@@ -148,6 +175,7 @@ class DevOpsViewTests(TestCase):
         permissions = response.json()['permissions']
         self.assertTrue(permissions['deployment'])
         self.assertTrue(permissions['file'])
+        self.assertTrue(permissions['audit'])
         self.assertTrue(permissions['command'])
 
     def test_api_hosts_returns_visible_hosts(self):
@@ -348,6 +376,109 @@ class DevOpsViewTests(TestCase):
         self.assertIn("'@id", content)
         self.assertIn("'=HYPERLINK", content)
 
+    def test_api_audit_logs_requires_login(self):
+        self.client.session.flush()
+
+        response = self.client.get(reverse('devops:api_audit_logs'))
+
+        self.assertEqual(response.status_code, 401)
+        self.assertEqual(response.json()['code'], 'unauthorized')
+
+    def test_api_audit_logs_requires_audit_viewer_permission(self):
+        self.set_role(DevOpsRole.ROLE_VIEWER)
+        DevOpsModulePermission.objects.create(
+            user=self.user,
+            module=DevOpsModulePermission.MODULE_AUDIT,
+            role='none',
+        )
+
+        response = self.client.get(reverse('devops:api_audit_logs'))
+
+        self.assertEqual(response.status_code, 403)
+        self.assertEqual(response.json()['code'], 'forbidden')
+
+    def test_api_audit_logs_returns_logs_for_audit_viewer(self):
+        self.set_role(DevOpsRole.ROLE_VIEWER)
+        DevOpsModulePermission.objects.create(
+            user=self.user,
+            module=DevOpsModulePermission.MODULE_AUDIT,
+            role=DevOpsRole.ROLE_VIEWER,
+        )
+        AuditLog.objects.create(
+            user='alice',
+            action='创建主机',
+            target_type='NewLinux',
+            target_id='1',
+            detail='prod-web',
+            ip_address='127.0.0.1',
+        )
+
+        response = self.client.get(reverse('devops:api_audit_logs'))
+
+        self.assertEqual(response.status_code, 200)
+        payload = response.json()
+        self.assertTrue(payload['ok'])
+        self.assertEqual(payload['results'][0]['user'], 'alice')
+        self.assertEqual(payload['results'][0]['action'], '创建主机')
+        self.assertEqual(payload['results'][0]['target_type'], 'NewLinux')
+        self.assertEqual(payload['results'][0]['target_id'], '1')
+        self.assertEqual(payload['results'][0]['detail'], 'prod-web')
+        self.assertEqual(payload['results'][0]['ip_address'], '127.0.0.1')
+        self.assertIn('created_at', payload['results'][0])
+
+    def test_api_audit_logs_filters_results(self):
+        self.set_role(DevOpsRole.ROLE_VIEWER)
+        DevOpsModulePermission.objects.create(
+            user=self.user,
+            module=DevOpsModulePermission.MODULE_AUDIT,
+            role=DevOpsRole.ROLE_VIEWER,
+        )
+        AuditLog.objects.create(user='alice', action='创建主机', target_type='NewLinux', target_id='1', detail='prod-web')
+        AuditLog.objects.create(user='bob', action='删除密码记录', target_type='Password', target_id='2', detail='legacy')
+
+        response = self.client.get(reverse('devops:api_audit_logs'), {
+            'q': 'prod',
+            'user': 'ali',
+            'action': '创建',
+            'target_type': 'Linux',
+        })
+
+        self.assertEqual(response.status_code, 200)
+        results = response.json()['results']
+        self.assertEqual(len(results), 1)
+        self.assertEqual(results[0]['user'], 'alice')
+        self.assertEqual(results[0]['target_type'], 'NewLinux')
+
+    def test_api_audit_logs_redacts_sensitive_detail_fragments(self):
+        self.set_role(DevOpsRole.ROLE_VIEWER)
+        DevOpsModulePermission.objects.create(
+            user=self.user,
+            module=DevOpsModulePermission.MODULE_AUDIT,
+            role=DevOpsRole.ROLE_VIEWER,
+        )
+        AuditLog.objects.create(
+            user='alice',
+            action='更新通知',
+            target_type='NotificationChannel',
+            target_id='1',
+            detail='webhook=https://hooks.example.test/send token=abc123 password=plain enc:gAAAA-secret key=rawkey',
+        )
+
+        response = self.client.get(reverse('devops:api_audit_logs'))
+
+        self.assertEqual(response.status_code, 200)
+        detail = response.json()['results'][0]['detail']
+        self.assertIn('[redacted-url]', detail)
+        self.assertIn('token=[redacted]', detail)
+        self.assertIn('password=[redacted]', detail)
+        self.assertIn('enc:[redacted]', detail)
+        self.assertIn('key=[redacted]', detail)
+        self.assertNotIn('hooks.example.test', detail)
+        self.assertNotIn('abc123', detail)
+        self.assertNotIn('plain', detail)
+        self.assertNotIn('gAAAA-secret', detail)
+        self.assertNotIn('rawkey', detail)
+
     def test_cleanup_audit_logs_respects_retention_days(self):
         old_log = AuditLog.objects.create(user='alice', action='old')
         new_log = AuditLog.objects.create(user='bob', action='new')
@@ -391,6 +522,46 @@ class DevOpsViewTests(TestCase):
         self.assertEqual(payload['record']['command'], 'uptime')
         self.assertTrue(CommandExecution.objects.filter(command='uptime').exists())
 
+    def test_api_command_post_invalid_json_uses_json_error_code(self):
+        response = self.client.post(
+            reverse('devops:api_commands'),
+            data='{bad json',
+            content_type='application/json',
+        )
+
+        self.assertEqual(response.status_code, 400)
+        payload = response.json()
+        self.assertFalse(payload['ok'])
+        self.assertEqual(payload['code'], 'invalid_json')
+        self.assertFalse(CommandExecution.objects.exists())
+
+    def test_api_command_post_rejects_unscoped_host_with_json_error(self):
+        allowed_group = HostGroup.objects.create(name='api-command-submit-allowed')
+        allowed_group.hosts.add(self.host)
+        other = NewLinux.objects.create(
+            linux_name='api-command-submit-blocked',
+            linux_ip='127.0.1.14',
+            linux_hostname='api-command-submit-blocked',
+            linux_port='22',
+            linux_user='root',
+            linux_passwd='bad-password',
+            linux_app='',
+        )
+        scope = DevOpsHostScope.objects.create(user=self.user)
+        scope.groups.add(allowed_group)
+
+        response = self.client.post(
+            reverse('devops:api_commands'),
+            data=json.dumps({'host_id': other.id, 'command': 'uptime'}),
+            content_type='application/json',
+        )
+
+        self.assertEqual(response.status_code, 403)
+        payload = response.json()
+        self.assertFalse(payload['ok'])
+        self.assertEqual(payload['code'], 'host_forbidden')
+        self.assertFalse(CommandExecution.objects.exists())
+
     def test_api_dangerous_command_creates_approval(self):
         response = self.client.post(
             reverse('devops:api_commands'),
@@ -402,6 +573,209 @@ class DevOpsViewTests(TestCase):
         payload = response.json()
         self.assertTrue(payload['requires_approval'])
         self.assertEqual(payload['approval']['request_type'], ApprovalRequest.TYPE_COMMAND)
+
+    def test_api_approval_decide_requires_login(self):
+        approval = ApprovalRequest.objects.create(
+            request_type=ApprovalRequest.TYPE_COMMAND,
+            title='api approval login',
+            host=self.host,
+            command='uptime',
+            requester='alice',
+        )
+        self.client.session.flush()
+
+        response = self.client.post(
+            reverse('devops:api_approval_decide', args=[approval.id]),
+            data=json.dumps({'action': 'reject'}),
+            content_type='application/json',
+        )
+
+        self.assertEqual(response.status_code, 401)
+        self.assertEqual(response.json()['code'], 'unauthorized')
+
+    def test_api_approval_decide_requires_approval_admin(self):
+        self.set_role(DevOpsRole.ROLE_OPERATOR)
+        DevOpsModulePermission.objects.create(
+            user=self.user,
+            module=DevOpsModulePermission.MODULE_APPROVAL,
+            role=DevOpsRole.ROLE_VIEWER,
+        )
+        approval = ApprovalRequest.objects.create(
+            request_type=ApprovalRequest.TYPE_COMMAND,
+            title='api approval forbidden',
+            host=self.host,
+            command='uptime',
+            requester='alice',
+        )
+
+        response = self.client.post(
+            reverse('devops:api_approval_decide', args=[approval.id]),
+            data=json.dumps({'action': 'reject'}),
+            content_type='application/json',
+        )
+
+        self.assertEqual(response.status_code, 403)
+        self.assertEqual(response.json()['code'], 'forbidden')
+
+    def test_api_approval_decide_rejects_invalid_json(self):
+        self.set_role(DevOpsRole.ROLE_ADMIN)
+        approval = ApprovalRequest.objects.create(
+            request_type=ApprovalRequest.TYPE_COMMAND,
+            title='api approval invalid json',
+            host=self.host,
+            command='uptime',
+            requester='alice',
+        )
+
+        response = self.client.post(
+            reverse('devops:api_approval_decide', args=[approval.id]),
+            data='{bad json',
+            content_type='application/json',
+        )
+
+        self.assertEqual(response.status_code, 400)
+        self.assertEqual(response.json()['code'], 'invalid_json')
+
+    def test_api_approval_decide_hides_unscoped_approval(self):
+        self.set_role(DevOpsRole.ROLE_ADMIN)
+        allowed_group = HostGroup.objects.create(name='api-approval-allowed')
+        allowed_group.hosts.add(self.host)
+        other = NewLinux.objects.create(
+            linux_name='api-approval-blocked',
+            linux_ip='127.0.1.15',
+            linux_hostname='api-approval-blocked',
+            linux_port='22',
+            linux_user='root',
+            linux_passwd='bad-password',
+            linux_app='',
+        )
+        scope = DevOpsHostScope.objects.create(user=self.user)
+        scope.groups.add(allowed_group)
+        approval = ApprovalRequest.objects.create(
+            request_type=ApprovalRequest.TYPE_COMMAND,
+            title='api hidden approval',
+            host=other,
+            command='uptime',
+            requester='alice',
+        )
+
+        response = self.client.post(
+            reverse('devops:api_approval_decide', args=[approval.id]),
+            data=json.dumps({'action': 'reject'}),
+            content_type='application/json',
+        )
+
+        self.assertEqual(response.status_code, 404)
+        self.assertEqual(response.json()['code'], 'not_found')
+        approval.refresh_from_db()
+        self.assertEqual(approval.status, ApprovalRequest.STATUS_PENDING)
+
+    def test_api_approval_decide_self_request_stays_pending(self):
+        self.set_role(DevOpsRole.ROLE_ADMIN)
+        approval = ApprovalRequest.objects.create(
+            request_type=ApprovalRequest.TYPE_COMMAND,
+            title='api self approval',
+            host=self.host,
+            command='uptime',
+            requester=self.user.user,
+        )
+
+        response = self.client.post(
+            reverse('devops:api_approval_decide', args=[approval.id]),
+            data=json.dumps({'action': 'approve', 'comment': 'approved'}),
+            content_type='application/json',
+        )
+
+        self.assertEqual(response.status_code, 400)
+        self.assertEqual(response.json()['code'], 'validation_error')
+        approval.refresh_from_db()
+        self.assertEqual(approval.status, ApprovalRequest.STATUS_PENDING)
+        self.assertEqual(approval.comment, '申请人与审批人不能为同一人')
+        self.assertTrue(AuditLog.objects.filter(action='API审批自审拦截', target_id=str(approval.id)).exists())
+
+    def test_api_approval_decide_rejects_pending_request(self):
+        self.set_role(DevOpsRole.ROLE_ADMIN)
+        approval = ApprovalRequest.objects.create(
+            request_type=ApprovalRequest.TYPE_COMMAND,
+            title='api reject approval',
+            host=self.host,
+            command='uptime',
+            requester='alice',
+        )
+
+        with mock.patch('devops.api.notify_approval') as notify:
+            response = self.client.post(
+                reverse('devops:api_approval_decide', args=[approval.id]),
+                data=json.dumps({'action': 'reject', 'comment': 'not now'}),
+                content_type='application/json',
+            )
+
+        self.assertEqual(response.status_code, 200)
+        payload = response.json()
+        self.assertTrue(payload['ok'])
+        self.assertEqual(payload['approval']['status'], ApprovalRequest.STATUS_REJECTED)
+        approval.refresh_from_db()
+        self.assertEqual(approval.status, ApprovalRequest.STATUS_REJECTED)
+        self.assertEqual(approval.approver, self.user.user)
+        self.assertEqual(approval.comment, 'not now')
+        notify.assert_called_once_with(approval, '拒绝')
+        self.assertTrue(AuditLog.objects.filter(action='API拒绝审批', target_id=str(approval.id)).exists())
+
+    def test_api_approval_decide_approves_and_executes_request(self):
+        self.set_role(DevOpsRole.ROLE_ADMIN)
+        approval = ApprovalRequest.objects.create(
+            request_type=ApprovalRequest.TYPE_COMMAND,
+            title='api approve approval',
+            host=self.host,
+            command='uptime',
+            requester='alice',
+        )
+
+        def mark_executed(item, role):
+            item.status = ApprovalRequest.STATUS_EXECUTED
+            item.executed_at = timezone.now()
+            item.save(update_fields=['status', 'executed_at'])
+            return item
+
+        with mock.patch('devops.api.execute_approval_request', side_effect=mark_executed) as execute:
+            response = self.client.post(
+                reverse('devops:api_approval_decide', args=[approval.id]),
+                data=json.dumps({'action': 'approve', 'comment': 'approved'}),
+                content_type='application/json',
+            )
+
+        self.assertEqual(response.status_code, 200)
+        payload = response.json()
+        self.assertTrue(payload['ok'])
+        self.assertEqual(payload['approval']['status'], ApprovalRequest.STATUS_EXECUTED)
+        approval.refresh_from_db()
+        self.assertEqual(approval.approver, self.user.user)
+        self.assertEqual(approval.comment, 'approved')
+        self.assertEqual(approval.status, ApprovalRequest.STATUS_EXECUTED)
+        execute.assert_called_once()
+        self.assertTrue(AuditLog.objects.filter(action='API批准审批', target_id=str(approval.id)).exists())
+
+    def test_api_approval_decide_rejects_non_pending_request(self):
+        self.set_role(DevOpsRole.ROLE_ADMIN)
+        approval = ApprovalRequest.objects.create(
+            request_type=ApprovalRequest.TYPE_COMMAND,
+            title='api approved approval',
+            host=self.host,
+            command='uptime',
+            requester='alice',
+            status=ApprovalRequest.STATUS_APPROVED,
+        )
+
+        response = self.client.post(
+            reverse('devops:api_approval_decide', args=[approval.id]),
+            data=json.dumps({'action': 'reject'}),
+            content_type='application/json',
+        )
+
+        self.assertEqual(response.status_code, 400)
+        self.assertEqual(response.json()['code'], 'validation_error')
+        approval.refresh_from_db()
+        self.assertEqual(approval.status, ApprovalRequest.STATUS_APPROVED)
 
     def test_api_command_detail_respects_host_scope(self):
         allowed_group = HostGroup.objects.create(name='api-allowed')
@@ -1642,6 +2016,53 @@ class DevOpsViewTests(TestCase):
         self.assertNotIn('secret', serialized)
         self.assertNotIn('https://example.com/alert-hook', serialized)
         self.assertNotIn('alert-secret', serialized)
+
+    def test_api_notifications_requires_complete_login_session(self):
+        NotificationChannel.objects.create(
+            name='blocked webhook',
+            channel_type=NotificationChannel.TYPE_WEBHOOK,
+            webhook_url='https://example.com/blocked-hook',
+            secret='blocked-secret',
+        )
+        session = self.client.session
+        session['is_login'] = True
+        session.pop('user_id', None)
+        session['user_name'] = self.user.user
+        session.save()
+
+        response = self.client.get(reverse('devops:api_notifications'))
+
+        self.assertEqual(response.status_code, 401)
+        payload = response.json()
+        self.assertFalse(payload['ok'])
+        self.assertEqual(payload['code'], 'unauthorized')
+        serialized = json.dumps(payload)
+        self.assertNotIn('blocked webhook', serialized)
+        self.assertNotIn('blocked-secret', serialized)
+        self.assertNotIn('https://example.com/blocked-hook', serialized)
+
+    def test_api_notifications_allows_security_module_viewer(self):
+        self.set_role(DevOpsRole.ROLE_VIEWER)
+        DevOpsModulePermission.objects.create(
+            user=self.user,
+            module=DevOpsModulePermission.MODULE_SECURITY,
+            role=DevOpsRole.ROLE_VIEWER,
+        )
+        channel = NotificationChannel.objects.create(
+            name='security webhook',
+            channel_type=NotificationChannel.TYPE_WEBHOOK,
+            webhook_url='https://example.com/security-hook',
+            secret='security-secret',
+        )
+
+        response = self.client.get(reverse('devops:api_notifications'))
+
+        self.assertEqual(response.status_code, 200)
+        payload = response.json()
+        self.assertEqual(payload['channels'][0]['id'], channel.id)
+        serialized = json.dumps(payload)
+        self.assertNotIn('security-secret', serialized)
+        self.assertNotIn('https://example.com/security-hook', serialized)
 
     def test_api_notifications_truncates_failure_response_preview(self):
         channel = NotificationChannel.objects.create(
