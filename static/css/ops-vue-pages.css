@@ -77,6 +77,42 @@
     line-height: 1;
 }
 
+.ops-card-meta {
+    margin-top: 6px;
+    color: var(--ops-muted, #64748b);
+    font-size: 12px;
+}
+
+.ops-section-title {
+    margin-bottom: 12px;
+    font-size: 15px;
+    font-weight: 780;
+}
+
+.ops-section-title i {
+    margin-right: 6px;
+    color: var(--ops-primary, #2563eb);
+}
+
+.ops-kv-grid {
+    display: grid;
+    grid-template-columns: repeat(3, minmax(0, 1fr));
+    gap: 10px;
+}
+
+.ops-kv-label {
+    display: block;
+    margin-bottom: 5px;
+    color: var(--ops-muted, #64748b);
+    font-size: 12px;
+    font-weight: 700;
+}
+
+.ops-kv-value {
+    overflow-wrap: anywhere;
+    font-weight: 700;
+}
+
 .ops-list {
     display: grid;
     gap: 8px;
@@ -136,6 +172,10 @@
     max-width: 780px;
 }
 
+.ops-form.compact {
+    max-width: 640px;
+}
+
 .ops-form .form-control,
 .ops-form textarea,
 .ops-form select {
@@ -163,6 +203,60 @@
     white-space: nowrap;
 }
 
+.ops-badge-muted {
+    background: #f1f5f9;
+    color: #475569;
+}
+
+.ops-check-row {
+    display: inline-flex;
+    gap: 8px;
+    align-items: center;
+    margin: 0;
+    color: var(--ops-text, #0f172a);
+    font-weight: 700;
+}
+
+.ops-check-row input {
+    width: 16px;
+    height: 16px;
+}
+
+.ops-notification-card .ops-form {
+    max-width: none;
+}
+
+.ops-notification-head {
+    display: flex;
+    align-items: flex-start;
+    justify-content: space-between;
+    gap: 12px;
+}
+
+.ops-query-input {
+    font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", monospace;
+}
+
+.ops-result {
+    border-top: 1px solid var(--ops-border, #e2e8f0);
+    padding-top: 14px;
+}
+
+.ops-result-status {
+    margin-bottom: 10px;
+    color: var(--ops-muted, #64748b);
+    font-size: 13px;
+}
+
+.ops-json-value {
+    margin: 0;
+    max-width: 100%;
+    white-space: pre-wrap;
+    overflow-wrap: anywhere;
+    color: var(--ops-text, #0f172a);
+    font-size: 12px;
+}
+
 .ops-secret {
     letter-spacing: 1px;
 }
@@ -177,7 +271,8 @@
 @media (max-width: 992px) {
     .ops-grid,
     .ops-grid.two,
-    .ops-grid.three {
+    .ops-grid.three,
+    .ops-kv-grid {
         grid-template-columns: repeat(2, minmax(0, 1fr));
     }
 }
@@ -198,7 +293,8 @@
 
     .ops-grid,
     .ops-grid.two,
-    .ops-grid.three {
+    .ops-grid.three,
+    .ops-kv-grid {
         grid-template-columns: 1fr;
     }
 }

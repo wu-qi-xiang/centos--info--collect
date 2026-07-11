@@ -217,6 +217,7 @@ class App {
 
     init() {
         this.setupGlobalFeatures();
+        this.setupSidebarNavigation();
         this.setupPageAnimations();
         this.setupInteractiveElements();
         this.setupFormEnhancements();
@@ -236,6 +237,42 @@ class App {
         
         // 服务器状态检查
         this.setupServerStatusCheck();
+    }
+
+    setupSidebarNavigation() {
+        const groups = document.querySelectorAll('.sidebar-nav-group');
+        if (!groups.length) return;
+
+        const normalizePath = (href) => {
+            try {
+                const url = new URL(href, window.location.origin);
+                return url.pathname.replace(/\/+$/, '') || '/';
+            } catch (error) {
+                return '';
+            }
+        };
+        const currentPath = normalizePath(window.location.pathname);
+
+        groups.forEach(group => {
+            const parentLink = group.querySelector(':scope > .sidebar-parent-link');
+            const subnav = group.querySelector(':scope > .sidebar-subnav');
+            if (!parentLink || !subnav) return;
+
+            const links = Array.from(subnav.querySelectorAll('a[href]'));
+            const parentPath = normalizePath(parentLink.getAttribute('href'));
+            const isCurrentGroup = links.some(link => normalizePath(link.getAttribute('href')) === currentPath) || parentPath === currentPath;
+
+            parentLink.setAttribute('aria-expanded', isCurrentGroup ? 'true' : 'false');
+            if (isCurrentGroup) {
+                group.classList.add('is-open');
+            }
+
+            parentLink.addEventListener('click', event => {
+                event.preventDefault();
+                const isOpen = group.classList.toggle('is-open');
+                parentLink.setAttribute('aria-expanded', isOpen ? 'true' : 'false');
+            });
+        });
     }
 
     setupBackToTop() {

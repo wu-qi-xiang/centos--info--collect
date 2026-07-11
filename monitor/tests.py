@@ -4,10 +4,11 @@ from unittest import mock
 
 from devops.models import AlertEvent, AlertHistory, AuditLog, DevOpsRole
 from devops.models import MetricSample
+from PyLinux.crypto import decrypt_text
 from RemoteLinux.models import User
 from RemoteLinux.models import NewLinux
 from .crontab import monitor_send_email, parse_percent, record_collection_failure, send_threshold_alert
-from .models import Monitor
+from .models import AlertNotificationConfig, Monitor, PrometheusConfig
 
 
 class MonitorSecurityTests(TestCase):
@@ -176,6 +177,193 @@ class MonitorSecurityTests(TestCase):
 		self.assertContains(response, '提交失败，请检查以下内容', status_code=400)
 		self.assertEqual(monitor.monitor_email, 'old@example.com')
 		self.assertEqual(monitor.monitor_cpu, '80')
+
+	def test_monitor_home_renders_management_links(self):
+		PrometheusConfig.objects.create(prometheus_url='http://prometheus.local:9090', enabled=True)
+		Monitor.objects.create(
+			monitor_email='ops@example.com',
+			monitor_cpu='80',
+			monitor_men='85',
+			monitor_disk='90',
+		)
+
+		response = self.client.get(reverse('monitor:monitor_home'))
+
+		self.assertEqual(response.status_code, 200)
+		self.assertContains(response, '监控管理')
+		self.assertContains(response, '监控对接')
+		self.assertContains(response, '告警查询')
+		self.assertContains(response, '告警设置')
+
+	def test_viewer_cannot_save_prometheus_config_when_roles_are_configured(self):
+		self.set_role(DevOpsRole.ROLE_VIEWER)
+
+		response = self.client.post(reverse('monitor:prometheus_config'), {
+			'prometheus_url': 'http://prometheus.local:9090',
+			'enabled': 'on',
+		})
+
+		self.assertEqual(response.status_code, 403)
+		self.assertEqual(PrometheusConfig.objects.count(), 0)
+
+	def test_operator_can_save_prometheus_config(self):
+		self.set_role(DevOpsRole.ROLE_OPERATOR)
+
+		response = self.client.post(reverse('monitor:prometheus_config'), {
+			'prometheus_url': 'http://prometheus.local:9090/',
+			'enabled': 'on',
+		})
+
+		self.assertEqual(response.status_code, 302)
+		self.assertEqual(response.url, reverse('monitor:monitor_home'))
+		config = PrometheusConfig.objects.get()
+		self.assertEqual(config.prometheus_url, 'http://prometheus.local:9090')
+		self.assertTrue(config.enabled)
+		self.assertTrue(AuditLog.objects.filter(action='保存Prometheus对接', target_id=str(config.id)).exists())
+
+	def test_prometheus_config_rejects_secret_bearing_url(self):
+		self.set_role(DevOpsRole.ROLE_OPERATOR)
+
+		response = self.client.post(reverse('monitor:prometheus_config'), {
+			'prometheus_url': 'http://user:pass@prometheus.local:9090?token=secret',
+			'enabled': 'on',
+		})
+
+		self.assertEqual(response.status_code, 400)
+		self.assertContains(response, '不要包含用户名、密码、Token 或查询参数', status_code=400)
+		self.assertEqual(PrometheusConfig.objects.count(), 0)
+
+	@mock.patch('monitor.views.test_prometheus_connection', return_value={'ok': True, 'message': 'Prometheus 连接正常'})
+	def test_operator_can_test_prometheus_connection_without_saving(self, test_connection):
+		self.set_role(DevOpsRole.ROLE_OPERATOR)
+
+		response = self.client.post(reverse('monitor:prometheus_test'), {
+			'prometheus_url': 'http://prometheus.local:9090',
+			'enabled': 'on',
+		})
+
+		self.assertEqual(response.status_code, 200)
+		self.assertContains(response, 'Prometheus 连接正常')
+		self.assertEqual(PrometheusConfig.objects.count(), 0)
+		self.assertEqual(test_connection.call_args[0][0].prometheus_url, 'http://prometheus.local:9090')
+
+	def test_alert_query_requires_enabled_prometheus_config(self):
+		response = self.client.get(reverse('monitor:alert_query'), {'query': 'up'})
+
+		self.assertEqual(response.status_code, 400)
+		self.assertContains(response, '请先配置并启用 Prometheus 对接', status_code=400)
+
+	@mock.patch('monitor.views.query_prometheus')
+	def test_alert_query_uses_prometheus_service(self, query_prometheus_mock):
+		PrometheusConfig.objects.create(prometheus_url='http://prometheus.local:9090', enabled=True)
+		query_prometheus_mock.return_value = {
+			'ok': True,
+			'body': {
+				'status': 'success',
+				'data': {
+					'resultType': 'vector',
+					'result': [{'metric': {'job': 'node'}, 'value': [1, '1']}],
+				},
+			},
+		}
+
+		response = self.client.get(reverse('monitor:alert_query'), {'query': 'up'})
+
+		self.assertEqual(response.status_code, 200)
+		self.assertContains(response, 'up')
+		self.assertContains(response, 'node')
+		query_prometheus_mock.assert_called_once()
+
+	def test_alert_notifications_page_renders(self):
+		response = self.client.get(reverse('monitor:alert_notifications'))
+
+		self.assertEqual(response.status_code, 200)
+		self.assertContains(response, '告警通知')
+		self.assertContains(response, '飞书')
+		self.assertContains(response, '企业微信')
+
+	def test_viewer_cannot_save_alert_notifications_when_roles_are_configured(self):
+		self.set_role(DevOpsRole.ROLE_VIEWER)
+
+		response = self.client.post(reverse('monitor:alert_notifications'), {
+			'feishu_enabled': 'on',
+			'feishu_name': 'feishu',
+			'feishu_webhook_url': 'https://open.feishu.cn/open-apis/bot/v2/hook/test',
+		})
+
+		self.assertEqual(response.status_code, 403)
+		self.assertEqual(AlertNotificationConfig.objects.count(), 0)
+
+	def test_operator_can_save_alert_notifications_encrypted(self):
+		self.set_role(DevOpsRole.ROLE_OPERATOR)
+
+		response = self.client.post(reverse('monitor:alert_notifications'), {
+			'feishu_enabled': 'on',
+			'feishu_name': 'feishu',
+			'feishu_webhook_url': 'https://open.feishu.cn/open-apis/bot/v2/hook/test',
+			'wecom_enabled': 'on',
+			'wecom_name': 'wecom',
+			'wecom_webhook_url': 'https://qyapi.weixin.qq.com/cgi-bin/webhook/send',
+		})
+
+		self.assertEqual(response.status_code, 302)
+		feishu = AlertNotificationConfig.objects.get(provider=AlertNotificationConfig.PROVIDER_FEISHU)
+		wecom = AlertNotificationConfig.objects.get(provider=AlertNotificationConfig.PROVIDER_WECOM)
+		self.assertTrue(feishu.enabled)
+		self.assertTrue(wecom.enabled)
+		self.assertTrue(feishu.webhook_url.startswith('enc:'))
+		self.assertEqual(decrypt_text(feishu.webhook_url), 'https://open.feishu.cn/open-apis/bot/v2/hook/test')
+		self.assertTrue(AuditLog.objects.filter(action='保存告警通知').exists())
+
+	def test_alert_notifications_blank_webhook_preserves_existing_value(self):
+		self.set_role(DevOpsRole.ROLE_OPERATOR)
+		config = AlertNotificationConfig.objects.create(
+			provider=AlertNotificationConfig.PROVIDER_FEISHU,
+			name='old',
+			enabled=True,
+			webhook_url='https://open.feishu.cn/open-apis/bot/v2/hook/original',
+		)
+		encrypted = config.webhook_url
+
+		response = self.client.post(reverse('monitor:alert_notifications'), {
+			'feishu_enabled': 'on',
+			'feishu_name': 'new',
+			'feishu_webhook_url': '',
+		})
+
+		self.assertEqual(response.status_code, 302)
+		config.refresh_from_db()
+		self.assertEqual(config.webhook_url, encrypted)
+		self.assertEqual(config.decrypted_webhook_url, 'https://open.feishu.cn/open-apis/bot/v2/hook/original')
+		self.assertEqual(config.name, 'new')
+
+	def test_alert_notifications_rejects_invalid_webhook(self):
+		self.set_role(DevOpsRole.ROLE_OPERATOR)
+
+		response = self.client.post(reverse('monitor:alert_notifications'), {
+			'feishu_enabled': 'on',
+			'feishu_webhook_url': 'javascript:alert(1)',
+		})
+
+		self.assertEqual(response.status_code, 400)
+		self.assertContains(response, 'Webhook 地址必须是 http:// 或 https://', status_code=400)
+		self.assertEqual(AlertNotificationConfig.objects.count(), 0)
+
+	@mock.patch('monitor.views.send_alert_notification', return_value={'ok': True, 'message': '测试通知发送成功'})
+	def test_operator_can_test_alert_notification_without_saving(self, send_mock):
+		self.set_role(DevOpsRole.ROLE_OPERATOR)
+
+		response = self.client.post(reverse('monitor:alert_notifications_test'), {
+			'provider': AlertNotificationConfig.PROVIDER_WECOM,
+			'wecom_enabled': 'on',
+			'wecom_name': 'wecom',
+			'wecom_webhook_url': 'https://qyapi.weixin.qq.com/cgi-bin/webhook/send',
+		})
+
+		self.assertEqual(response.status_code, 200)
+		self.assertContains(response, '测试通知发送成功')
+		self.assertEqual(AlertNotificationConfig.objects.count(), 0)
+		self.assertEqual(send_mock.call_args[0][0].provider, AlertNotificationConfig.PROVIDER_WECOM)
 
 
 class MonitorCollectionTests(TestCase):

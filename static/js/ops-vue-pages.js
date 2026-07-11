@@ -27,8 +27,19 @@
             };
         },
         computed: {
+            pageTitle() {
+                if (this.kind === 'monitor') return '告警设置';
+                return this.title;
+            },
             errors() {
                 return this.data.errors || [];
+            },
+            alertProviders() {
+                const notifications = this.data.notifications || {};
+                return [
+                    { key: 'feishu', label: '飞书', icon: 'paper-plane', config: notifications.feishu || {} },
+                    { key: 'wecom', label: '企业微信', icon: 'comments', config: notifications.wecom || {} },
+                ];
             },
         },
         methods: {
@@ -51,14 +62,61 @@
                 }
             },
             metric(value) {
-                return value || '-';
+                if (value === null || value === undefined || value === '') return '-';
+                return value;
+            },
+            formatValue(value) {
+                if (value === null || value === undefined || value === '') return '-';
+                if (typeof value === 'boolean') return value ? '是' : '否';
+                if (typeof value === 'object') {
+                    try {
+                        return JSON.stringify(value, null, 2);
+                    } catch (error) {
+                        return String(value);
+                    }
+                }
+                return String(value);
+            },
+            isRecord(value) {
+                return value && typeof value === 'object' && !Array.isArray(value);
+            },
+            objectEntries(value) {
+                if (!this.isRecord(value)) return [];
+                return Object.keys(value).map((key) => ({ key, value: value[key] }));
+            },
+            resultRows(result) {
+                if (!result) return [];
+                if (Array.isArray(result)) return result;
+                if (Array.isArray(result.rows)) return result.rows;
+                if (Array.isArray(result.result)) return result.result;
+                if (Array.isArray(result.data)) return result.data;
+                if (result.data && Array.isArray(result.data.result)) return result.data.result;
+                return [];
+            },
+            resultMetaEntries(result) {
+                if (!this.isRecord(result)) return [];
+                const rowKeys = new Set(['rows', 'result', 'data']);
+                return Object.keys(result)
+                    .filter((key) => {
+                        if (!rowKeys.has(key)) return true;
+                        if (key !== 'data') return !Array.isArray(result[key]);
+                        return !(Array.isArray(result.data) || (result.data && Array.isArray(result.data.result)));
+                    })
+                    .map((key) => ({ key, value: result[key] }));
+            },
+            rowKeys(row) {
+                return this.isRecord(row) ? Object.keys(row) : [];
+            },
+            resultStatus(result) {
+                if (!this.isRecord(result)) return '';
+                return result.status || result.code || result.state || '';
             },
         },
         template: `
             <div>
                 <div class="ops-page-head">
                     <div>
-                        <h1 class="ops-title">[[ title ]]</h1>
+                        <h1 class="ops-title">[[ pageTitle ]]</h1>
                         <div class="ops-subtitle" v-if="data.subtitle">[[ data.subtitle ]]</div>
                     </div>
                     <div class="ops-actions">
@@ -162,6 +220,92 @@
                     <div class="ops-card" v-for="item in data.items" :key="item.label"><div class="ops-card-label">[[ item.label ]]</div><div class="ops-card-value">[[ metric(item.value) ]]</div></div>
                 </section>
 
+                <section v-else-if="kind === 'monitor-home'">
+                    <div class="ops-grid">
+                        <div class="ops-card" v-for="card in data.cards || []" :key="card.label">
+                            <div class="ops-card-label">[[ card.label ]]</div>
+                            <div class="ops-card-value">[[ metric(card.value) ]]</div>
+                            <div class="ops-card-meta" v-if="card.meta">[[ card.meta ]]</div>
+                        </div>
+                    </div>
+                    <div class="ops-panel mt-3">
+                        <div class="ops-section-title">Prometheus 对接</div>
+                        <div class="ops-kv-grid">
+                            <div>
+                                <span class="ops-kv-label">配置状态</span>
+                                <span class="ops-badge" :class="{ 'ops-badge-muted': !(data.prometheus && data.prometheus.configured) }">[[ data.prometheus && data.prometheus.configured ? '已配置' : '未配置' ]]</span>
+                            </div>
+                            <div>
+                                <span class="ops-kv-label">启用状态</span>
+                                <span class="ops-badge" :class="{ 'ops-badge-muted': !(data.prometheus && data.prometheus.enabled) }">[[ data.prometheus && data.prometheus.enabled ? '已启用' : '未启用' ]]</span>
+                            </div>
+                            <div>
+                                <span class="ops-kv-label">地址</span>
+                                <span class="ops-kv-value">[[ data.prometheus && data.prometheus.url_display || '-' ]]</span>
+                            </div>
+                        </div>
+                        <div class="ops-actions mt-3">
+                            <a v-if="data.integration_url" class="btn btn-sm btn-outline-primary" :href="data.integration_url">监控对接</a>
+                            <a v-if="data.query_url" class="btn btn-sm btn-outline-secondary" :href="data.query_url">告警查询</a>
+                            <a v-if="data.alert_settings_url" class="btn btn-sm btn-outline-dark" :href="data.alert_settings_url">告警设置</a>
+                        </div>
+                    </div>
+                </section>
+
+                <section v-else-if="kind === 'prometheus-config'" class="ops-panel">
+                    <div v-if="data.last_test_message" class="alert alert-info">[[ data.last_test_message ]]</div>
+                    <form class="ops-form compact" method="post" :action="data.action" @submit="submitForm">
+                        <input type="hidden" name="csrfmiddlewaretoken" :value="data.csrf">
+                        <div>
+                            <label class="form-label">Prometheus URL</label>
+                            <input class="form-control" name="prometheus_url" type="url" :value="data.config && data.config.prometheus_url || ''" placeholder="http://prometheus.example:9090" autocomplete="off">
+                        </div>
+                        <label class="ops-check-row">
+                            <input type="checkbox" name="enabled" value="1" :checked="data.config && data.config.enabled">
+                            <span>启用监控对接</span>
+                        </label>
+                        <div class="ops-actions">
+                            <button class="btn btn-primary" type="submit">保存</button>
+                            <button class="btn btn-outline-secondary" type="submit" :formaction="data.test_action">测试连接</button>
+                        </div>
+                    </form>
+                </section>
+
+                <section v-else-if="kind === 'alert-query'" class="ops-panel">
+                    <div v-if="!data.prometheus_configured" class="alert alert-warning">Prometheus 尚未配置或未启用。</div>
+                    <div v-if="data.error" class="alert alert-danger">[[ data.error ]]</div>
+                    <form class="ops-form" method="post" :action="data.action" @submit="submitForm">
+                        <input type="hidden" name="csrfmiddlewaretoken" :value="data.csrf">
+                        <div>
+                            <label class="form-label">PromQL</label>
+                            <textarea class="form-control ops-query-input" name="query" placeholder="up" :value="data.query || ''"></textarea>
+                        </div>
+                        <button class="btn btn-primary" type="submit">查询</button>
+                    </form>
+                    <div v-if="data.result" class="ops-result mt-3">
+                        <div class="ops-section-title">查询结果</div>
+                        <div v-if="resultStatus(data.result)" class="ops-result-status">状态：[[ resultStatus(data.result) ]]</div>
+                        <div v-if="resultMetaEntries(data.result).length" class="ops-kv-grid">
+                            <div v-for="entry in resultMetaEntries(data.result)" :key="entry.key">
+                                <span class="ops-kv-label">[[ entry.key ]]</span>
+                                <pre class="ops-json-value">[[ formatValue(entry.value) ]]</pre>
+                            </div>
+                        </div>
+                        <div v-if="resultRows(data.result).length" class="ops-list mt-3">
+                            <div class="ops-row" v-for="(row, index) in resultRows(data.result)" :key="index">
+                                <div v-if="isRecord(row)">
+                                    <div class="ops-row-title"># [[ index + 1 ]]</div>
+                                    <div class="ops-row-meta">
+                                        <span v-for="key in rowKeys(row)" :key="key">[[ key ]]：[[ formatValue(row[key]) ]]</span>
+                                    </div>
+                                </div>
+                                <pre v-else class="ops-json-value">[[ formatValue(row) ]]</pre>
+                            </div>
+                        </div>
+                        <pre v-else-if="!resultMetaEntries(data.result).length" class="ops-json-value">[[ formatValue(data.result) ]]</pre>
+                    </div>
+                </section>
+
                 <section v-else-if="kind === 'monitor'" class="ops-panel">
                     <form class="ops-form" method="post" :action="data.action" @submit="submitForm">
                         <input type="hidden" name="csrfmiddlewaretoken" :value="data.csrf">
@@ -172,6 +316,41 @@
                         <button class="btn btn-primary" type="submit">保存</button>
                     </form>
                     <div class="ops-muted mt-3">当前未处理告警：[[ data.open_alert_count || 0 ]]</div>
+                </section>
+
+                <section v-else-if="kind === 'alert-notifications'">
+                    <div v-if="data.test_message" class="alert alert-info">[[ data.test_message ]]</div>
+                    <div class="ops-grid two">
+                        <div class="ops-card ops-notification-card" v-for="provider in alertProviders" :key="provider.key">
+                            <form class="ops-form compact" method="post" :action="data.action" @submit="submitForm">
+                                <input type="hidden" name="csrfmiddlewaretoken" :value="data.csrf">
+                                <input type="hidden" name="provider" :value="provider.key">
+                                <div class="ops-notification-head">
+                                    <div>
+                                        <div class="ops-section-title"><i class="fas" :class="'fa-' + provider.icon"></i> [[ provider.label ]]</div>
+                                        <div class="ops-muted">[[ provider.config.enabled ? '已启用' : '未启用' ]]</div>
+                                    </div>
+                                    <label class="ops-check-row">
+                                        <input type="checkbox" :name="provider.key + '_enabled'" value="1" :checked="provider.config.enabled">
+                                        <span>启用</span>
+                                    </label>
+                                </div>
+                                <div>
+                                    <label class="form-label">名称</label>
+                                    <input class="form-control" :name="provider.key + '_name'" :value="provider.config.name || provider.label" autocomplete="off">
+                                </div>
+                                <div>
+                                    <label class="form-label">Webhook</label>
+                                    <input class="form-control" :name="provider.key + '_webhook_url'" type="password" placeholder="留空则保持现有 Webhook 不变" autocomplete="new-password">
+                                    <div v-if="provider.config.has_webhook" class="form-text">当前：[[ provider.config.webhook_display || '已保存' ]]</div>
+                                </div>
+                                <div class="ops-actions">
+                                    <button class="btn btn-primary" type="submit">保存</button>
+                                    <button class="btn btn-outline-secondary" type="submit" :formaction="data.test_action" name="provider" :value="provider.key">测试[[ provider.label ]]</button>
+                                </div>
+                            </form>
+                        </div>
+                    </div>
                 </section>
 
                 <section v-else-if="kind === 'password-list'" class="ops-panel">

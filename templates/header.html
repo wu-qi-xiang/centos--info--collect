@@ -39,10 +39,37 @@
                         </li>
                     </ul>
                 </li>
-                <li class="nav-item">
-                    <a class="nav-link" href="{% url 'monitor:monitor_index' %}" data-tooltip="配置监控告警">
-                        <i class="fas fa-chart-line"></i><span>监控设置</span>
+                <li class="nav-item sidebar-nav-group">
+                    <a class="nav-link sidebar-parent-link" href="/monitor/manage/" data-tooltip="监控管理与告警配置">
+                        <i class="fas fa-chart-line"></i><span>监控管理</span>
                     </a>
+                    <ul class="sidebar-subnav">
+                        <li>
+                            <a class="nav-link sidebar-subnav-link" href="/monitor/manage/" data-tooltip="查看监控概览">
+                                <i class="fas fa-tachometer-alt"></i><span>监控管理</span>
+                            </a>
+                        </li>
+                        <li>
+                            <a class="nav-link sidebar-subnav-link" href="/monitor/prometheus/" data-tooltip="配置 Prometheus 对接">
+                                <i class="fas fa-plug"></i><span>监控对接</span>
+                            </a>
+                        </li>
+                        <li>
+                            <a class="nav-link sidebar-subnav-link" href="/monitor/query/" data-tooltip="查询 Prometheus 告警数据">
+                                <i class="fas fa-search"></i><span>告警查询</span>
+                            </a>
+                        </li>
+                        <li>
+                            <a class="nav-link sidebar-subnav-link" href="/monitor/" data-tooltip="配置告警阈值">
+                                <i class="fas fa-sliders-h"></i><span>告警设置</span>
+                            </a>
+                        </li>
+                        <li>
+                            <a class="nav-link sidebar-subnav-link" href="/monitor/notifications/" data-tooltip="配置告警通知渠道">
+                                <i class="fas fa-bell"></i><span>告警通知</span>
+                            </a>
+                        </li>
+                    </ul>
                 </li>
                 <li class="nav-item">
                     <a class="nav-link" href="{% url 'devops:dashboard' %}" data-tooltip="DevOps自动化平台">
