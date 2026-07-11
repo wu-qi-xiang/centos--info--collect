@@ -122,14 +122,22 @@ def index(request):
 	content = {'nwl' : nwl, 'pwd' : pwd}
 	content.update(security_context(request))
 	return render_vue_page(request, 'dashboard', '工作台', {
-		'subtitle': '服务器资产、密码与自动化入口',
+		'subtitle': '资产、凭据与自动化入口',
 		'counts': {'hosts': nwl, 'passwords': pwd},
 		'actions': [
-			{'label': '服务器列表', 'url': '/detail/'},
-			{'label': '密码管理', 'url': '/password/'},
+			{'label': '资产管理', 'url': '/assets/'},
+			{'label': '凭据管理', 'url': '/password/credentials/'},
 			{'label': 'DevOps', 'url': '/devops/', 'class': 'btn-primary'},
 		],
 	}, content)
+
+
+@session_login_required
+def asset_management(request):
+	if request.method != "GET":
+		return HttpResponseNotAllowed(["GET"])
+	content = security_context(request)
+	return render(request, 'linux/assets.html', content)
 
 
 @session_login_required
@@ -149,8 +157,8 @@ def linux(request):
 		{'label': '已用磁盘', 'value': _display_capacity(content.get('used_disk'))},
 		{'label': '可用磁盘', 'value': _display_capacity(content.get('available_disk'))},
 	]
-	return render_vue_page(request, 'local-linux', '本机 Linux', {
-		'subtitle': '本机系统信息',
+	return render_vue_page(request, 'local-linux', '本地资产', {
+		'subtitle': '本地资产系统信息',
 		'items': items,
 	}, content)
 
@@ -179,7 +187,7 @@ def search(request):
 	return render_vue_page(
 		request,
 		'host-list',
-		'服务器列表',
+		'资产列表',
 		_host_list_payload(request, pages, sum, keyword, actions, '搜索和查看授权范围内服务器'),
 		content,
 	)

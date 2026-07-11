@@ -93,6 +93,31 @@ def env_int(environ, key, default):
 		raise ImproperlyConfigured('%s 必须是整数' % key)
 
 
+def k8s_cache_config_from_env(environ, base_dir=BASE_DIR):
+	timeout = env_int(environ, 'K8S_DETAIL_CACHE_TIMEOUT_SECONDS', 86400)
+	if timeout <= 0:
+		raise ImproperlyConfigured('K8S_DETAIL_CACHE_TIMEOUT_SECONDS 必须是正整数')
+
+	cache_dir = environ.get('K8S_CACHE_DIR', '').strip()
+	if not cache_dir:
+		cache_dir = os.path.join(base_dir, '.cache', 'k8s')
+	elif not os.path.isabs(cache_dir):
+		cache_dir = os.path.join(base_dir, cache_dir)
+	cache_dir = os.path.abspath(os.path.expanduser(cache_dir))
+
+	return timeout, {
+		'default': {
+			'BACKEND': 'django.core.cache.backends.filebased.FileBasedCache',
+			'LOCATION': cache_dir,
+			'TIMEOUT': timeout,
+			'OPTIONS': {
+				'MAX_ENTRIES': 1000,
+				'CULL_FREQUENCY': 3,
+			},
+		},
+	}
+
+
 def database_config_from_env(environ, base_dir=BASE_DIR):
 	engine_name = environ.get('DB_ENGINE', 'sqlite').strip()
 	engine_aliases = {
@@ -139,6 +164,7 @@ def database_config_from_env(environ, base_dir=BASE_DIR):
 
 
 DATABASES = database_config_from_env(os.environ)
+K8S_DETAIL_CACHE_TIMEOUT_SECONDS, CACHES = k8s_cache_config_from_env(os.environ)
 
 # Password validation
 # https://docs.djangoproject.com/en/2.1/ref/settings/#auth-password-validators

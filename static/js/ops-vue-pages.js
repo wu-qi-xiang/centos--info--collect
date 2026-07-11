@@ -96,8 +96,8 @@
 
                 <section v-else-if="kind === 'dashboard'">
                     <div class="ops-grid">
-                        <div class="ops-card"><div class="ops-card-label">服务器</div><div class="ops-card-value">[[ data.counts.hosts ]]</div></div>
-                        <div class="ops-card"><div class="ops-card-label">密码记录</div><div class="ops-card-value">[[ data.counts.passwords ]]</div></div>
+                        <div class="ops-card"><div class="ops-card-label">资产</div><div class="ops-card-value">[[ data.counts.hosts ]]</div></div>
+                        <div class="ops-card"><div class="ops-card-label">凭据记录</div><div class="ops-card-value">[[ data.counts.passwords ]]</div></div>
                         <div class="ops-card"><div class="ops-card-label">DevOps</div><div class="ops-card-value">Vue</div></div>
                         <div class="ops-card"><div class="ops-card-label">监控</div><div class="ops-card-value">可用</div></div>
                     </div>

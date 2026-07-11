@@ -1,0 +1,91 @@
+{% extends "base.html" %}
+
+{% block title %}K8s集群连接 - DevOps平台{% endblock %}
+
+{% block content %}
+<div class="k8s-management-page">
+    <header class="ops-page-header k8s-management-header">
+        <div>
+            <nav class="k8s-management-breadcrumb" aria-label="当前位置">
+                <a href="{% url 'devops:clusters' %}">K8s集群管理</a>
+                <i class="fas fa-chevron-right" aria-hidden="true"></i>
+                <span>K8s集群连接</span>
+            </nav>
+            <h1 class="ops-page-title"><i class="fas fa-plug" aria-hidden="true"></i>K8s集群连接</h1>
+            <p class="ops-page-subtitle">导入 kubeconfig 建立连接，保存成功后集群会显示在集群列表中。</p>
+        </div>
+        <a class="btn btn-outline-secondary" href="{% url 'devops:cluster_list' %}">
+            <i class="fas fa-list me-1" aria-hidden="true"></i>集群列表
+        </a>
+    </header>
+
+    {% if can_manage %}
+    <section class="k8s-connection-layout">
+        <form class="k8s-connection-form" method="post" action="{% url 'devops:cluster_create' %}" enctype="multipart/form-data" novalidate>
+            {% csrf_token %}
+            <div class="k8s-management-panel-heading">
+                <h2>连接配置</h2>
+                <span>带 * 的项目为必填项</span>
+            </div>
+
+            {% if form.non_field_errors %}
+            <div class="alert alert-danger k8s-form-alert" role="alert">{{ form.non_field_errors }}</div>
+            {% endif %}
+
+            <div class="k8s-connection-fields">
+                <div class="k8s-field-group">
+                    <label for="{{ form.name.id_for_label }}">集群名称 <span aria-hidden="true">*</span></label>
+                    {{ form.name }}
+                    <small>用于在平台中识别此集群，例如“生产集群”。</small>
+                    {% for error in form.name.errors %}<div class="k8s-field-error" role="alert">{{ error }}</div>{% endfor %}
+                </div>
+                <div class="k8s-field-group k8s-field-wide">
+                    <label for="id_kubeconfig_file">Kubeconfig 文件 <span aria-hidden="true">*</span></label>
+                    <div class="k8s-file-import">
+                        <div class="k8s-file-import-copy">
+                            <span class="k8s-file-import-icon" aria-hidden="true"><i class="fas fa-file-import"></i></span>
+                            <span>
+                                <strong>选择 kubeconfig 文件</strong>
+                                <small>支持常见 YAML 配置及无扩展名的 kubeconfig 文件</small>
+                            </span>
+                        </div>
+                        <input class="form-control k8s-file-input" type="file" id="id_kubeconfig_file" name="kubeconfig_file" required aria-describedby="k8s-kubeconfig-note">
+                    </div>
+                    <div class="k8s-secret-note" id="k8s-kubeconfig-note">
+                        <i class="fas fa-shield-alt" aria-hidden="true"></i>
+                        <span>平台从 current-context 自动读取 API Server 和默认 Namespace，文件内容加密保存且不会回显。</span>
+                    </div>
+                    {% for error in form.kubeconfig_file.errors %}<div class="k8s-field-error" role="alert">{{ error }} 请重新选择文件后提交。</div>{% endfor %}
+                </div>
+            </div>
+
+            <div class="k8s-connection-actions">
+                <button class="btn btn-outline-primary k8s-test-connection-button" type="submit" formaction="{% url 'devops:cluster_connect_test' %}" formmethod="post">
+                    <i class="fas fa-plug me-1" aria-hidden="true"></i>测试连接
+                </button>
+                <button class="btn btn-primary" type="submit"><i class="fas fa-save me-1" aria-hidden="true"></i>保存连接</button>
+                <a class="btn btn-outline-secondary" href="{% url 'devops:clusters' %}">取消</a>
+                <small class="k8s-test-connection-note"><i class="fas fa-info-circle" aria-hidden="true"></i>测试会保存此连接，并将检测状态同步到集群列表。</small>
+            </div>
+        </form>
+
+        <aside class="k8s-connection-guidance" aria-labelledby="k8s-connection-guidance-title">
+            <h2 id="k8s-connection-guidance-title">连接要求</h2>
+            <ul>
+                <li><i class="fas fa-check" aria-hidden="true"></i><span>平台将依据 current-context 自动识别集群连接和默认 Namespace。</span></li>
+                <li><i class="fas fa-check" aria-hidden="true"></i><span>Kubeconfig 应仅授予资源查看与管理所需的最小权限。</span></li>
+                <li><i class="fas fa-check" aria-hidden="true"></i><span>文件内容加密保存，不会在连接页面中再次显示。</span></li>
+                <li><i class="fas fa-check" aria-hidden="true"></i><span>可在导入时测试连接，检测结果会同步到集群列表。</span></li>
+            </ul>
+        </aside>
+    </section>
+    {% else %}
+    <section class="k8s-management-empty">
+        <i class="fas fa-lock" aria-hidden="true"></i>
+        <h2>仅管理员可以新增集群连接</h2>
+        <p>你仍可前往集群列表查看有权访问的集群。</p>
+        <a class="btn btn-outline-primary" href="{% url 'devops:cluster_list' %}">查看集群列表</a>
+    </section>
+    {% endif %}
+</div>
+{% endblock %}

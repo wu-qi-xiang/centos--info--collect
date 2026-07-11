@@ -1,0 +1,74 @@
+{% extends "base.html" %}
+
+{% block title %}K8s集群管理 - DevOps平台{% endblock %}
+
+{% block content %}
+<div class="k8s-management-page">
+    <header class="ops-page-header k8s-management-header">
+        <div>
+            <h1 class="ops-page-title"><i class="fas fa-cubes" aria-hidden="true"></i>K8s集群管理</h1>
+            <p class="ops-page-subtitle">维护 Kubernetes 集群连接，并从统一列表进入资源管理。</p>
+        </div>
+        {% if can_manage %}
+        <a class="btn btn-primary" href="{% url 'devops:cluster_connect' %}">
+            <i class="fas fa-plug me-1" aria-hidden="true"></i>新增连接
+        </a>
+        {% endif %}
+    </header>
+
+    <section class="k8s-management-summary" aria-label="集群状态概览">
+        <div class="k8s-management-stat">
+            <span>集群总数</span>
+            <strong>{{ cluster_count|default:0 }}</strong>
+        </div>
+        <div class="k8s-management-stat is-online">
+            <span>在线</span>
+            <strong>{{ online_count|default:0 }}</strong>
+        </div>
+        <div class="k8s-management-stat is-offline">
+            <span>离线</span>
+            <strong>{{ offline_count|default:0 }}</strong>
+        </div>
+        <div class="k8s-management-stat is-unknown">
+            <span>未检测</span>
+            <strong>{{ unknown_count|default:0 }}</strong>
+        </div>
+    </section>
+
+    <section class="k8s-management-panel" aria-labelledby="k8s-management-actions-title">
+        <div class="k8s-management-panel-heading">
+            <h2 id="k8s-management-actions-title">集群管理</h2>
+            <span>选择需要执行的操作</span>
+        </div>
+        <div class="k8s-management-destinations">
+            {% if can_manage %}
+            <a class="k8s-management-destination" href="{% url 'devops:cluster_connect' %}">
+                <span class="k8s-management-destination-icon is-connect"><i class="fas fa-plug" aria-hidden="true"></i></span>
+                <span class="k8s-management-destination-copy">
+                    <strong>K8s集群连接</strong>
+                    <small>录入集群标识、API Server 和 Kubeconfig</small>
+                </span>
+                <i class="fas fa-chevron-right" aria-hidden="true"></i>
+            </a>
+            {% else %}
+            <div class="k8s-management-destination is-disabled" aria-disabled="true">
+                <span class="k8s-management-destination-icon is-connect"><i class="fas fa-lock" aria-hidden="true"></i></span>
+                <span class="k8s-management-destination-copy">
+                    <strong>K8s集群连接</strong>
+                    <small>仅管理员可以新增集群连接</small>
+                </span>
+            </div>
+            {% endif %}
+            <a class="k8s-management-destination" href="{% url 'devops:cluster_list' %}">
+                <span class="k8s-management-destination-icon is-list"><i class="fas fa-list" aria-hidden="true"></i></span>
+                <span class="k8s-management-destination-copy">
+                    <strong>K8s集群列表</strong>
+                    <small>查看已保存的集群、连接状态和资源入口</small>
+                </span>
+                <span class="k8s-management-destination-count">{{ cluster_count|default:0 }}</span>
+                <i class="fas fa-chevron-right" aria-hidden="true"></i>
+            </a>
+        </div>
+    </section>
+</div>
+{% endblock %}

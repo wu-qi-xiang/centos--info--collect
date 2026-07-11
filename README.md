@@ -45,6 +45,8 @@ python manage.py runserver 0.0.0.0:8000
 - `WEBSSH_SESSION_TIMEOUT_SECONDS`
 - `AUDIT_LOG_RETENTION_DAYS`
 - `METRIC_SAMPLE_RETENTION_DAYS`
+- `K8S_CACHE_DIR`
+- `K8S_DETAIL_CACHE_TIMEOUT_SECONDS`
 
 生产模式由 `DJANGO_ENV=production` / `prod` 或 `DJANGO_DEBUG=False` 触发。运行 `python manage.py check --deploy` 会检查生产关键配置：
 
@@ -54,6 +56,15 @@ python manage.py runserver 0.0.0.0:8000
 - 生产环境不应使用 SQLite，应配置 MySQL 或 PostgreSQL。
 - `DEVOPS_SSH_CONNECT_TIMEOUT_SECONDS`、`DEVOPS_COMMAND_TIMEOUT_SECONDS`、`DEVOPS_COMMAND_OUTPUT_MAX_BYTES`、`WEBSSH_SESSION_TIMEOUT_SECONDS`、`NOTIFICATION_TIMEOUT_SECONDS` 必须为正整数。
 - `AUDIT_LOG_RETENTION_DAYS`、`METRIC_SAMPLE_RETENTION_DAYS` 不能为负数；设置为 `0` 表示不按保留天数清理，生产环境会给出警告。
+
+## K8s 查询缓存
+
+K8s 集群详情查询结果使用本地文件缓存，默认目录为 `<BASE_DIR>/.cache/k8s`，默认有效期为 `86400` 秒。首次查询会访问集群，后续查询优先读取缓存；页面主动刷新时会重新访问 K8s API 并覆盖缓存。
+
+- `K8S_CACHE_DIR`：缓存目录，可使用绝对路径；相对路径按项目根目录解析。运行用户必须具有目录写权限。
+- `K8S_DETAIL_CACHE_TIMEOUT_SECONDS`：缓存有效期，必须为正整数。
+
+缓存只保存页面展示所需的安全资源摘要，不应包含 kubeconfig、访问令牌、客户端证书或 Secret 原文。容器内默认目录会随容器销毁而丢失；如需跨进程重启或容器重建保留缓存，应将 `K8S_CACHE_DIR` 指向持久化挂载目录。
 
 ## DevOps 后台任务
 

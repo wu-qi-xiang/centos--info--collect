@@ -1,7 +1,12 @@
 import base64
+from decimal import Decimal, InvalidOperation
 import hashlib
 import hmac
 import json
+import os
+import re
+import subprocess
+import tempfile
 import time
 import posixpath
 import shlex
@@ -16,6 +21,7 @@ except ImportError:
     import urllib.request as urlrequest
 
 from django.conf import settings
+from django.core.cache import cache
 from django.db import models
 from django.utils import timezone
 try:
@@ -61,6 +67,7 @@ from .models import (
     FileDistribution,
     FileDistributionResult,
     MetricSample,
+    K8sCluster,
     NotificationChannel,
     NotificationLog,
 )
@@ -85,6 +92,756 @@ ROLE_RANKS = {
     DevOpsRole.ROLE_OPERATOR: 2,
     DevOpsRole.ROLE_ADMIN: 3,
 }
+
+
+K8S_PRIMARY_RESOURCE_KEYS = (
+    'deployments', 'statefulsets', 'daemonsets', 'jobs', 'cronjobs',
+)
+K8S_RELATED_RESOURCE_KEYS = (
+    'pods', 'services', 'configmaps', 'secrets', 'persistentvolumeclaims',
+)
+K8S_SAFE_RESOURCE_FIELDS = (
+    'kind', 'name', 'status', 'replicas', 'namespace', 'created_at', 'detail',
+    'labels', 'annotations', 'ip_address',
+)
+K8S_NAMESPACE_PATTERN = re.compile(r'^[a-z0-9]([-a-z0-9]*[a-z0-9])?$')
+K8S_DETAIL_CACHE_TIMEOUT_DEFAULT = 86400
+K8S_DETAIL_CACHE_SCHEMA_VERSION = 'v4'
+
+
+def _k8s_detail_cache_timeout():
+    try:
+        timeout = int(getattr(
+            settings,
+            'K8S_DETAIL_CACHE_TIMEOUT_SECONDS',
+            K8S_DETAIL_CACHE_TIMEOUT_DEFAULT,
+        ))
+    except (TypeError, ValueError):
+        return K8S_DETAIL_CACHE_TIMEOUT_DEFAULT
+    return timeout if timeout > 0 else K8S_DETAIL_CACHE_TIMEOUT_DEFAULT
+
+
+def safe_k8s_namespace(value, fallback=''):
+    namespace = (value or '').strip().lower()
+    if namespace and len(namespace) <= 63 and K8S_NAMESPACE_PATTERN.match(namespace):
+        return namespace
+    return fallback
+
+
+def _safe_k8s_error(exc, fallback='Kubernetes API 请求失败'):
+    error_type = exc.__class__.__name__[:60]
+    status = getattr(exc, 'status', None)
+    reason = getattr(exc, 'reason', '')
+    reason = re.sub(r'[\r\n\t]+', ' ', str(reason or '')).strip()
+    if re.search(r'(?i)(token|certificate|authorization|kubeconfig|password|secret)', reason):
+        reason = ''
+    parts = [fallback]
+    if status:
+        parts.append('状态码 %s' % str(status)[:12])
+    if reason:
+        parts.append(reason[:120])
+    elif error_type:
+        parts.append(error_type)
+    return '：'.join(parts)[:260]
+
+
+def _k8s_temp_config(kubeconfig_text):
+    descriptor, path = tempfile.mkstemp(prefix='devops-kube-', suffix='.yaml')
+    os.chmod(path, 0o600)
+    try:
+        with os.fdopen(descriptor, 'w') as handle:
+            handle.write(kubeconfig_text)
+    except Exception:
+        try:
+            os.close(descriptor)
+        except OSError:
+            pass
+        try:
+            os.unlink(path)
+        except OSError:
+            pass
+        raise
+    return path
+
+
+def _k8s_created_at(item):
+    value = getattr(getattr(item, 'metadata', None), 'creation_timestamp', None)
+    return value.strftime('%Y/%m/%d %H:%M:%S') if value else '-'
+
+
+def _k8s_name(item):
+    return getattr(getattr(item, 'metadata', None), 'name', None) or '-'
+
+
+def _k8s_namespace(item, default='-'):
+    return getattr(getattr(item, 'metadata', None), 'namespace', None) or default
+
+
+def _k8s_labels(item):
+    labels = getattr(getattr(item, 'metadata', None), 'labels', None) or {}
+    parts = []
+    for key, value in sorted(labels.items()):
+        safe_key = re.sub(r'[\r\n\t]+', ' ', str(key or '')).strip()[:160]
+        safe_value = re.sub(r'[\r\n\t]+', ' ', str(value or '')).strip()[:160]
+        if safe_key:
+            parts.append('%s=%s' % (safe_key, safe_value) if safe_value else safe_key)
+    return ', '.join(parts) or '-'
+
+
+def _k8s_annotations(item):
+    annotations = getattr(getattr(item, 'metadata', None), 'annotations', None) or {}
+    parts = []
+    for key, value in sorted(annotations.items()):
+        safe_key = re.sub(r'[\r\n\t]+', ' ', str(key or '')).strip()[:160]
+        safe_value = re.sub(r'[\r\n\t]+', ' ', str(value or '')).strip()[:500]
+        if safe_key:
+            parts.append('%s=%s' % (safe_key, safe_value) if safe_value else safe_key)
+    return ', '.join(parts) or '-'
+
+
+def _k8s_node_ip(item):
+    addresses = getattr(getattr(item, 'status', None), 'addresses', None) or []
+    address_map = {
+        getattr(address, 'type', ''): getattr(address, 'address', '')
+        for address in addresses
+        if getattr(address, 'address', '')
+    }
+    return address_map.get('InternalIP') or address_map.get('ExternalIP') or address_map.get('Hostname') or '-'
+
+
+def _k8s_image(template):
+    spec = getattr(template, 'spec', None)
+    containers = getattr(spec, 'containers', None) or []
+    return getattr(containers[0], 'image', None) or '-' if containers else '-'
+
+
+def _k8s_cronjob_image(item):
+    job_template = getattr(getattr(item, 'spec', None), 'job_template', None)
+    job_spec = getattr(job_template, 'spec', None)
+    return _k8s_image(getattr(job_spec, 'template', None))
+
+
+def _k8s_cpu_millicores(value):
+    text = str(value or '0').strip()
+    multipliers = {'n': Decimal('0.000001'), 'u': Decimal('0.001'), 'm': Decimal('1')}
+    suffix = text[-1:] if text else ''
+    try:
+        if suffix in multipliers:
+            return Decimal(text[:-1] or '0') * multipliers[suffix]
+        return Decimal(text) * Decimal('1000')
+    except (InvalidOperation, ValueError):
+        return Decimal('0')
+
+
+def _k8s_memory_bytes(value):
+    text = str(value or '0').strip()
+    units = {
+        'Ki': Decimal(1024), 'Mi': Decimal(1024 ** 2), 'Gi': Decimal(1024 ** 3),
+        'Ti': Decimal(1024 ** 4), 'K': Decimal(1000), 'M': Decimal(1000 ** 2),
+        'G': Decimal(1000 ** 3), 'T': Decimal(1000 ** 4),
+    }
+    try:
+        for suffix, multiplier in units.items():
+            if text.endswith(suffix):
+                return Decimal(text[:-len(suffix)] or '0') * multiplier
+        return Decimal(text)
+    except (InvalidOperation, ValueError):
+        return Decimal('0')
+
+
+def _format_k8s_cpu(millicores):
+    cores = Decimal(millicores or 0) / Decimal('1000')
+    return ('%.2f' % cores).rstrip('0').rstrip('.') + ' 核'
+
+
+def _format_k8s_memory(byte_count):
+    gib = Decimal(byte_count or 0) / Decimal(1024 ** 3)
+    return ('%.2f' % gib).rstrip('0').rstrip('.') + ' GiB'
+
+
+def summarize_k8s_nodes(items):
+    cpu_capacity = Decimal('0')
+    cpu_allocatable = Decimal('0')
+    memory_capacity = Decimal('0')
+    memory_allocatable = Decimal('0')
+    ready_nodes = 0
+    nodes = list(items or [])
+    for item in nodes:
+        status = getattr(item, 'status', None)
+        capacity = getattr(status, 'capacity', None) or {}
+        allocatable = getattr(status, 'allocatable', None) or {}
+        cpu_capacity += _k8s_cpu_millicores(capacity.get('cpu'))
+        cpu_allocatable += _k8s_cpu_millicores(allocatable.get('cpu'))
+        memory_capacity += _k8s_memory_bytes(capacity.get('memory'))
+        memory_allocatable += _k8s_memory_bytes(allocatable.get('memory'))
+        conditions = getattr(status, 'conditions', None) or []
+        if any(getattr(condition, 'type', '') == 'Ready' and str(getattr(condition, 'status', '')).lower() == 'true' for condition in conditions):
+            ready_nodes += 1
+    return {
+        'node_count': len(nodes),
+        'ready_nodes': ready_nodes,
+        'cpu_capacity': _format_k8s_cpu(cpu_capacity),
+        'cpu_allocatable': _format_k8s_cpu(cpu_allocatable),
+        'memory_capacity': _format_k8s_memory(memory_capacity),
+        'memory_allocatable': _format_k8s_memory(memory_allocatable),
+    }
+
+
+def safe_k8s_resource(resource):
+    return {key: resource.get(key) for key in K8S_SAFE_RESOURCE_FIELDS if key in resource}
+
+
+def normalize_k8s_resource_name(name, strip_generated_suffixes=True):
+    normalized = re.sub(r'[^a-z0-9]+', '-', (name or '').lower()).strip('-')
+    if not strip_generated_suffixes:
+        return normalized
+    parts = [part for part in normalized.split('-') if part]
+    while len(parts) > 1:
+        suffix = parts[-1]
+        if suffix.isdigit() or (len(suffix) == 5 and re.search(r'[a-z]', suffix) and re.search(r'\d', suffix)):
+            parts.pop()
+            continue
+        if re.match(r'^[a-f0-9]{8,12}$', suffix):
+            parts.pop()
+            continue
+        break
+    return '-'.join(parts)
+
+
+def _k8s_resources_match(primary, related, related_key):
+    primary_namespace = (primary.get('namespace') or '-').strip()
+    related_namespace = (related.get('namespace') or '-').strip()
+    if related_namespace != '-' and primary_namespace != related_namespace:
+        return False
+    primary_name = normalize_k8s_resource_name(primary.get('name'), False)
+    related_name = normalize_k8s_resource_name(related.get('name'), related_key == 'pods')
+    if not primary_name or not related_name:
+        return False
+    if primary_name == related_name:
+        return True
+    if related_key == 'services':
+        return related_name.startswith(primary_name + '-')
+    return related_name.startswith(primary_name + '-') or primary_name.startswith(related_name + '-')
+
+
+def build_k8s_resource_matches(resources):
+    resources = resources or {}
+    groups = []
+    for primary_key in K8S_PRIMARY_RESOURCE_KEYS:
+        for primary_resource in resources.get(primary_key, []) or []:
+            primary = safe_k8s_resource(primary_resource)
+            related_groups = {}
+            for related_key in K8S_RELATED_RESOURCE_KEYS:
+                related_groups[related_key] = [
+                    safe_k8s_resource(item)
+                    for item in resources.get(related_key, []) or []
+                    if _k8s_resources_match(primary, item, related_key)
+                ]
+            search_parts = list(primary.values())
+            for items in related_groups.values():
+                for item in items:
+                    search_parts.extend(item.values())
+            groups.append({
+                'name': primary.get('name') or '-',
+                'namespace': primary.get('namespace') or '-',
+                'status': primary.get('status') or '-',
+                'primary': primary,
+                'resources': related_groups,
+                'resource_count': 1 + sum(len(items) for items in related_groups.values()),
+                'search_text': ' '.join(str(value) for value in search_parts if value).lower(),
+            })
+    return groups
+
+
+def load_k8s_namespaces(kubeconfig_text, timeout=5):
+    result = {'ok': False, 'message': '', 'namespaces': []}
+    if not kubeconfig_text:
+        result['message'] = 'kubeconfig 无法解密或为空'
+        return result
+    try:
+        from kubernetes import client, config
+    except ImportError:
+        result['message'] = '缺少 kubernetes Python 依赖，无法读取命名空间'
+        return result
+    path = ''
+    try:
+        path = _k8s_temp_config(kubeconfig_text)
+        api_client = config.new_client_from_config(config_file=path)
+        response = client.CoreV1Api(api_client).list_namespace(_request_timeout=timeout)
+        for item in getattr(response, 'items', []) or []:
+            name = safe_k8s_namespace(_k8s_name(item))
+            if name:
+                result['namespaces'].append({
+                    'name': name,
+                    'status': getattr(getattr(item, 'status', None), 'phase', None) or '-',
+                    'labels': _k8s_labels(item),
+                    'created_at': _k8s_created_at(item),
+                })
+        result['namespaces'].sort(key=lambda item: item['name'])
+        result['ok'] = True
+        result['message'] = '命名空间读取成功'
+    except Exception as exc:
+        result['message'] = _safe_k8s_error(exc, '命名空间读取失败')
+    finally:
+        if path:
+            try:
+                os.unlink(path)
+            except OSError:
+                pass
+    return result
+
+
+def load_k8s_cluster_overview(kubeconfig_text, namespace='default', timeout=5):
+    namespace = safe_k8s_namespace(namespace, 'default')
+    overview = {
+        'ok': False, 'message': '', 'version': '', 'namespace': namespace,
+        'resources': {}, 'resource_errors': {}, 'resource_matches': [],
+        'cluster_capacity': summarize_k8s_nodes([]),
+    }
+    if not kubeconfig_text:
+        overview['message'] = 'kubeconfig 无法解密或为空'
+        return overview
+    try:
+        from kubernetes import client, config
+    except ImportError:
+        overview['message'] = '缺少 kubernetes Python 依赖，无法读取集群信息'
+        return overview
+    path = ''
+    try:
+        path = _k8s_temp_config(kubeconfig_text)
+        api_client = config.new_client_from_config(config_file=path)
+        version = client.VersionApi(api_client).get_code(_request_timeout=timeout)
+        overview['version'] = getattr(version, 'git_version', '') or 'unknown'
+        apps_api = client.AppsV1Api(api_client)
+        batch_api = client.BatchV1Api(api_client)
+        cron_api_class = getattr(client, 'BatchV1beta1Api', client.BatchV1Api)
+        cron_api = cron_api_class(api_client)
+        core_api = client.CoreV1Api(api_client)
+        networking_api_class = getattr(client, 'NetworkingV1Api', None) or getattr(client, 'ExtensionsV1beta1Api', None)
+        networking_api = networking_api_class(api_client) if networking_api_class else None
+        storage_api_class = getattr(client, 'StorageV1Api', None)
+        storage_api = storage_api_class(api_client) if storage_api_class else None
+
+        def add_resource(key, loader, mapper):
+            try:
+                response = loader()
+                overview['resources'][key] = [safe_k8s_resource(mapper(item)) for item in getattr(response, 'items', []) or []]
+            except Exception as exc:
+                overview['resources'][key] = []
+                overview['resource_errors'][key] = _safe_k8s_error(exc, '%s 读取失败' % key)
+
+        def replica_workload(item, kind):
+            spec = getattr(item, 'spec', None)
+            status = getattr(item, 'status', None)
+            desired = getattr(spec, 'replicas', None) or 0
+            ready = getattr(status, 'ready_replicas', None) or 0
+            return with_workload_metadata({'kind': kind, 'name': _k8s_name(item), 'status': '运行中' if desired > 0 and ready == desired else '异常', 'replicas': '%s / %s' % (ready, desired), 'namespace': _k8s_namespace(item, namespace), 'created_at': _k8s_created_at(item), 'detail': _k8s_image(getattr(spec, 'template', None))}, item)
+
+        def with_workload_metadata(resource, item):
+            resource['labels'] = _k8s_labels(item)
+            resource['annotations'] = _k8s_annotations(item)
+            return resource
+
+        add_resource('deployments', lambda: apps_api.list_namespaced_deployment(namespace=namespace, _request_timeout=timeout), lambda item: replica_workload(item, 'Deployment'))
+        add_resource('statefulsets', lambda: apps_api.list_namespaced_stateful_set(namespace=namespace, _request_timeout=timeout), lambda item: replica_workload(item, 'StatefulSet'))
+        add_resource('daemonsets', lambda: apps_api.list_namespaced_daemon_set(namespace=namespace, _request_timeout=timeout), lambda item: with_workload_metadata({'kind': 'DaemonSet', 'name': _k8s_name(item), 'status': '运行中' if (getattr(item.status, 'desired_number_scheduled', 0) or 0) > 0 and (getattr(item.status, 'number_ready', 0) or 0) == (getattr(item.status, 'desired_number_scheduled', 0) or 0) else '异常', 'replicas': '%s / %s' % (getattr(item.status, 'number_ready', 0) or 0, getattr(item.status, 'desired_number_scheduled', 0) or 0), 'namespace': _k8s_namespace(item, namespace), 'created_at': _k8s_created_at(item), 'detail': _k8s_image(getattr(item.spec, 'template', None))}, item))
+        add_resource('jobs', lambda: batch_api.list_namespaced_job(namespace=namespace, _request_timeout=timeout), lambda item: with_workload_metadata({'kind': 'Job', 'name': _k8s_name(item), 'status': '完成' if getattr(item.status, 'succeeded', 0) else ('运行中' if getattr(item.status, 'active', 0) else '异常'), 'replicas': '%s / %s' % (getattr(item.status, 'succeeded', 0) or 0, getattr(item.spec, 'completions', 0) or 1), 'namespace': _k8s_namespace(item, namespace), 'created_at': _k8s_created_at(item), 'detail': _k8s_image(getattr(getattr(item, 'spec', None), 'template', None))}, item))
+        add_resource('cronjobs', lambda: cron_api.list_namespaced_cron_job(namespace=namespace, _request_timeout=timeout), lambda item: with_workload_metadata({'kind': 'CronJob', 'name': _k8s_name(item), 'status': '暂停' if getattr(item.spec, 'suspend', False) else '启用', 'replicas': '-', 'namespace': _k8s_namespace(item, namespace), 'created_at': _k8s_created_at(item), 'detail': _k8s_cronjob_image(item)}, item))
+        add_resource('pods', lambda: core_api.list_namespaced_pod(namespace=namespace, _request_timeout=timeout), lambda item: {'kind': 'Pod', 'name': _k8s_name(item), 'status': getattr(item.status, 'phase', None) or '-', 'replicas': '-', 'namespace': _k8s_namespace(item, namespace), 'created_at': _k8s_created_at(item), 'detail': getattr(item.spec, 'node_name', None) or '-'})
+        try:
+            node_response = core_api.list_node(_request_timeout=timeout)
+            node_items = list(getattr(node_response, 'items', []) or [])
+            overview['cluster_capacity'] = summarize_k8s_nodes(node_items)
+
+            def node_resource(item):
+                metadata = getattr(item, 'metadata', None)
+                labels = getattr(metadata, 'labels', None) or {}
+                roles = sorted(filter(None, [
+                    key.split('node-role.kubernetes.io/', 1)[1] or 'worker'
+                    for key in labels
+                    if key.startswith('node-role.kubernetes.io/')
+                ])) or ['worker']
+                status = getattr(item, 'status', None)
+                conditions = getattr(status, 'conditions', None) or []
+                ready = any(getattr(condition, 'type', '') == 'Ready' and str(getattr(condition, 'status', '')).lower() == 'true' for condition in conditions)
+                node_info = getattr(status, 'node_info', None)
+                kubelet = getattr(node_info, 'kubelet_version', None) or '-'
+                return {
+                    'kind': 'Node', 'name': _k8s_name(item), 'status': 'Ready' if ready else 'NotReady',
+                    'replicas': '-', 'namespace': '-', 'created_at': _k8s_created_at(item),
+                    'ip_address': _k8s_node_ip(item),
+                    'detail': '%s | Kubelet %s' % (', '.join(roles), kubelet),
+                }
+
+            overview['resources']['nodes'] = [safe_k8s_resource(node_resource(item)) for item in node_items]
+        except Exception as exc:
+            overview['resources']['nodes'] = []
+            overview['resource_errors']['nodes'] = _safe_k8s_error(exc, 'nodes 读取失败')
+        add_resource('services', lambda: core_api.list_namespaced_service(namespace=namespace, _request_timeout=timeout), lambda item: {'kind': 'Service', 'name': _k8s_name(item), 'status': getattr(item.spec, 'type', None) or '-', 'replicas': '-', 'namespace': _k8s_namespace(item, namespace), 'created_at': _k8s_created_at(item), 'detail': getattr(item.spec, 'cluster_ip', None) or '-'})
+        add_resource('ingresses', lambda: networking_api.list_namespaced_ingress(namespace=namespace, _request_timeout=timeout), lambda item: {'kind': 'Ingress', 'name': _k8s_name(item), 'status': '可用' if getattr(item.spec, 'rules', None) else '-', 'replicas': '-', 'namespace': _k8s_namespace(item, namespace), 'created_at': _k8s_created_at(item), 'detail': ', '.join(filter(None, [getattr(rule, 'host', None) for rule in (getattr(item.spec, 'rules', None) or [])])) or '-'})
+        add_resource('configmaps', lambda: core_api.list_namespaced_config_map(namespace=namespace, _request_timeout=timeout), lambda item: {'kind': 'ConfigMap', 'name': _k8s_name(item), 'status': '-', 'replicas': '-', 'namespace': _k8s_namespace(item, namespace), 'created_at': _k8s_created_at(item), 'detail': '%s keys' % len(getattr(item, 'data', None) or {})})
+        add_resource('secrets', lambda: core_api.list_namespaced_secret(namespace=namespace, _request_timeout=timeout), lambda item: {'kind': 'Secret', 'name': _k8s_name(item), 'status': getattr(item, 'type', None) or '-', 'replicas': '-', 'namespace': _k8s_namespace(item, namespace), 'created_at': _k8s_created_at(item), 'detail': '受保护数据'})
+        add_resource('persistentvolumeclaims', lambda: core_api.list_namespaced_persistent_volume_claim(namespace=namespace, _request_timeout=timeout), lambda item: {'kind': 'PVC', 'name': _k8s_name(item), 'status': getattr(item.status, 'phase', None) or '-', 'replicas': '-', 'namespace': _k8s_namespace(item, namespace), 'created_at': _k8s_created_at(item), 'detail': getattr(item.spec, 'storage_class_name', None) or '-'})
+        add_resource('persistentvolumes', lambda: core_api.list_persistent_volume(_request_timeout=timeout), lambda item: {'kind': 'PV', 'name': _k8s_name(item), 'status': getattr(getattr(item, 'status', None), 'phase', None) or '-', 'replicas': '-', 'namespace': '-', 'created_at': _k8s_created_at(item), 'detail': getattr(getattr(item, 'spec', None), 'storage_class_name', None) or '-'})
+        add_resource('storageclasses', lambda: storage_api.list_storage_class(_request_timeout=timeout), lambda item: {'kind': 'StorageClass', 'name': _k8s_name(item), 'status': '可用', 'replicas': '-', 'namespace': '-', 'created_at': _k8s_created_at(item), 'detail': getattr(item, 'provisioner', None) or '-'})
+        overview['resource_matches'] = build_k8s_resource_matches(overview['resources'])
+        overview['ok'] = True
+        overview['message'] = '集群信息读取成功'
+    except Exception as exc:
+        overview['message'] = _safe_k8s_error(exc, '集群信息读取失败')
+    finally:
+        if path:
+            try:
+                os.unlink(path)
+            except OSError:
+                pass
+    return overview
+
+
+def k8s_detail_cache_key(cluster_id, kubeconfig_text, schema_version=None):
+    fingerprint = hashlib.sha256((kubeconfig_text or '').encode('utf-8')).hexdigest()
+    return 'devops:k8s-detail:%s:%s:%s' % (
+        schema_version or K8S_DETAIL_CACHE_SCHEMA_VERSION,
+        cluster_id,
+        fingerprint,
+    )
+
+
+def clear_k8s_detail_cache(cluster_id, kubeconfig_text):
+    cache.delete(k8s_detail_cache_key(cluster_id, kubeconfig_text))
+    cache.delete(k8s_detail_cache_key(cluster_id, kubeconfig_text, 'v3'))
+
+
+def load_cached_k8s_cluster_detail(cluster_id, kubeconfig_text, namespace='default', refresh=False, timeout=5):
+    selected = safe_k8s_namespace(namespace, 'default')
+    key = k8s_detail_cache_key(cluster_id, kubeconfig_text)
+    cached = cache.get(key)
+    if not isinstance(cached, dict):
+        cached = None
+    legacy_cached = cache.get(k8s_detail_cache_key(cluster_id, kubeconfig_text, 'v3'))
+    if not isinstance(legacy_cached, dict):
+        legacy_cached = None
+    cached_namespace_result = (cached or {}).get('namespace_result') or {}
+    legacy_namespace_result = (legacy_cached or {}).get('namespace_result') or {}
+    if not cached_namespace_result.get('ok') and legacy_namespace_result.get('ok'):
+        cached_namespace_result = legacy_namespace_result
+    namespace_cache_valid = bool(
+        isinstance(cached_namespace_result, dict)
+        and cached_namespace_result.get('ok')
+        and isinstance(cached_namespace_result.get('namespaces'), list)
+    )
+    current_overviews = dict((cached or {}).get('overviews') or {})
+    overviews = dict((legacy_cached or {}).get('overviews') or {})
+    overviews.update(current_overviews)
+    cluster_scope_source = next((
+        item for item in overviews.values()
+        if 'cluster_capacity' in item and 'nodes' in (item.get('resources') or {})
+    ), None)
+    if cluster_scope_source:
+        source_resources = cluster_scope_source.get('resources') or {}
+        for overview_namespace, overview_item in list(overviews.items()):
+            merged_overview = dict(overview_item)
+            merged_resources = dict(merged_overview.get('resources') or {})
+            for resource_key in ('nodes', 'persistentvolumes', 'storageclasses'):
+                if resource_key not in merged_resources and resource_key in source_resources:
+                    merged_resources[resource_key] = source_resources[resource_key]
+            merged_overview['resources'] = merged_resources
+            if 'cluster_capacity' not in merged_overview:
+                merged_overview['cluster_capacity'] = cluster_scope_source['cluster_capacity']
+            overviews[overview_namespace] = merged_overview
+    cached_overview = overviews.get(selected) or {}
+    cached_workload_rows = [
+        row
+        for resource_key in K8S_PRIMARY_RESOURCE_KEYS
+        for row in (cached_overview.get('resources') or {}).get(resource_key, []) or []
+    ]
+    workload_metadata_valid = all(
+        'labels' in row and 'annotations' in row
+        for row in cached_workload_rows
+    )
+    overview_cache_valid = bool(
+        cached_overview.get('ok')
+        and workload_metadata_valid
+        and (
+            selected in current_overviews
+            or (
+                'cluster_capacity' in cached_overview
+                and 'nodes' in (cached_overview.get('resources') or {})
+            )
+        )
+    )
+    if not refresh and namespace_cache_valid and overview_cache_valid:
+        return {
+            'overview': overviews[selected],
+            'namespace_result': cached_namespace_result,
+            'from_cache': True,
+        }
+
+    if refresh or not namespace_cache_valid:
+        loaded_namespace_result = load_k8s_namespaces(kubeconfig_text, timeout=timeout)
+        namespace_result = (
+            loaded_namespace_result if loaded_namespace_result.get('ok')
+            else cached_namespace_result or loaded_namespace_result
+        )
+    else:
+        namespace_result = cached_namespace_result
+    if refresh or not overview_cache_valid:
+        loaded_overview = load_k8s_cluster_overview(kubeconfig_text, selected, timeout=timeout)
+        if loaded_overview.get('ok') or not cached_overview.get('ok'):
+            overviews[selected] = loaded_overview
+        else:
+            preserved_overview = dict(cached_overview)
+            preserved_overview['ok'] = False
+            preserved_overview['message'] = loaded_overview.get('message') or '集群信息刷新失败，继续显示已有缓存'
+            overviews[selected] = preserved_overview
+    cache.set(
+        key,
+        {'namespace_result': namespace_result, 'overviews': overviews},
+        _k8s_detail_cache_timeout(),
+    )
+    return {
+        'overview': overviews[selected],
+        'namespace_result': namespace_result,
+        'from_cache': False,
+    }
+
+
+def _k8s_pod_quantity(pod, field, resource_name, parser):
+    spec = getattr(pod, 'spec', None)
+
+    def container_value(container):
+        resources = getattr(container, 'resources', None)
+        values = getattr(resources, field, None) or {}
+        return parser(values.get(resource_name))
+
+    regular_total = sum(
+        (container_value(container) for container in (getattr(spec, 'containers', None) or [])),
+        Decimal('0'),
+    )
+    init_values = [
+        container_value(container)
+        for container in (getattr(spec, 'init_containers', None) or [])
+    ]
+    init_max = max(init_values) if init_values else Decimal('0')
+    return max(regular_total, init_max)
+
+
+def k8s_node_detail_cache_key(cluster_id, kubeconfig_text, node_name):
+    fingerprint = hashlib.sha256((kubeconfig_text or '').encode('utf-8')).hexdigest()
+    node_fingerprint = hashlib.sha256((node_name or '').encode('utf-8')).hexdigest()[:24]
+    return 'devops:k8s-node-detail:v1:%s:%s:%s' % (cluster_id, fingerprint, node_fingerprint)
+
+
+def load_k8s_node_detail(kubeconfig_text, node_name, timeout=8):
+    result = {
+        'ok': False,
+        'message': '',
+        'metrics_message': '',
+        'node': {},
+        'summary': {},
+        'pods': [],
+    }
+    if not kubeconfig_text:
+        result['message'] = 'kubeconfig 无法解密或为空'
+        return result
+    try:
+        from kubernetes import client, config
+    except ImportError:
+        result['message'] = '缺少 kubernetes Python 依赖，无法读取节点详情'
+        return result
+    path = ''
+    try:
+        path = _k8s_temp_config(kubeconfig_text)
+        api_client = config.new_client_from_config(config_file=path)
+        core_api = client.CoreV1Api(api_client)
+        node = core_api.read_node(name=node_name, _request_timeout=timeout)
+        pod_response = core_api.list_pod_for_all_namespaces(
+            field_selector='spec.nodeName=%s' % node_name,
+            _request_timeout=timeout,
+        )
+        pods = list(getattr(pod_response, 'items', []) or [])
+        status = getattr(node, 'status', None)
+        capacity = getattr(status, 'capacity', None) or {}
+        allocatable = getattr(status, 'allocatable', None) or {}
+        conditions = getattr(status, 'conditions', None) or []
+        ready = any(
+            getattr(condition, 'type', '') == 'Ready'
+            and str(getattr(condition, 'status', '')).lower() == 'true'
+            for condition in conditions
+        )
+        metadata = getattr(node, 'metadata', None)
+        labels = getattr(metadata, 'labels', None) or {}
+        roles = sorted(filter(None, [
+            key.split('node-role.kubernetes.io/', 1)[1] or 'worker'
+            for key in labels
+            if key.startswith('node-role.kubernetes.io/')
+        ])) or ['worker']
+        node_info = getattr(status, 'node_info', None)
+
+        cpu_requests = Decimal('0')
+        cpu_limits = Decimal('0')
+        memory_requests = Decimal('0')
+        memory_limits = Decimal('0')
+        pod_rows = []
+        for pod in pods:
+            pod_cpu_request = _k8s_pod_quantity(pod, 'requests', 'cpu', _k8s_cpu_millicores)
+            pod_cpu_limit = _k8s_pod_quantity(pod, 'limits', 'cpu', _k8s_cpu_millicores)
+            pod_memory_request = _k8s_pod_quantity(pod, 'requests', 'memory', _k8s_memory_bytes)
+            pod_memory_limit = _k8s_pod_quantity(pod, 'limits', 'memory', _k8s_memory_bytes)
+            cpu_requests += pod_cpu_request
+            cpu_limits += pod_cpu_limit
+            memory_requests += pod_memory_request
+            memory_limits += pod_memory_limit
+            pod_status = getattr(pod, 'status', None)
+            pod_rows.append({
+                'name': _k8s_name(pod),
+                'namespace': _k8s_namespace(pod),
+                'status': getattr(pod_status, 'phase', None) or '-',
+                'pod_ip': getattr(pod_status, 'pod_ip', None) or '-',
+                'created_at': _k8s_created_at(pod),
+                'cpu_request': _format_k8s_cpu(pod_cpu_request),
+                'cpu_limit': _format_k8s_cpu(pod_cpu_limit),
+                'memory_request': _format_k8s_memory(pod_memory_request),
+                'memory_limit': _format_k8s_memory(pod_memory_limit),
+            })
+
+        cpu_usage = None
+        memory_usage = None
+        try:
+            metrics_api = client.CustomObjectsApi(api_client)
+            metrics = metrics_api.get_cluster_custom_object(
+                group='metrics.k8s.io',
+                version='v1beta1',
+                plural='nodes',
+                name=node_name,
+                _request_timeout=timeout,
+            )
+            usage = (metrics or {}).get('usage') or {}
+            cpu_usage = _k8s_cpu_millicores(usage.get('cpu'))
+            memory_usage = _k8s_memory_bytes(usage.get('memory'))
+        except Exception as exc:
+            result['metrics_message'] = _safe_k8s_error(exc, '节点实时使用量读取失败')
+
+        result['node'] = {
+            'name': _k8s_name(node),
+            'status': 'Ready' if ready else 'NotReady',
+            'ip_address': _k8s_node_ip(node),
+            'roles': ', '.join(roles),
+            'created_at': _k8s_created_at(node),
+            'kubelet_version': getattr(node_info, 'kubelet_version', None) or '-',
+            'container_runtime': getattr(node_info, 'container_runtime_version', None) or '-',
+            'os_image': getattr(node_info, 'os_image', None) or '-',
+            'kernel_version': getattr(node_info, 'kernel_version', None) or '-',
+            'architecture': getattr(node_info, 'architecture', None) or '-',
+        }
+        result['summary'] = {
+            'cpu_total': _format_k8s_cpu(_k8s_cpu_millicores(capacity.get('cpu'))),
+            'cpu_allocatable': _format_k8s_cpu(_k8s_cpu_millicores(allocatable.get('cpu'))),
+            'cpu_usage': _format_k8s_cpu(cpu_usage) if cpu_usage is not None else '-',
+            'cpu_request': _format_k8s_cpu(cpu_requests),
+            'cpu_limit': _format_k8s_cpu(cpu_limits),
+            'memory_total': _format_k8s_memory(_k8s_memory_bytes(capacity.get('memory'))),
+            'memory_allocatable': _format_k8s_memory(_k8s_memory_bytes(allocatable.get('memory'))),
+            'memory_usage': _format_k8s_memory(memory_usage) if memory_usage is not None else '-',
+            'memory_request': _format_k8s_memory(memory_requests),
+            'memory_limit': _format_k8s_memory(memory_limits),
+            'pod_total': len(pod_rows),
+        }
+        result['pods'] = sorted(pod_rows, key=lambda item: (item['namespace'], item['name']))
+        result['ok'] = True
+        result['message'] = '节点详情读取成功'
+    except Exception as exc:
+        result['message'] = _safe_k8s_error(exc, '节点详情读取失败')
+    finally:
+        if path:
+            try:
+                os.unlink(path)
+            except OSError:
+                pass
+    return result
+
+
+def load_cached_k8s_node_detail(cluster_id, kubeconfig_text, node_name, refresh=False, timeout=8):
+    key = k8s_node_detail_cache_key(cluster_id, kubeconfig_text, node_name)
+    cached = cache.get(key)
+    if not refresh and isinstance(cached, dict) and cached.get('ok'):
+        result = dict(cached)
+        result['from_cache'] = True
+        return result
+
+    loaded = load_k8s_node_detail(kubeconfig_text, node_name, timeout=timeout)
+    if loaded.get('ok'):
+        cache.set(key, loaded, _k8s_detail_cache_timeout())
+        result = dict(loaded)
+    elif isinstance(cached, dict) and cached.get('ok'):
+        result = dict(cached)
+        result['ok'] = False
+        result['message'] = loaded.get('message') or '节点详情刷新失败，继续显示已有缓存'
+    else:
+        result = loaded
+    result['from_cache'] = False
+    return result
+
+
+def test_k8s_cluster_connection(cluster, timeout=8):
+    kubeconfig = cluster.decrypted_kubeconfig
+    checked_at = timezone.now()
+    if not kubeconfig:
+        cluster.status = K8sCluster.STATUS_OFFLINE
+        cluster.last_error = 'Kubeconfig 无法解密或为空'
+        cluster.last_checked_at = checked_at
+        cluster.save(update_fields=['status', 'last_error', 'last_checked_at', 'updated_at'])
+        return False, cluster.last_error
+
+    path = ''
+    try:
+        descriptor, path = tempfile.mkstemp(prefix='devops-kube-', suffix='.yaml')
+        os.chmod(path, 0o600)
+        with os.fdopen(descriptor, 'w') as handle:
+            handle.write(kubeconfig)
+        command = [
+            'kubectl',
+            '--kubeconfig', path,
+            '--namespace', cluster.default_namespace or 'default',
+            '--request-timeout=5s',
+            'get',
+            '--raw=/version',
+        ]
+        result = subprocess.run(
+            command,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            universal_newlines=True,
+            timeout=timeout,
+            check=False,
+        )
+        if result.returncode == 0:
+            success = True
+            message = ''
+        else:
+            success = False
+            message = 'Kubectl 连接失败（退出码 %s）' % result.returncode
+    except FileNotFoundError:
+        success = False
+        message = '未找到 kubectl 命令'
+    except subprocess.TimeoutExpired:
+        success = False
+        message = 'Kubernetes 连接测试超时'
+    except (OSError, ValueError):
+        success = False
+        message = 'Kubernetes 连接测试执行失败'
+    finally:
+        if path:
+            try:
+                os.unlink(path)
+            except OSError:
+                pass
+
+    cluster.status = K8sCluster.STATUS_ONLINE if success else K8sCluster.STATUS_OFFLINE
+    cluster.last_error = message[:300]
+    cluster.last_checked_at = checked_at
+    cluster.save(update_fields=['status', 'last_error', 'last_checked_at', 'updated_at'])
+    return success, message
 
 
 def claim_pending_work(model_class, obj, running_status):

@@ -275,6 +275,8 @@ class HostSearchTests(TestCase):
 		response = self.client.get(reverse('search'), {'search': 'web'})
 
 		self.assertEqual(response.status_code, 200)
+		payload = json.loads(response.context['vue_page_payload'])
+		self.assertEqual(payload['title'], '资产列表')
 		self.assertEqual(response.context['keyword'], 'web')
 		self.assertEqual(response.context['sum'], 9)
 		self.assertContains(response, 'search=web')
@@ -284,6 +286,8 @@ class HostSearchTests(TestCase):
 		response = self.client.get(reverse('linux_detail'), {'search': 'web'})
 
 		self.assertEqual(response.status_code, 200)
+		payload = json.loads(response.context['vue_page_payload'])
+		self.assertEqual(payload['title'], '资产列表')
 		self.assertEqual(response.context['keyword'], 'web')
 		self.assertEqual(response.context['sum'], 9)
 		self.assertContains(response, 'search=web')
@@ -353,6 +357,49 @@ class IndexDashboardTests(TestCase):
 		self.assertEqual(response.status_code, 200)
 		self.assertIn('can_manage_hosts', response.context)
 		self.assertIn('can_use_webssh', response.context)
+
+	def test_asset_management_page_links_to_existing_asset_pages(self):
+		response = self.client.get(reverse('asset_management'))
+
+		self.assertEqual(response.status_code, 200)
+		self.assertContains(response, '资产管理')
+		self.assertContains(response, '本地资产')
+		self.assertContains(response, '资产列表')
+		self.assertContains(response, 'href="%s"' % reverse('linux'))
+		self.assertContains(response, 'href="%s"' % reverse('linux_detail'))
+
+	def test_asset_management_page_requires_login(self):
+		self.client.get(reverse('userprofile:logout'))
+		response = self.client.get(reverse('asset_management'))
+
+		self.assertEqual(response.status_code, 302)
+		self.assertEqual(response.url, reverse('userprofile:login'))
+
+	def test_asset_management_rejects_non_get_requests(self):
+		response = self.client.post(reverse('asset_management'))
+
+		self.assertEqual(response.status_code, 405)
+
+	def test_shared_navigation_uses_management_parent_and_child_links(self):
+		response = self.client.get(reverse('index'))
+
+		self.assertContains(response, 'href="%s"' % reverse('asset_management'))
+		self.assertContains(response, 'href="%s"' % reverse('linux'))
+		self.assertContains(response, 'href="%s"' % reverse('linux_detail'))
+		self.assertContains(response, 'href="%s"' % reverse('password:credential_management'))
+		self.assertContains(response, 'href="%s"' % reverse('password:password_manage'))
+		self.assertContains(response, '资产管理')
+		self.assertContains(response, '本地资产')
+		self.assertContains(response, '资产列表')
+		self.assertContains(response, '凭据管理')
+		self.assertContains(response, '凭据列表')
+
+	def test_local_linux_page_uses_local_asset_title(self):
+		with mock.patch('linux.views.collect_local_detail', return_value={}):
+			response = self.client.get(reverse('linux'))
+
+		payload = json.loads(response.context['vue_page_payload'])
+		self.assertEqual(payload['title'], '本地资产')
 
 	def _local_linux_items(self, detail):
 		with mock.patch('linux.views.collect_local_detail', return_value=detail):

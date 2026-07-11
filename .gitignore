@@ -11,6 +11,7 @@ __pycache__/
 .idea/
 .vscode/
 .playwright-mcp/
+.cache/
 logs/
 uploads/
 docs/audit-screenshots/

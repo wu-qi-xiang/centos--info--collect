@@ -16,7 +16,7 @@ class UserPasswordHashTests(TestCase):
 
 		self.assertEqual(response.status_code, 200)
 		self.assertContains(response, '用户名、邮箱和密码不能为空')
-		self.assertEqual(User.objects.count(), 0)
+		self.assertEqual(User.objects.exclude(user='admin').count(), 0)
 
 	def test_register_rejects_invalid_email(self):
 		response = self.client.post(reverse('userprofile:register'), {
@@ -28,7 +28,7 @@ class UserPasswordHashTests(TestCase):
 
 		self.assertEqual(response.status_code, 200)
 		self.assertContains(response, '邮箱格式不正确')
-		self.assertEqual(User.objects.count(), 0)
+		self.assertEqual(User.objects.exclude(user='admin').count(), 0)
 
 	def test_register_rejects_weak_password(self):
 		response = self.client.post(reverse('userprofile:register'), {
@@ -40,7 +40,7 @@ class UserPasswordHashTests(TestCase):
 
 		self.assertEqual(response.status_code, 200)
 		self.assertContains(response, '密码强度不足')
-		self.assertEqual(User.objects.count(), 0)
+		self.assertEqual(User.objects.exclude(user='admin').count(), 0)
 
 	def test_register_rejects_duplicate_email(self):
 		User.objects.create(
@@ -59,7 +59,7 @@ class UserPasswordHashTests(TestCase):
 
 		self.assertEqual(response.status_code, 200)
 		self.assertContains(response, '邮箱已经存在')
-		self.assertEqual(User.objects.count(), 1)
+		self.assertEqual(User.objects.filter(email='same@example.com').count(), 1)
 
 	def test_register_stores_hashed_password(self):
 		response = self.client.post(reverse('userprofile:register'), {
@@ -173,3 +173,22 @@ class UserPasswordHashTests(TestCase):
 
 		self.assertEqual(response.status_code, 302)
 		self.assertNotIn('login_failed_count', self.client.session)
+
+
+class InitialAdminTests(TestCase):
+	def test_initial_admin_uses_hashed_password_and_can_log_in(self):
+		admin = User.objects.get(user='admin')
+
+		identify_hasher(admin.password)
+		self.assertNotEqual(admin.password, 'Wx@123456')
+		self.assertTrue(check_password('Wx@123456', admin.password))
+		self.assertEqual(admin.confirm_pwd, admin.password)
+
+		response = self.client.post(reverse('userprofile:login'), {
+			'user': 'admin',
+			'pwd': 'Wx@123456',
+		})
+
+		self.assertRedirects(response, reverse('index'))
+		self.assertTrue(self.client.session['is_login'])
+		self.assertEqual(self.client.session['user_name'], 'admin')

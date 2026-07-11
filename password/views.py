@@ -59,12 +59,12 @@ def _password_payload(item):
 
 def _render_password_list(request, password_queryset, keyword=None):
 	content = _password_page_context(request, password_queryset, keyword)
-	return render_vue_page(request, 'password-list', '密码管理', {
-		'subtitle': '按当前登录用户隔离账号密码记录',
+	return render_vue_page(request, 'password-list', '凭据列表', {
+		'subtitle': '按当前登录用户隔离凭据记录',
 		'keyword': keyword or '',
 		'passwords': [_password_payload(item) for item in content['pages']],
 		'system_names': [item.system_name for item in content['pages']],
-		'actions': [{'label': '新增密码', 'url': reverse('password:password_create'), 'class': 'btn-primary'}],
+		'actions': [{'label': '新增凭据', 'url': reverse('password:password_create'), 'class': 'btn-primary'}],
 	}, content)
 
 
@@ -84,8 +84,16 @@ def _render_password_form(request, title, action, password=None, form=None, stat
 		'password': data,
 		'keep_hint': '留空则保持原密码不变' if password else '',
 		'errors': form_errors(form),
-		'actions': [{'label': '返回列表', 'url': reverse('password:password_manage')}],
+		'actions': [{'label': '返回凭据列表', 'url': reverse('password:password_manage')}],
 	}, context, status=status)
+
+
+@session_login_required
+def credential_management(request):
+	if request.method != "GET":
+		return HttpResponseNotAllowed(["GET"])
+	context = security_context(request)
+	return render(request, 'password/credential_management.html', context)
 
 
 @session_login_required
@@ -109,9 +117,9 @@ def password_create(request):
 			audit(request, '创建密码记录', 'Password', password.id, password.system_name)
 			return redirect("password:password_manage")
 		else:
-			return _render_password_form(request, '新增密码', reverse('password:password_create'), form=passwd_manage, status=400)
+			return _render_password_form(request, '新增凭据', reverse('password:password_create'), form=passwd_manage, status=400)
 	else:
-		return _render_password_form(request, '新增密码', reverse('password:password_create'))
+		return _render_password_form(request, '新增凭据', reverse('password:password_create'))
 
 
 @session_login_required
@@ -135,9 +143,9 @@ def password_update(request, id):
 			audit(request, '更新密码记录', 'Password', password.id, password.system_name)
 			return redirect("password:password_manage")
 		else:
-			return _render_password_form(request, '编辑密码', reverse('password:password_update', args=[password.id]), password, passwd_info, status=400)
+			return _render_password_form(request, '编辑凭据', reverse('password:password_update', args=[password.id]), password, passwd_info, status=400)
 	else:
-		return _render_password_form(request, '编辑密码', reverse('password:password_update', args=[password.id]), password)
+		return _render_password_form(request, '编辑凭据', reverse('password:password_update', args=[password.id]), password)
 
 
 @session_login_required

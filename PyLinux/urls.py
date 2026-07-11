@@ -18,7 +18,7 @@ from django.conf import settings
 from django.conf.urls.static import static
 from django.http import HttpResponse
 from django.urls import path, include
-from linux.views import index, linux, search  # url导入views
+from linux.views import asset_management, index, linux, search  # url导入views
 # from RemoteLinux.views import linux_create, linux_detail, linux_list_detail, linux_update, linux_delete, connect_test
 from RemoteLinux import views
 
@@ -28,6 +28,7 @@ import monitor
 urlpatterns = [
     path('', include('userprofile.urls', namespace='login')),
     path('index/', index, name='index'),
+    path('assets/', asset_management, name='asset_management'),
     path('linux/', linux, name='linux'),
     path('admin/', admin.site.urls),
     path('search/', search, name='search'),

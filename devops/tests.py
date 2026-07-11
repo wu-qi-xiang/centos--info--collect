@@ -1,11 +1,17 @@
 from django.core.files.uploadedfile import SimpleUploadedFile
 from django.core.files.base import ContentFile
 from django.core.management import call_command
-from django.test import TestCase
+from django.core.cache import cache, caches
+from django.core.cache.backends.filebased import FileBasedCache
+from django.test import TestCase, override_settings
 from django.urls import reverse
 from io import StringIO
 import json
+import os
+import shutil
 import socket
+import tempfile
+import types
 try:
     from unittest import mock
 except ImportError:
@@ -34,6 +40,7 @@ from .models import (
     FileDistributionResult,
     HostGroup,
     HostTag,
+    K8sCluster,
     MetricSample,
     NotificationChannel,
     NotificationLog,
@@ -42,6 +49,1628 @@ from .models import (
 from .services import cleanup_audit_logs, cleanup_metric_samples, enqueue_background_job, latest_metric_map, record_alert, record_metric_sample, run_background_job, send_notification_channel, validate_remote_path
 from .services import execute_batch_task, execute_command_record, execute_deployment_release, execute_deployment_rollback, execute_file_distribution
 from .services import COMMAND_ALLOWED, COMMAND_BLOCKED, evaluate_command_policy
+from .services import (
+    build_k8s_resource_matches,
+    k8s_detail_cache_key,
+    load_cached_k8s_cluster_detail,
+    load_cached_k8s_node_detail,
+    load_k8s_node_detail,
+    load_k8s_namespaces,
+    summarize_k8s_nodes,
+    test_k8s_cluster_connection,
+)
+
+
+def close_test_caches():
+    for backend in caches.all():
+        backend.close()
+
+
+class K8sClusterTests(TestCase):
+    secret = '''apiVersion: v1
+clusters:
+- name: secret-cluster
+  cluster:
+    server: https://kubernetes.example.com:6443
+contexts:
+- name: secret-context
+  context:
+    cluster: secret-cluster
+    namespace: operations
+current-context: secret-context
+users:
+- name: secret-user
+  user:
+    token: never-render-this
+'''
+
+    @classmethod
+    def setUpClass(cls):
+        cls.k8s_cache_dir = tempfile.mkdtemp(prefix='devops-k8s-test-cache-')
+        cls.k8s_cache_override = override_settings(CACHES={
+            'default': {
+                'BACKEND': 'django.core.cache.backends.filebased.FileBasedCache',
+                'LOCATION': cls.k8s_cache_dir,
+                'TIMEOUT': 86400,
+            },
+        })
+        cls.k8s_cache_override.enable()
+        close_test_caches()
+        try:
+            super(K8sClusterTests, cls).setUpClass()
+        except Exception:
+            close_test_caches()
+            cls.k8s_cache_override.disable()
+            shutil.rmtree(cls.k8s_cache_dir, ignore_errors=True)
+            raise
+
+    @classmethod
+    def tearDownClass(cls):
+        try:
+            super(K8sClusterTests, cls).tearDownClass()
+        finally:
+            close_test_caches()
+            cls.k8s_cache_override.disable()
+            shutil.rmtree(cls.k8s_cache_dir, ignore_errors=True)
+            close_test_caches()
+
+    def setUp(self):
+        self.user = User.objects.create(
+            user='cluster-admin',
+            email='cluster-admin@example.com',
+            password='plain-password',
+            confirm_pwd='plain-password',
+        )
+        DevOpsRole.objects.create(user=self.user, role=DevOpsRole.ROLE_ADMIN)
+        session = self.client.session
+        session['is_login'] = True
+        session['user_id'] = self.user.id
+        session['user_name'] = self.user.user
+        session.save()
+
+    def create_cluster(self, name='cluster-one'):
+        return K8sCluster.objects.create(
+            name=name,
+            api_server='https://kubernetes.example.com:6443',
+            default_namespace='default',
+            kubeconfig=self.secret,
+            created_by=self.user.user,
+        )
+
+    def kubeconfig_upload(self, content=None, name='config'):
+        if content is None:
+            content = self.secret
+        if isinstance(content, str):
+            content = content.encode('utf-8')
+        return SimpleUploadedFile(name, content, content_type='application/yaml')
+
+    def test_model_encrypts_kubeconfig_without_double_encryption(self):
+        cluster = self.create_cluster()
+        stored = K8sCluster.objects.get(id=cluster.id)
+
+        self.assertTrue(stored.kubeconfig.startswith('enc:'))
+        self.assertNotEqual(stored.kubeconfig, self.secret)
+        self.assertEqual(stored.decrypted_kubeconfig, self.secret)
+        encrypted = stored.kubeconfig
+        stored.save()
+        stored.refresh_from_db()
+        self.assertEqual(stored.kubeconfig, encrypted)
+
+    def test_cluster_management_and_list_require_login_and_viewer_permission(self):
+        cluster = self.create_cluster()
+        DevOpsModulePermission.objects.create(
+            user=self.user,
+            module=DevOpsModulePermission.MODULE_CLUSTER,
+            role=DevOpsRole.ROLE_VIEWER,
+        )
+
+        response = self.client.get(reverse('devops:clusters'))
+        self.assertEqual(response.status_code, 200)
+        self.assertTemplateUsed(response, 'devops/cluster_management.html')
+        self.assertEqual(response.context['cluster_count'], 1)
+        self.assertEqual(response.context['online_count'], 0)
+        self.assertEqual(response.context['offline_count'], 0)
+        self.assertEqual(response.context['unknown_count'], 1)
+        self.assertFalse(response.context['can_manage'])
+        cluster_list = self.client.get(reverse('devops:cluster_list'))
+        self.assertEqual(cluster_list.status_code, 200)
+        self.assertTemplateUsed(cluster_list, 'devops/cluster_list.html')
+        self.assertContains(cluster_list, cluster.name)
+        self.assertNotContains(cluster_list, self.secret)
+        self.assertNotContains(cluster_list, cluster.kubeconfig)
+        self.assertNotContains(cluster_list, reverse('devops:cluster_create'))
+        self.assertNotContains(cluster_list, reverse('devops:cluster_update', args=[cluster.id]))
+        self.assertNotContains(cluster_list, reverse('devops:cluster_test', args=[cluster.id]))
+        self.assertNotContains(cluster_list, reverse('devops:cluster_delete', args=[cluster.id]))
+        self.assertNotContains(cluster_list, '<textarea')
+        self.assertNotContains(response, self.secret)
+        self.assertNotContains(response, cluster.kubeconfig)
+        self.assertEqual(self.client.post(reverse('devops:clusters')).status_code, 405)
+
+        connect_denied = self.client.get(reverse('devops:cluster_connect'))
+        self.assertEqual(connect_denied.status_code, 403)
+
+        denied = self.client.post(reverse('devops:cluster_create'), {
+            'name': 'denied',
+            'kubeconfig_file': self.kubeconfig_upload(),
+        })
+        self.assertEqual(denied.status_code, 403)
+        self.client.session.flush()
+        login = self.client.get(reverse('devops:clusters'))
+        self.assertEqual(login.status_code, 302)
+        self.assertEqual(self.client.get(reverse('devops:cluster_list')).status_code, 302)
+        self.assertEqual(self.client.get(reverse('devops:cluster_connect')).status_code, 302)
+
+    def test_cluster_connect_uses_blank_form_and_does_not_render_saved_secret(self):
+        cluster = self.create_cluster()
+
+        response = self.client.get(reverse('devops:cluster_connect'))
+
+        self.assertEqual(response.status_code, 200)
+        self.assertTemplateUsed(response, 'devops/cluster_connection.html')
+        self.assertFalse(response.context['form'].instance.pk)
+        self.assertEqual(
+            [field.name for field in response.context['form'].visible_fields()],
+            ['name', 'kubeconfig_file'],
+        )
+        self.assertTrue(response.context['can_manage'])
+        self.assertNotContains(response, self.secret)
+        self.assertNotContains(response, cluster.kubeconfig)
+        self.assertEqual(self.client.post(reverse('devops:cluster_connect')).status_code, 405)
+        self.assertEqual(self.client.post(reverse('devops:cluster_list')).status_code, 405)
+
+    def test_legacy_cluster_list_route_renders_actual_list(self):
+        cluster = self.create_cluster()
+
+        response = self.client.get(reverse('devops:k8s_cluster_list'))
+
+        self.assertEqual(response.status_code, 200)
+        self.assertTemplateUsed(response, 'devops/cluster_list.html')
+        self.assertContains(response, cluster.name)
+        self.assertNotContains(response, self.secret)
+
+    def test_initial_admin_has_admin_role_and_can_manage_clusters(self):
+        admin = User.objects.get(user='admin')
+        self.assertEqual(DevOpsRole.objects.get(user=admin).role, DevOpsRole.ROLE_ADMIN)
+        session = self.client.session
+        session['is_login'] = True
+        session['user_id'] = admin.id
+        session['user_name'] = admin.user
+        session.save()
+
+        page = self.client.get(reverse('devops:clusters'))
+        self.assertEqual(page.status_code, 200)
+        self.assertContains(page, reverse('devops:cluster_connect'))
+        connect = self.client.get(reverse('devops:cluster_connect'))
+        self.assertEqual(connect.status_code, 200)
+        self.assertContains(connect, reverse('devops:cluster_create'))
+        create = self.client.post(reverse('devops:cluster_create'), {
+            'name': 'initial-admin-cluster',
+            'kubeconfig_file': self.kubeconfig_upload(),
+        })
+        self.assertEqual(create.status_code, 302)
+        self.assertEqual(create.url, reverse('devops:cluster_list'))
+        self.assertTrue(K8sCluster.objects.filter(name='initial-admin-cluster').exists())
+
+    def test_invalid_create_renders_connection_page_without_saving(self):
+        response = self.client.post(reverse('devops:cluster_create'), {
+            'name': 'invalid-cluster',
+        })
+
+        self.assertEqual(response.status_code, 400)
+        self.assertTemplateUsed(response, 'devops/cluster_connection.html')
+        self.assertContains(response, 'Kubeconfig', status_code=400)
+        self.assertFalse(K8sCluster.objects.filter(name='invalid-cluster').exists())
+
+    def test_invalid_create_does_not_echo_submitted_or_stored_kubeconfig(self):
+        existing = self.create_cluster(name='duplicate-cluster')
+        submitted_secret = 'apiVersion: v1\ntoken: submitted-secret-must-not-render\n'
+
+        response = self.client.post(reverse('devops:cluster_create'), {
+            'name': existing.name,
+            'kubeconfig_file': self.kubeconfig_upload(submitted_secret),
+        })
+
+        self.assertEqual(response.status_code, 400)
+        self.assertTemplateUsed(response, 'devops/cluster_connection.html')
+        self.assertNotContains(response, submitted_secret, status_code=400)
+        self.assertNotContains(response, 'submitted-secret-must-not-render', status_code=400)
+        self.assertNotContains(response, existing.kubeconfig, status_code=400)
+        self.assertEqual(K8sCluster.objects.filter(name=existing.name).count(), 1)
+
+    def test_cluster_crud_and_blank_update_preserves_secret(self):
+        create = self.client.post(reverse('devops:cluster_create'), {
+            'name': 'created-cluster',
+            'kubeconfig_file': self.kubeconfig_upload(),
+        })
+        self.assertEqual(create.status_code, 302)
+        self.assertEqual(create.url, reverse('devops:cluster_list'))
+        cluster = K8sCluster.objects.get(name='created-cluster')
+        self.assertEqual(cluster.api_server, 'https://kubernetes.example.com:6443')
+        self.assertEqual(cluster.default_namespace, 'operations')
+        self.assertTrue(cluster.kubeconfig.startswith('enc:'))
+        self.assertEqual(cluster.decrypted_kubeconfig, self.secret)
+        cluster_list = self.client.get(reverse('devops:cluster_list'))
+        self.assertContains(cluster_list, cluster.name)
+        self.assertNotContains(cluster_list, self.secret)
+        encrypted = cluster.kubeconfig
+
+        update = self.client.post(reverse('devops:cluster_update', args=[cluster.id]), {
+            'name': 'updated-cluster',
+            'api_server': 'https://updated.example.com:6443',
+            'default_namespace': 'platform',
+            'kubeconfig': '',
+        })
+        self.assertEqual(update.status_code, 302)
+        self.assertEqual(update.url, reverse('devops:cluster_list'))
+        cluster.refresh_from_db()
+        self.assertEqual(cluster.name, 'updated-cluster')
+        self.assertEqual(cluster.kubeconfig, encrypted)
+        self.assertEqual(cluster.decrypted_kubeconfig, self.secret)
+
+        invalid = self.client.post(reverse('devops:cluster_update', args=[cluster.id]), {
+            'name': '',
+            'api_server': cluster.api_server,
+            'default_namespace': cluster.default_namespace,
+            'kubeconfig': '',
+        })
+        self.assertEqual(invalid.status_code, 400)
+        self.assertTemplateUsed(invalid, 'devops/cluster_list.html')
+        self.assertEqual(invalid.context['editing_cluster'], cluster)
+        self.assertTrue(invalid.context['form'].errors)
+        cluster.refresh_from_db()
+        self.assertEqual(cluster.name, 'updated-cluster')
+
+        audit_text = '\n'.join(AuditLog.objects.values_list('detail', flat=True))
+        self.assertNotIn(self.secret, audit_text)
+        self.assertNotIn(encrypted, audit_text)
+        self.assertEqual(self.client.get(reverse('devops:cluster_create')).status_code, 405)
+        self.assertEqual(self.client.get(reverse('devops:cluster_update', args=[cluster.id])).status_code, 405)
+        self.assertEqual(self.client.get(reverse('devops:cluster_test', args=[cluster.id])).status_code, 405)
+        self.assertEqual(self.client.get(reverse('devops:cluster_delete', args=[cluster.id])).status_code, 405)
+        delete = self.client.post(reverse('devops:cluster_delete', args=[cluster.id]))
+        self.assertEqual(delete.status_code, 302)
+        self.assertEqual(delete.url, reverse('devops:cluster_list'))
+        self.assertFalse(K8sCluster.objects.filter(id=cluster.id).exists())
+
+    def test_create_accepts_extensionless_file_and_uses_context_namespace_fallbacks(self):
+        content = '''apiVersion: v1
+clusters:
+- name: fallback-cluster
+  cluster:
+    server: http://127.0.0.1:8080
+contexts:
+- name: fallback-context
+  context:
+    cluster: fallback-cluster
+'''
+        response = self.client.post(reverse('devops:cluster_create'), {
+            'name': 'fallback-cluster',
+            'kubeconfig_file': self.kubeconfig_upload(content, name='config'),
+        })
+
+        self.assertEqual(response.status_code, 302)
+        cluster = K8sCluster.objects.get(name='fallback-cluster')
+        self.assertEqual(cluster.api_server, 'http://127.0.0.1:8080')
+        self.assertEqual(cluster.default_namespace, 'default')
+        self.assertEqual(cluster.decrypted_kubeconfig, content)
+
+    def test_create_accepts_utf8_bom_and_normalizes_namespace(self):
+        content = self.secret.replace('namespace: operations', 'namespace: Platform')
+        response = self.client.post(reverse('devops:cluster_create'), {
+            'name': 'bom-cluster',
+            'kubeconfig_file': self.kubeconfig_upload(b'\xef\xbb\xbf' + content.encode('utf-8')),
+        })
+
+        self.assertEqual(response.status_code, 302)
+        cluster = K8sCluster.objects.get(name='bom-cluster')
+        self.assertEqual(cluster.default_namespace, 'platform')
+        self.assertEqual(cluster.decrypted_kubeconfig, content)
+
+    def test_create_rejects_oversize_invalid_encoding_and_malformed_yaml(self):
+        cases = (
+            ('oversize', b'a' * (1024 * 1024 + 1), '1 MiB'),
+            ('encoding', b'\xff\xfe\x00', 'UTF-8'),
+            ('yaml', b'clusters: [unterminated', '格式无效'),
+        )
+        for name, content, error in cases:
+            with self.subTest(name=name):
+                response = self.client.post(reverse('devops:cluster_create'), {
+                    'name': name,
+                    'kubeconfig_file': self.kubeconfig_upload(content),
+                })
+                self.assertEqual(response.status_code, 400)
+                self.assertContains(response, error, status_code=400)
+                self.assertFalse(K8sCluster.objects.filter(name=name).exists())
+
+    def test_create_rejects_unresolvable_context_cluster_and_server(self):
+        cases = (
+            ('context', self.secret.replace('current-context: secret-context', 'current-context: missing-context')),
+            ('cluster-reference', self.secret.replace('cluster: secret-cluster\n    namespace', 'cluster: missing-cluster\n    namespace')),
+            ('server', self.secret.replace('    server: https://kubernetes.example.com:6443\n', '')),
+            ('scheme', self.secret.replace('https://kubernetes.example.com:6443', 'ftp://kubernetes.example.com')),
+            ('namespace', self.secret.replace('namespace: operations', 'namespace: invalid_namespace')),
+        )
+        for name, content in cases:
+            with self.subTest(name=name):
+                response = self.client.post(reverse('devops:cluster_create'), {
+                    'name': name,
+                    'kubeconfig_file': self.kubeconfig_upload(content),
+                })
+                self.assertEqual(response.status_code, 400)
+                self.assertTrue(response.context['form'].errors)
+                self.assertFalse(K8sCluster.objects.filter(name=name).exists())
+
+    def test_create_rejects_non_string_kubeconfig_references_without_server_error(self):
+        content = self.secret.replace('current-context: secret-context', 'current-context: 42')
+        response = self.client.post(reverse('devops:cluster_create'), {
+            'name': 'typed-reference',
+            'kubeconfig_file': self.kubeconfig_upload(content),
+        })
+
+        self.assertEqual(response.status_code, 400)
+        self.assertTrue(response.context['form'].errors)
+        self.assertFalse(K8sCluster.objects.filter(name='typed-reference').exists())
+
+    def test_invalid_upload_never_echoes_kubeconfig_secrets(self):
+        marker = 'uploaded-token-must-never-render'
+        content = self.secret.replace('never-render-this', marker).replace(
+            'https://kubernetes.example.com:6443',
+            'file:///private/cluster',
+        )
+        response = self.client.post(reverse('devops:cluster_create'), {
+            'name': 'secret-response-check',
+            'kubeconfig_file': self.kubeconfig_upload(content),
+        })
+
+        self.assertEqual(response.status_code, 400)
+        self.assertNotContains(response, content, status_code=400)
+        self.assertNotContains(response, marker, status_code=400)
+
+    @mock.patch('devops.services.subprocess.run')
+    def test_connect_test_saves_encrypted_cluster_and_syncs_online_status(self, run):
+        run.return_value = mock.Mock(returncode=0, stdout='{}', stderr='')
+
+        response = self.client.post(reverse('devops:cluster_connect_test'), {
+            'name': 'tested-online-cluster',
+            'kubeconfig_file': self.kubeconfig_upload(),
+        })
+
+        self.assertEqual(response.status_code, 302)
+        self.assertEqual(response.url, reverse('devops:cluster_list'))
+        cluster = K8sCluster.objects.get(name='tested-online-cluster')
+        self.assertTrue(cluster.kubeconfig.startswith('enc:'))
+        self.assertNotEqual(cluster.kubeconfig, self.secret)
+        self.assertEqual(cluster.status, K8sCluster.STATUS_ONLINE)
+        self.assertEqual(cluster.last_error, '')
+        self.assertIsNotNone(cluster.last_checked_at)
+        page = self.client.get(reverse('devops:cluster_list'))
+        self.assertContains(page, '在线')
+        self.assertNotContains(page, self.secret)
+        audit_text = '\n'.join(AuditLog.objects.values_list('detail', flat=True))
+        self.assertNotIn(self.secret, audit_text)
+
+    @mock.patch('devops.services.subprocess.run')
+    def test_connect_test_saves_encrypted_cluster_and_syncs_offline_status(self, run):
+        failure_marker = 'private-token-must-not-render'
+        secret = self.secret.replace('never-render-this', failure_marker)
+        run.return_value = mock.Mock(returncode=1, stdout='', stderr=secret)
+
+        response = self.client.post(reverse('devops:cluster_connect_test'), {
+            'name': 'tested-offline-cluster',
+            'kubeconfig_file': self.kubeconfig_upload(secret),
+        })
+
+        self.assertEqual(response.status_code, 302)
+        self.assertEqual(response.url, reverse('devops:cluster_list'))
+        cluster = K8sCluster.objects.get(name='tested-offline-cluster')
+        self.assertTrue(cluster.kubeconfig.startswith('enc:'))
+        self.assertEqual(cluster.status, K8sCluster.STATUS_OFFLINE)
+        self.assertIsNotNone(cluster.last_checked_at)
+        page = self.client.get(reverse('devops:cluster_list'))
+        self.assertContains(page, '离线')
+        self.assertNotContains(page, secret)
+        self.assertNotContains(page, failure_marker)
+        audit_text = '\n'.join(AuditLog.objects.values_list('detail', flat=True))
+        self.assertNotIn(secret, audit_text)
+        self.assertNotIn(failure_marker, audit_text)
+
+    def test_connect_test_rejects_invalid_upload_without_saving_or_echoing_secret(self):
+        marker = 'invalid-upload-secret-must-not-render'
+        invalid = 'apiVersion: v1\ntoken: %s\n' % marker
+
+        response = self.client.post(reverse('devops:cluster_connect_test'), {
+            'name': 'invalid-tested-cluster',
+            'kubeconfig_file': self.kubeconfig_upload(invalid),
+        })
+
+        self.assertEqual(response.status_code, 400)
+        self.assertTemplateUsed(response, 'devops/cluster_connection.html')
+        self.assertFalse(K8sCluster.objects.filter(name='invalid-tested-cluster').exists())
+        self.assertNotContains(response, invalid, status_code=400)
+        self.assertNotContains(response, marker, status_code=400)
+
+    def test_connect_test_is_post_only_and_requires_admin_cluster_permission(self):
+        self.assertEqual(self.client.get(reverse('devops:cluster_connect_test')).status_code, 405)
+        DevOpsModulePermission.objects.update_or_create(
+            user=self.user,
+            module=DevOpsModulePermission.MODULE_CLUSTER,
+            defaults={'role': DevOpsRole.ROLE_VIEWER},
+        )
+
+        response = self.client.post(reverse('devops:cluster_connect_test'), {
+            'name': 'viewer-tested-cluster',
+            'kubeconfig_file': self.kubeconfig_upload(),
+        })
+
+        self.assertEqual(response.status_code, 403)
+        self.assertFalse(K8sCluster.objects.filter(name='viewer-tested-cluster').exists())
+
+    def test_cluster_list_name_links_to_k8s_cluster_detail(self):
+        cluster = self.create_cluster('linked-detail-cluster')
+
+        response = self.client.get(reverse('devops:cluster_list'))
+
+        self.assertContains(
+            response,
+            'href="%s"' % reverse('devops:k8s_cluster_detail', args=[cluster.id]),
+        )
+
+    @mock.patch('devops.services.subprocess.run')
+    def test_connection_test_uses_private_temporary_file_and_cleans_it(self, run):
+        cluster = self.create_cluster()
+        observed = {}
+
+        def fake_run(command, **kwargs):
+            path = command[command.index('--kubeconfig') + 1]
+            observed['path'] = path
+            observed['mode'] = os.stat(path).st_mode & 0o777
+            with open(path, 'r') as handle:
+                observed['content_matches'] = handle.read() == self.secret
+            observed['command'] = command
+            observed['kwargs'] = kwargs
+            return mock.Mock(returncode=0, stdout='{}', stderr='')
+
+        run.side_effect = fake_run
+        success, message = test_k8s_cluster_connection(cluster)
+
+        self.assertTrue(success)
+        self.assertEqual(message, '')
+        self.assertEqual(observed['mode'], 0o600)
+        self.assertTrue(observed['content_matches'])
+        self.assertIsInstance(observed['command'], list)
+        self.assertNotIn('shell', observed['kwargs'])
+        self.assertFalse(os.path.exists(observed['path']))
+        cluster.refresh_from_db()
+        self.assertEqual(cluster.status, K8sCluster.STATUS_ONLINE)
+        self.assertEqual(cluster.last_error, '')
+        self.assertIsNotNone(cluster.last_checked_at)
+
+    @mock.patch('devops.services.subprocess.run')
+    def test_failed_connection_does_not_expose_secret(self, run):
+        cluster = self.create_cluster()
+        run.return_value = mock.Mock(returncode=1, stdout='', stderr=self.secret)
+
+        response = self.client.post(reverse('devops:cluster_test', args=[cluster.id]))
+
+        self.assertEqual(response.status_code, 302)
+        cluster.refresh_from_db()
+        self.assertEqual(cluster.status, K8sCluster.STATUS_OFFLINE)
+        self.assertNotIn(self.secret, cluster.last_error)
+        self.assertEqual(response.url, reverse('devops:cluster_list'))
+        page = self.client.get(reverse('devops:cluster_list'))
+        self.assertNotContains(page, self.secret)
+        audit_text = '\n'.join(AuditLog.objects.values_list('detail', flat=True))
+        self.assertNotIn(self.secret, audit_text)
+
+    def test_resource_matching_is_namespace_aware_and_secret_safe(self):
+        resources = {
+            'deployments': [{
+                'kind': 'Deployment', 'name': 'billing-api', 'status': '运行中',
+                'replicas': '1 / 1', 'namespace': 'prod', 'created_at': '-', 'detail': 'billing:1',
+            }],
+            'pods': [
+                {'kind': 'Pod', 'name': 'billing-api-7f9c8d6b5b-abc12', 'status': 'Running', 'replicas': '-', 'namespace': 'prod', 'created_at': '-', 'detail': 'node-a'},
+                {'kind': 'Pod', 'name': 'billing-api-7f9c8d6b5b-def34', 'status': 'Running', 'replicas': '-', 'namespace': 'other', 'created_at': '-', 'detail': 'node-b'},
+            ],
+            'services': [
+                {'kind': 'Service', 'name': 'billing-api', 'status': 'ClusterIP', 'replicas': '-', 'namespace': 'prod', 'created_at': '-', 'detail': '10.0.0.1'},
+                {'kind': 'Service', 'name': 'billing', 'status': 'ClusterIP', 'replicas': '-', 'namespace': 'prod', 'created_at': '-', 'detail': '10.0.0.3'},
+                {'kind': 'Service', 'name': 'billing-api-other', 'status': 'ClusterIP', 'replicas': '-', 'namespace': 'other', 'created_at': '-', 'detail': '10.0.0.2'},
+            ],
+            'secrets': [{
+                'kind': 'Secret', 'name': 'billing-api-secret', 'status': 'Opaque',
+                'replicas': '-', 'namespace': 'prod', 'created_at': '-', 'detail': '2 keys',
+                'data': {'password': 'must-not-leak'},
+            }],
+        }
+
+        groups = build_k8s_resource_matches(resources)
+
+        self.assertEqual([item['name'] for item in groups[0]['resources']['pods']], ['billing-api-7f9c8d6b5b-abc12'])
+        self.assertEqual([item['name'] for item in groups[0]['resources']['services']], ['billing-api'])
+        self.assertNotIn('data', groups[0]['resources']['secrets'][0])
+        self.assertNotIn('must-not-leak', str(groups))
+
+    def test_load_namespaces_uses_private_tempfile_and_safe_fields(self):
+        case = self
+        observed = {}
+        created_at = timezone.now()
+
+        def new_client_from_config(config_file=None):
+            observed['path'] = config_file
+            observed['mode'] = os.stat(config_file).st_mode & 0o777
+            return object()
+
+        class CoreV1Api(object):
+            def __init__(self, api_client):
+                self.api_client = api_client
+
+            def list_namespace(self, _request_timeout=None):
+                return types.SimpleNamespace(items=[
+                    types.SimpleNamespace(
+                        metadata=types.SimpleNamespace(
+                            name='default', labels={'environment': 'production'},
+                            creation_timestamp=created_at,
+                        ),
+                        status=types.SimpleNamespace(phase='Active'),
+                        data={'token': 'must-not-leak'},
+                    ),
+                ])
+
+        fake_client = types.ModuleType('kubernetes.client')
+        fake_client.CoreV1Api = CoreV1Api
+        fake_config = types.ModuleType('kubernetes.config')
+        fake_config.new_client_from_config = new_client_from_config
+        fake_kubernetes = types.ModuleType('kubernetes')
+        fake_kubernetes.client = fake_client
+        fake_kubernetes.config = fake_config
+        with mock.patch.dict('sys.modules', {
+            'kubernetes': fake_kubernetes,
+            'kubernetes.client': fake_client,
+            'kubernetes.config': fake_config,
+        }):
+            result = load_k8s_namespaces(case.secret)
+
+        self.assertTrue(result['ok'])
+        self.assertEqual(result['namespaces'], [{
+            'name': 'default', 'status': 'Active',
+            'labels': 'environment=production',
+            'created_at': created_at.strftime('%Y/%m/%d %H:%M:%S'),
+        }])
+        self.assertEqual(observed['mode'], 0o600)
+        self.assertFalse(os.path.exists(observed['path']))
+        self.assertNotIn('must-not-leak', str(result))
+
+    def test_node_capacity_summary_normalizes_cpu_memory_and_ready_status(self):
+        nodes = [
+            types.SimpleNamespace(status=types.SimpleNamespace(
+                capacity={'cpu': '4', 'memory': '8Gi'},
+                allocatable={'cpu': '3800m', 'memory': '7Gi'},
+                conditions=[types.SimpleNamespace(type='Ready', status='True')],
+            )),
+            types.SimpleNamespace(status=types.SimpleNamespace(
+                capacity={'cpu': '1500m', 'memory': '1024Mi'},
+                allocatable={'cpu': '1400m', 'memory': '900Mi'},
+                conditions=[types.SimpleNamespace(type='Ready', status='False')],
+            )),
+        ]
+
+        summary = summarize_k8s_nodes(nodes)
+
+        self.assertEqual(summary['node_count'], 2)
+        self.assertEqual(summary['ready_nodes'], 1)
+        self.assertEqual(summary['cpu_capacity'], '5.5 核')
+        self.assertEqual(summary['cpu_allocatable'], '5.2 核')
+        self.assertEqual(summary['memory_capacity'], '9 GiB')
+        self.assertEqual(summary['memory_allocatable'], '7.88 GiB')
+
+    def test_node_detail_loads_usage_requests_limits_and_all_node_pods(self):
+        observed = {}
+        node = types.SimpleNamespace(
+            metadata=types.SimpleNamespace(
+                name='worker-01', creation_timestamp=None,
+                labels={'node-role.kubernetes.io/worker': ''},
+            ),
+            status=types.SimpleNamespace(
+                capacity={'cpu': '4', 'memory': '8Gi'},
+                allocatable={'cpu': '3800m', 'memory': '7Gi'},
+                conditions=[types.SimpleNamespace(type='Ready', status='True')],
+                addresses=[types.SimpleNamespace(type='InternalIP', address='10.0.0.11')],
+                node_info=types.SimpleNamespace(
+                    kubelet_version='v1.31.2', container_runtime_version='containerd://1.7',
+                    os_image='Linux', kernel_version='6.1', architecture='amd64',
+                ),
+            ),
+        )
+
+        def pod(name, namespace, cpu_request, cpu_limit, memory_request, memory_limit):
+            resources = types.SimpleNamespace(
+                requests={'cpu': cpu_request, 'memory': memory_request},
+                limits={'cpu': cpu_limit, 'memory': memory_limit},
+            )
+            return types.SimpleNamespace(
+                metadata=types.SimpleNamespace(
+                    name=name, namespace=namespace, creation_timestamp=None,
+                ),
+                spec=types.SimpleNamespace(
+                    containers=[types.SimpleNamespace(resources=resources)],
+                    init_containers=[],
+                ),
+                status=types.SimpleNamespace(phase='Running', pod_ip='10.244.0.10'),
+            )
+
+        pods = [
+            pod('api-01', 'production', '500m', '1', '256Mi', '512Mi'),
+            pod('monitor-01', 'monitoring', '1', '2', '1Gi', '2Gi'),
+        ]
+
+        def new_client_from_config(config_file=None):
+            observed['path'] = config_file
+            return object()
+
+        class CoreV1Api(object):
+            def __init__(self, api_client):
+                self.api_client = api_client
+
+            def read_node(self, name=None, _request_timeout=None):
+                observed['node_name'] = name
+                return node
+
+            def list_pod_for_all_namespaces(self, field_selector=None, _request_timeout=None):
+                observed['field_selector'] = field_selector
+                return types.SimpleNamespace(items=pods)
+
+        class CustomObjectsApi(object):
+            def __init__(self, api_client):
+                self.api_client = api_client
+
+            def get_cluster_custom_object(self, **kwargs):
+                observed['metrics_name'] = kwargs.get('name')
+                return {'usage': {'cpu': '1250m', 'memory': '2Gi'}}
+
+        fake_client = types.ModuleType('kubernetes.client')
+        fake_client.CoreV1Api = CoreV1Api
+        fake_client.CustomObjectsApi = CustomObjectsApi
+        fake_config = types.ModuleType('kubernetes.config')
+        fake_config.new_client_from_config = new_client_from_config
+        fake_kubernetes = types.ModuleType('kubernetes')
+        fake_kubernetes.client = fake_client
+        fake_kubernetes.config = fake_config
+        with mock.patch.dict('sys.modules', {
+            'kubernetes': fake_kubernetes,
+            'kubernetes.client': fake_client,
+            'kubernetes.config': fake_config,
+        }):
+            result = load_k8s_node_detail(self.secret, 'worker-01')
+
+        self.assertTrue(result['ok'])
+        self.assertEqual(observed['node_name'], 'worker-01')
+        self.assertEqual(observed['field_selector'], 'spec.nodeName=worker-01')
+        self.assertEqual(observed['metrics_name'], 'worker-01')
+        self.assertFalse(os.path.exists(observed['path']))
+        self.assertEqual(result['node']['ip_address'], '10.0.0.11')
+        self.assertEqual(result['summary']['cpu_total'], '4 核')
+        self.assertEqual(result['summary']['cpu_usage'], '1.25 核')
+        self.assertEqual(result['summary']['cpu_request'], '1.5 核')
+        self.assertEqual(result['summary']['cpu_limit'], '3 核')
+        self.assertEqual(result['summary']['memory_total'], '8 GiB')
+        self.assertEqual(result['summary']['memory_usage'], '2 GiB')
+        self.assertEqual(result['summary']['memory_request'], '1.25 GiB')
+        self.assertEqual(result['summary']['memory_limit'], '2.5 GiB')
+        self.assertEqual(result['summary']['pod_total'], 2)
+        self.assertEqual({item['namespace'] for item in result['pods']}, {'production', 'monitoring'})
+
+    def test_node_detail_cache_reuses_successful_result(self):
+        cache.clear()
+        cluster = self.create_cluster('node-detail-cache-cluster')
+        loaded = {
+            'ok': True, 'message': 'ok', 'metrics_message': '',
+            'node': {'name': 'worker-01'}, 'summary': {'pod_total': 0}, 'pods': [],
+        }
+        with mock.patch('devops.services.load_k8s_node_detail', return_value=loaded) as loader:
+            first = load_cached_k8s_node_detail(
+                cluster.id, cluster.decrypted_kubeconfig, 'worker-01',
+            )
+            second = load_cached_k8s_node_detail(
+                cluster.id, cluster.decrypted_kubeconfig, 'worker-01',
+            )
+
+        loader.assert_called_once_with(cluster.decrypted_kubeconfig, 'worker-01', timeout=8)
+        self.assertFalse(first['from_cache'])
+        self.assertTrue(second['from_cache'])
+
+    def test_detail_cache_lazily_loads_and_merges_requested_namespaces(self):
+        cache.clear()
+        cluster = self.create_cluster('cache-cluster')
+        namespace_result = {'ok': True, 'message': 'ok', 'namespaces': [
+            {'name': 'default', 'status': 'Active'}, {'name': 'ops', 'status': 'Active'},
+        ]}
+
+        def overview(_config, namespace, timeout=5):
+            return {'ok': True, 'message': 'ok', 'version': 'v1', 'namespace': namespace, 'resources': {}, 'resource_errors': {}, 'resource_matches': []}
+
+        with mock.patch('devops.services.load_k8s_namespaces', return_value=namespace_result) as load_namespaces, \
+                mock.patch('devops.services.load_k8s_cluster_overview', side_effect=overview) as load_overview:
+            first = load_cached_k8s_cluster_detail(cluster.id, cluster.decrypted_kubeconfig, 'default')
+            self.assertEqual([call.args[1] for call in load_overview.call_args_list], ['default'])
+            switched = load_cached_k8s_cluster_detail(cluster.id, cluster.decrypted_kubeconfig, 'ops')
+            repeated_first = load_cached_k8s_cluster_detail(cluster.id, cluster.decrypted_kubeconfig, 'default')
+            repeated_switched = load_cached_k8s_cluster_detail(cluster.id, cluster.decrypted_kubeconfig, 'ops')
+
+        self.assertFalse(first['from_cache'])
+        self.assertFalse(switched['from_cache'])
+        self.assertTrue(repeated_first['from_cache'])
+        self.assertTrue(repeated_switched['from_cache'])
+        load_namespaces.assert_called_once()
+        self.assertEqual([call.args[1] for call in load_overview.call_args_list], ['default', 'ops'])
+        cached = cache.get(k8s_detail_cache_key(cluster.id, cluster.decrypted_kubeconfig))
+        self.assertEqual(set(cached['overviews']), {'default', 'ops'})
+        self.assertEqual(cached['overviews']['default']['namespace'], 'default')
+        self.assertEqual(cached['overviews']['ops']['namespace'], 'ops')
+        self.assertEqual(cached['namespace_result'], namespace_result)
+        self.assertNotIn(self.secret, str(cached))
+        self.assertNotIn('never-render-this', str(cached))
+        self.assertNotIn('certificate-authority-data', str(cached))
+
+        fresh_cache = FileBasedCache(self.k8s_cache_dir, {'TIMEOUT': 86400})
+        self.assertEqual(fresh_cache.get(k8s_detail_cache_key(cluster.id, cluster.decrypted_kubeconfig)), cached)
+        close_test_caches()
+        with mock.patch('devops.services.load_k8s_namespaces') as load_namespaces, \
+                mock.patch('devops.services.load_k8s_cluster_overview') as load_overview:
+            persisted = load_cached_k8s_cluster_detail(
+                cluster.id,
+                cluster.decrypted_kubeconfig,
+                'default',
+            )
+        self.assertTrue(persisted['from_cache'])
+        self.assertEqual(persisted['overview'], cached['overviews']['default'])
+        load_namespaces.assert_not_called()
+        load_overview.assert_not_called()
+
+    def test_detail_cache_refresh_reloads_only_namespaces_and_current_overview(self):
+        cache.clear()
+        cluster = self.create_cluster('refresh-cluster')
+        initial_namespaces = {'ok': True, 'message': 'initial', 'namespaces': [
+            {'name': 'default', 'status': 'Active'}, {'name': 'ops', 'status': 'Active'},
+        ]}
+        refreshed_namespaces = {'ok': True, 'message': 'refreshed', 'namespaces': [
+            {'name': 'default', 'status': 'Active'}, {'name': 'ops', 'status': 'Active'}, {'name': 'new', 'status': 'Active'},
+        ]}
+
+        overview_versions = iter(['v1-initial', 'v1-ops', 'v2-refreshed'])
+
+        def overview(_config, namespace, timeout=5):
+            return {'ok': True, 'message': 'ok', 'version': next(overview_versions), 'namespace': namespace, 'resources': {}, 'resource_errors': {}, 'resource_matches': []}
+
+        with mock.patch('devops.services.load_k8s_namespaces', side_effect=[initial_namespaces, refreshed_namespaces]) as load_namespaces, \
+                mock.patch('devops.services.load_k8s_cluster_overview', side_effect=overview) as load_overview:
+            load_cached_k8s_cluster_detail(cluster.id, cluster.decrypted_kubeconfig, 'default')
+            load_cached_k8s_cluster_detail(cluster.id, cluster.decrypted_kubeconfig, 'ops')
+            with override_settings(K8S_DETAIL_CACHE_TIMEOUT_SECONDS=86400), \
+                    mock.patch('devops.services.cache.set', wraps=cache.set) as cache_set:
+                refreshed = load_cached_k8s_cluster_detail(cluster.id, cluster.decrypted_kubeconfig, 'default', refresh=True)
+            self.assertEqual(cache_set.call_args[0][2], 86400)
+            self.assertEqual(load_namespaces.call_count, 2)
+            self.assertEqual(
+                [call.args[1] for call in load_overview.call_args_list],
+                ['default', 'ops', 'default'],
+            )
+            load_namespaces.reset_mock()
+            load_overview.reset_mock()
+            repeated = load_cached_k8s_cluster_detail(cluster.id, cluster.decrypted_kubeconfig, 'default')
+            load_namespaces.assert_not_called()
+            load_overview.assert_not_called()
+
+        self.assertFalse(refreshed['from_cache'])
+        self.assertTrue(repeated['from_cache'])
+        self.assertEqual(refreshed['namespace_result'], refreshed_namespaces)
+        self.assertEqual(refreshed['overview']['version'], 'v2-refreshed')
+        self.assertEqual(repeated['overview']['version'], 'v2-refreshed')
+        cached = cache.get(k8s_detail_cache_key(cluster.id, cluster.decrypted_kubeconfig))
+        self.assertEqual(set(cached['overviews']), {'default', 'ops'})
+        self.assertEqual(cached['namespace_result'], refreshed_namespaces)
+        self.assertEqual(cached['overviews']['default']['version'], 'v2-refreshed')
+        self.assertEqual(cached['overviews']['ops']['version'], 'v1-ops')
+
+    def test_detail_cache_repairs_missing_or_failed_namespace_data_without_reloading_overview(self):
+        cache.clear()
+        cluster = self.create_cluster('namespace-cache-repair-cluster')
+        overview = {
+            'ok': True, 'message': 'cached overview', 'version': 'v1', 'namespace': 'default',
+            'resources': {}, 'resource_errors': {}, 'resource_matches': [],
+        }
+        key = k8s_detail_cache_key(cluster.id, cluster.decrypted_kubeconfig)
+        repaired_namespaces = {
+            'ok': True, 'message': '命名空间读取成功',
+            'namespaces': [{'name': 'default', 'status': 'Active'}, {'name': 'ops', 'status': 'Active'}],
+        }
+
+        for broken_namespace_result in (None, {'ok': False, 'message': 'temporary failure', 'namespaces': []}):
+            cached = {'overviews': {'default': overview}}
+            if broken_namespace_result is not None:
+                cached['namespace_result'] = broken_namespace_result
+            cache.set(key, cached, 86400)
+            with self.subTest(namespace_result=broken_namespace_result), \
+                    mock.patch('devops.services.load_k8s_namespaces', return_value=repaired_namespaces) as load_namespaces, \
+                    mock.patch('devops.services.load_k8s_cluster_overview') as load_overview:
+                result = load_cached_k8s_cluster_detail(
+                    cluster.id,
+                    cluster.decrypted_kubeconfig,
+                    'default',
+                )
+
+            load_namespaces.assert_called_once_with(cluster.decrypted_kubeconfig, timeout=5)
+            load_overview.assert_not_called()
+            self.assertEqual(result['namespace_result'], repaired_namespaces)
+            self.assertEqual(result['overview'], overview)
+            self.assertFalse(result['from_cache'])
+
+    def test_failed_refresh_preserves_existing_resource_cache(self):
+        cache.clear()
+        cluster = self.create_cluster('failed-refresh-cache-cluster')
+        namespace_result = {
+            'ok': True, 'message': 'cached namespaces',
+            'namespaces': [{'name': 'default', 'status': 'Active'}],
+        }
+        overview = {
+            'ok': True, 'message': 'cached overview', 'version': 'v1', 'namespace': 'default',
+            'cluster_capacity': {
+                'node_count': 1, 'ready_nodes': 1, 'cpu_capacity': '4 核',
+                'cpu_allocatable': '3.8 核', 'memory_capacity': '8 GiB',
+                'memory_allocatable': '7 GiB',
+            },
+            'resources': {'nodes': [{'kind': 'Node', 'name': 'worker-01'}]},
+            'resource_errors': {}, 'resource_matches': [],
+        }
+        cache.set(
+            k8s_detail_cache_key(cluster.id, cluster.decrypted_kubeconfig),
+            {'namespace_result': namespace_result, 'overviews': {'default': overview}},
+            86400,
+        )
+        failed_namespaces = {'ok': False, 'message': 'namespace network failed', 'namespaces': []}
+        failed_overview = {
+            'ok': False, 'message': 'overview network failed', 'version': '', 'namespace': 'default',
+            'resources': {}, 'resource_errors': {}, 'resource_matches': [],
+        }
+
+        with mock.patch('devops.services.load_k8s_namespaces', return_value=failed_namespaces), \
+                mock.patch('devops.services.load_k8s_cluster_overview', return_value=failed_overview):
+            result = load_cached_k8s_cluster_detail(
+                cluster.id,
+                cluster.decrypted_kubeconfig,
+                'default',
+                refresh=True,
+            )
+
+        self.assertEqual(result['namespace_result'], namespace_result)
+        self.assertEqual(result['overview']['resources'], overview['resources'])
+        self.assertEqual(result['overview']['cluster_capacity'], overview['cluster_capacity'])
+        self.assertFalse(result['overview']['ok'])
+        self.assertEqual(result['overview']['message'], 'overview network failed')
+
+    def test_cluster_scoped_cache_is_reused_across_namespace_overviews(self):
+        cache.clear()
+        cluster = self.create_cluster('cluster-scoped-cache-cluster')
+        namespace_result = {
+            'ok': True, 'message': 'ok',
+            'namespaces': [
+                {'name': 'default', 'status': 'Active'},
+                {'name': 'operations', 'status': 'Active'},
+            ],
+        }
+        cluster_capacity = {
+            'node_count': 1, 'ready_nodes': 1, 'cpu_capacity': '4 核',
+            'cpu_allocatable': '3.8 核', 'memory_capacity': '8 GiB',
+            'memory_allocatable': '7 GiB',
+        }
+        node_rows = [{'kind': 'Node', 'name': 'worker-01', 'status': 'Ready'}]
+        default_overview = {
+            'ok': True, 'message': 'ok', 'version': 'v1', 'namespace': 'default',
+            'cluster_capacity': cluster_capacity,
+            'resources': {
+                'nodes': node_rows,
+                'persistentvolumes': [{'kind': 'PV', 'name': 'pv-01'}],
+                'storageclasses': [{'kind': 'StorageClass', 'name': 'fast'}],
+            },
+            'resource_errors': {}, 'resource_matches': [],
+        }
+        operations_overview = {
+            'ok': True, 'message': 'old cached overview', 'version': 'v1',
+            'namespace': 'operations', 'resources': {'deployments': []},
+            'resource_errors': {}, 'resource_matches': [],
+        }
+        cache.set(
+            k8s_detail_cache_key(cluster.id, cluster.decrypted_kubeconfig),
+            {
+                'namespace_result': namespace_result,
+                'overviews': {'default': default_overview, 'operations': operations_overview},
+            },
+            86400,
+        )
+
+        with mock.patch('devops.services.load_k8s_namespaces') as load_namespaces, \
+                mock.patch('devops.services.load_k8s_cluster_overview') as load_overview:
+            result = load_cached_k8s_cluster_detail(
+                cluster.id,
+                cluster.decrypted_kubeconfig,
+                'operations',
+            )
+
+        load_namespaces.assert_not_called()
+        load_overview.assert_not_called()
+        self.assertTrue(result['from_cache'])
+        self.assertEqual(result['overview']['resources']['nodes'], node_rows)
+        self.assertEqual(result['overview']['cluster_capacity'], cluster_capacity)
+        self.assertEqual(result['overview']['resources']['persistentvolumes'][0]['name'], 'pv-01')
+
+    def test_detail_cache_timeout_safely_falls_back_to_one_day(self):
+        cache.clear()
+        cluster = self.create_cluster('timeout-fallback-cluster')
+        namespace_result = {'ok': True, 'message': 'ok', 'namespaces': []}
+        overview = {
+            'ok': True, 'message': 'ok', 'version': 'v1', 'namespace': 'default',
+            'resources': {}, 'resource_errors': {}, 'resource_matches': [],
+        }
+
+        for configured_timeout in ('invalid', 0, -1, None):
+            cache.clear()
+            with self.subTest(configured_timeout=configured_timeout), \
+                    override_settings(K8S_DETAIL_CACHE_TIMEOUT_SECONDS=configured_timeout), \
+                    mock.patch('devops.services.load_k8s_namespaces', return_value=namespace_result), \
+                    mock.patch('devops.services.load_k8s_cluster_overview', return_value=overview), \
+                    mock.patch('devops.services.cache.set', wraps=cache.set) as cache_set:
+                load_cached_k8s_cluster_detail(
+                    cluster.id,
+                    cluster.decrypted_kubeconfig,
+                    'default',
+                )
+            self.assertEqual(cache_set.call_args[0][2], 86400)
+
+    def test_detail_urls_context_and_refresh_permission(self):
+        cluster = self.create_cluster('detail-cluster')
+        detail = {
+            'overview': {
+                'ok': True, 'message': 'ok', 'version': 'v1', 'namespace': 'default',
+                'resources': {'deployments': [{
+                    'kind': 'Deployment', 'name': 'gateway', 'status': '运行中',
+                    'replicas': '1 / 1', 'namespace': 'default', 'created_at': '-', 'detail': 'image',
+                    'labels': 'app=gateway, environment=production',
+                    'annotations': 'deployment.kubernetes.io/revision=3',
+                }], 'pods': [{
+                    'kind': 'Pod', 'name': 'gateway-abc12', 'status': 'Running',
+                    'replicas': '-', 'namespace': 'default', 'created_at': '-', 'detail': 'worker-01',
+                }], 'services': [{
+                    'kind': 'Service', 'name': 'gateway', 'status': 'ClusterIP',
+                    'replicas': '-', 'namespace': 'default', 'created_at': '-', 'detail': '10.0.0.10',
+                }]},
+                'resource_errors': {}, 'resource_matches': [],
+            },
+            'namespace_result': {'ok': True, 'message': 'ok', 'namespaces': [{'name': 'default', 'status': 'Active'}]},
+            'from_cache': False,
+        }
+        with mock.patch('devops.views.load_cached_k8s_cluster_detail', return_value=detail):
+            new_response = self.client.get(reverse('devops:k8s_cluster_detail', args=[cluster.id]))
+            old_response = self.client.get(reverse('devops:cluster_detail', args=[cluster.id]))
+
+        self.assertEqual(new_response.status_code, 200)
+        self.assertEqual(old_response.status_code, 200)
+        self.assertEqual(new_response.context['active_resource'], 'deployments')
+        self.assertTrue(new_response.context['is_workload_resource'])
+        self.assertEqual(len(new_response.context['resources'][0]['matched_pods']), 1)
+        self.assertEqual(len(new_response.context['resources'][0]['matched_services']), 1)
+        self.assertContains(new_response, 'app=gateway, environment=production')
+        self.assertContains(new_response, 'data-expandable-labels')
+        self.assertContains(new_response, '镜像地址')
+        self.assertContains(new_response, 'deployment.kubernetes.io/revision=3')
+        self.assertContains(new_response, '>Node<')
+        self.assertContains(new_response, '匹配 Service')
+        self.assertContains(new_response, '10.0.0.10')
+        self.assertNotIn('kubeconfig', new_response.context)
+        self.assertNotContains(new_response, self.secret)
+
+        DevOpsModulePermission.objects.update_or_create(
+            user=self.user,
+            module=DevOpsModulePermission.MODULE_CLUSTER,
+            defaults={'role': DevOpsRole.ROLE_VIEWER},
+        )
+        denied = self.client.get(reverse('devops:k8s_cluster_detail', args=[cluster.id]), {'refresh': '1'})
+        self.assertEqual(denied.status_code, 403)
+
+    def test_detail_supports_safe_searchable_generic_resources(self):
+        cluster = self.create_cluster('generic-resource-cluster')
+        generic_resources = {
+            'services': [
+                {
+                    'kind': 'Service', 'name': 'gateway-service', 'status': 'ClusterIP',
+                    'replicas': '-', 'namespace': 'default', 'created_at': '-', 'detail': '10.0.0.1',
+                    'raw': 'must-not-render', 'token': 'service-token-must-not-render',
+                },
+                {'kind': 'Service', 'name': 'unrelated-service', 'namespace': 'default'},
+            ],
+            'persistentvolumeclaims': [
+                {
+                    'kind': 'PersistentVolumeClaim', 'name': 'gateway-storage', 'status': 'Bound',
+                    'replicas': '-', 'namespace': 'default', 'created_at': '-', 'detail': '10Gi',
+                    'data': {'password': 'pvc-password-must-not-render'},
+                },
+                {'kind': 'PersistentVolumeClaim', 'name': 'unrelated-storage', 'namespace': 'default'},
+            ],
+            'configmaps': [
+                {
+                    'kind': 'ConfigMap', 'name': 'gateway-config', 'status': 'Active',
+                    'replicas': '-', 'namespace': 'default', 'created_at': '-', 'detail': '3 keys',
+                    'certificate': 'config-certificate-must-not-render',
+                },
+                {'kind': 'ConfigMap', 'name': 'unrelated-config', 'namespace': 'default'},
+            ],
+        }
+        detail = {
+            'overview': {
+                'ok': True, 'message': 'ok', 'version': 'v1', 'namespace': 'default',
+                'resources': generic_resources,
+                'resource_errors': {'services': 'service list warning'},
+                'resource_matches': [],
+            },
+            'namespace_result': {
+                'ok': True, 'message': 'ok',
+                'namespaces': [{'name': 'default', 'status': 'Active'}],
+            },
+            'from_cache': True,
+        }
+        cases = (
+            ('services', '服务', 'gateway-service'),
+            ('persistentvolumeclaims', '存储', 'gateway-storage'),
+            ('configmaps', '配置', 'gateway-config'),
+        )
+
+        with mock.patch('devops.views.load_cached_k8s_cluster_detail', return_value=detail) as loader:
+            for resource_key, label, search in cases:
+                with self.subTest(resource=resource_key):
+                    response = self.client.get(
+                        reverse('devops:k8s_cluster_detail', args=[cluster.id]),
+                        {'resource': resource_key, 'namespace': 'default', 'q': search},
+                    )
+                    self.assertEqual(response.status_code, 200)
+                    self.assertEqual(response.context['active_resource'], resource_key)
+                    self.assertEqual(response.context['active_resource_label'], label)
+                    self.assertFalse(response.context['is_workload_resource'])
+                    self.assertEqual(response.context['workload_resource_keys'], [
+                        'deployments', 'statefulsets', 'daemonsets', 'jobs', 'cronjobs',
+                    ])
+                    self.assertEqual(len(response.context['resources']), 1)
+                    row = response.context['resources'][0]
+                    self.assertEqual(row['name'], search)
+                    self.assertNotIn('matched_pods', row)
+                    self.assertNotIn('raw', row)
+                    self.assertNotIn('data', row)
+                    self.assertNotIn('token', row)
+                    self.assertNotIn('certificate', row)
+                    self.assertEqual(response.context['workloads'], response.context['resources'])
+
+            unsafe_search_response = self.client.get(
+                reverse('devops:k8s_cluster_detail', args=[cluster.id]),
+                {'resource': 'services', 'q': 'service-token-must-not-render'},
+            )
+
+        self.assertEqual(loader.call_count, 4)
+        self.assertEqual(unsafe_search_response.context['resources'], [])
+        self.assertEqual(response.context['resource_error'], '')
+        with mock.patch('devops.views.load_cached_k8s_cluster_detail', return_value=detail):
+            service_response = self.client.get(
+                reverse('devops:k8s_cluster_detail', args=[cluster.id]),
+                {'resource': 'services'},
+            )
+        self.assertEqual(service_response.context['resource_error'], 'service list warning')
+        rendered_context = str(service_response.context['resources'])
+        self.assertNotIn('must-not-render', rendered_context)
+
+    def test_namespace_resource_and_all_resource_lists_paginate_twenty_rows(self):
+        cluster = self.create_cluster('paginated-resource-cluster')
+        namespaces = [
+            {
+                'name': 'namespace-%02d' % index, 'status': 'Active',
+                'labels': 'environment=test, index=%s' % index,
+                'created_at': '2026/07/11 10:%02d:00 GMT+0800' % index,
+            }
+            for index in range(45)
+        ]
+        workload_rows = [
+            {
+                'kind': 'Deployment', 'name': 'deployment-%02d' % index,
+                'status': '运行中', 'replicas': '1 / 1', 'namespace': 'default',
+                'created_at': '-', 'detail': 'image:%s' % index,
+            }
+            for index in range(45)
+        ]
+        service_rows = [
+            {
+                'kind': 'Service', 'name': 'service-%02d' % index,
+                'status': 'ClusterIP', 'replicas': '-', 'namespace': 'default',
+                'created_at': '-', 'detail': '10.0.0.%s' % index,
+            }
+            for index in range(45)
+        ]
+        detail = {
+            'overview': {
+                'ok': True, 'message': 'ok', 'version': 'v1', 'namespace': 'default',
+                'resources': {
+                    'deployments': workload_rows,
+                    'services': service_rows,
+                    'pods': [],
+                },
+                'resource_errors': {}, 'resource_matches': [],
+            },
+            'namespace_result': {
+                'ok': True, 'message': '命名空间读取成功', 'namespaces': namespaces,
+            },
+            'from_cache': True,
+        }
+
+        cases = (
+            ('namespaces', 'namespace-20'),
+            ('deployments', 'deployment-20'),
+            ('services', 'service-20'),
+        )
+        with mock.patch('devops.views.load_cached_k8s_cluster_detail', return_value=detail):
+            for resource_key, first_name in cases:
+                with self.subTest(resource=resource_key):
+                    response = self.client.get(
+                        reverse('devops:k8s_cluster_detail', args=[cluster.id]),
+                        {'resource': resource_key, 'namespace': 'default', 'page': '2'},
+                    )
+                    self.assertEqual(response.status_code, 200)
+                    self.assertEqual(len(response.context['resources']), 20)
+                    self.assertEqual(response.context['resources'][0]['name'], first_name)
+                    self.assertEqual(response.context['resource_page'].number, 2)
+                    self.assertEqual(response.context['resource_page'].paginator.count, 45)
+                    self.assertContains(response, '第 2 / 3 页，共 45 条')
+
+        with mock.patch('devops.views.load_cached_k8s_cluster_detail', return_value=detail):
+            namespace_search = self.client.get(
+                reverse('devops:k8s_cluster_detail', args=[cluster.id]),
+                {'resource': 'namespaces', 'q': 'namespace-44'},
+            )
+        self.assertTrue(namespace_search.context['is_namespace_resource'])
+        self.assertFalse(namespace_search.context['is_workload_resource'])
+        self.assertEqual(namespace_search.context['active_resource_label'], 'Namespace')
+        self.assertEqual(
+            [item['name'] for item in namespace_search.context['resources']],
+            ['namespace-44'],
+        )
+        self.assertContains(namespace_search, '标签')
+        self.assertContains(namespace_search, 'environment=test, index=44')
+        self.assertContains(namespace_search, '2026/07/11 10:44:00')
+        self.assertNotContains(namespace_search, 'GMT+0800')
+        self.assertContains(namespace_search, 'data-expandable-labels')
+
+    def test_generic_resource_refresh_keeps_loader_arguments_and_query(self):
+        cluster = self.create_cluster('generic-refresh-cluster')
+        detail = {
+            'overview': {
+                'ok': True, 'message': 'ok', 'version': 'v1', 'namespace': 'ops',
+                'resources': {'services': []}, 'resource_errors': {}, 'resource_matches': [],
+            },
+            'namespace_result': {
+                'ok': True, 'message': 'ok', 'namespaces': [{'name': 'ops', 'status': 'Active'}],
+            },
+            'from_cache': False,
+        }
+
+        with mock.patch('devops.views.load_cached_k8s_cluster_detail', return_value=detail) as loader:
+            response = self.client.get(
+                reverse('devops:k8s_cluster_detail', args=[cluster.id]),
+                {'resource': 'services', 'namespace': 'ops', 'q': 'gateway', 'refresh': '1'},
+            )
+
+        self.assertEqual(response.status_code, 200)
+        loader.assert_called_once_with(
+            cluster.id,
+            cluster.decrypted_kubeconfig,
+            'ops',
+            refresh=True,
+        )
+        self.assertIn('resource=services', response.context['refresh_query'])
+        self.assertIn('namespace=ops', response.context['refresh_query'])
+        self.assertIn('q=gateway', response.context['refresh_query'])
+
+    def test_service_storage_and_config_resource_groups_render_expected_tabs(self):
+        cluster = self.create_cluster('grouped-resource-cluster')
+        detail = {
+            'overview': {
+                'ok': True, 'message': 'ok', 'version': 'v1', 'namespace': 'default',
+                'resources': {
+                    'services': [],
+                    'ingresses': [{
+                        'kind': 'Ingress', 'name': 'public-gateway', 'status': '可用',
+                        'replicas': '-', 'namespace': 'default', 'created_at': '-',
+                        'detail': 'gateway.example.com',
+                    }],
+                    'persistentvolumeclaims': [],
+                    'persistentvolumes': [{
+                        'kind': 'PV', 'name': 'data-volume', 'status': 'Bound',
+                        'replicas': '-', 'namespace': '-', 'created_at': '-', 'detail': 'fast',
+                    }],
+                    'storageclasses': [{
+                        'kind': 'StorageClass', 'name': 'fast', 'status': '可用',
+                        'replicas': '-', 'namespace': '-', 'created_at': '-', 'detail': 'csi.example.com',
+                    }],
+                    'configmaps': [],
+                    'secrets': [{
+                        'kind': 'Secret', 'name': 'registry-secret', 'status': 'Opaque',
+                        'replicas': '-', 'namespace': 'default', 'created_at': '-',
+                        'detail': '受保护数据', 'data': {'password': 'must-not-render'},
+                    }],
+                },
+                'resource_errors': {}, 'resource_matches': [],
+            },
+            'namespace_result': {
+                'ok': True, 'message': 'ok',
+                'namespaces': [{'name': 'default', 'status': 'Active'}],
+            },
+            'from_cache': True,
+        }
+        cases = (
+            ('ingresses', 'service', ['Service', 'Ingress'], 'public-gateway'),
+            ('persistentvolumes', 'storage', ['PVC', 'PV', 'SC'], 'data-volume'),
+            ('storageclasses', 'storage', ['PVC', 'PV', 'SC'], 'fast'),
+            ('secrets', 'config', ['ConfigMap', 'Secret'], 'registry-secret'),
+        )
+
+        with mock.patch('devops.views.load_cached_k8s_cluster_detail', return_value=detail):
+            for resource_key, group, labels, expected_name in cases:
+                with self.subTest(resource=resource_key):
+                    response = self.client.get(
+                        reverse('devops:k8s_cluster_detail', args=[cluster.id]),
+                        {'resource': resource_key, 'namespace': 'default'},
+                    )
+                    self.assertEqual(response.status_code, 200)
+                    self.assertEqual(response.context['resource_group'], group)
+                    self.assertEqual(
+                        [tab['label'] for tab in response.context['resource_tabs']],
+                        labels,
+                    )
+                    self.assertEqual(response.context['resources'][0]['name'], expected_name)
+                    self.assertContains(response, expected_name)
+
+        with mock.patch('devops.views.load_cached_k8s_cluster_detail', return_value=detail):
+            secret_response = self.client.get(
+                reverse('devops:k8s_cluster_detail', args=[cluster.id]),
+                {'resource': 'secrets'},
+            )
+        self.assertNotIn('data', secret_response.context['resources'][0])
+        self.assertNotContains(secret_response, 'must-not-render')
+
+    def test_cluster_overview_and_node_resource_render_capacity_and_cluster_information(self):
+        cluster = self.create_cluster('overview-cluster')
+        detail = {
+            'overview': {
+                'ok': True, 'message': 'ok', 'version': 'v1.31.2', 'namespace': 'default',
+                'cluster_capacity': {
+                    'node_count': 3, 'ready_nodes': 2,
+                    'cpu_capacity': '12 核', 'cpu_allocatable': '11.4 核',
+                    'memory_capacity': '48 GiB', 'memory_allocatable': '44 GiB',
+                },
+                'resources': {
+                    'nodes': [{
+                        'kind': 'Node', 'name': 'worker-01', 'status': 'Ready',
+                        'replicas': '-', 'namespace': '-', 'created_at': '-',
+                        'ip_address': '10.0.0.11',
+                        'detail': 'worker | Kubelet v1.31.2',
+                    }],
+                    'pods': [{
+                        'kind': 'Pod', 'name': 'api-01', 'status': 'Running',
+                        'replicas': '-', 'namespace': 'default', 'created_at': '-', 'detail': 'worker-01',
+                    }],
+                    'deployments': [], 'statefulsets': [], 'daemonsets': [],
+                    'services': [], 'ingresses': [], 'persistentvolumeclaims': [],
+                    'persistentvolumes': [], 'storageclasses': [], 'configmaps': [], 'secrets': [],
+                },
+                'resource_errors': {}, 'resource_matches': [],
+            },
+            'namespace_result': {
+                'ok': True, 'message': 'ok',
+                'namespaces': [
+                    {'name': 'default', 'status': 'Active'},
+                    {'name': 'operations', 'status': 'Active'},
+                ],
+            },
+            'from_cache': True,
+        }
+
+        with mock.patch('devops.views.load_cached_k8s_cluster_detail', return_value=detail):
+            overview_response = self.client.get(
+                reverse('devops:k8s_cluster_detail', args=[cluster.id]),
+                {'resource': 'overview'},
+            )
+            node_response = self.client.get(
+                reverse('devops:k8s_cluster_detail', args=[cluster.id]),
+                {'resource': 'nodes'},
+            )
+
+        self.assertEqual(overview_response.status_code, 200)
+        self.assertTrue(overview_response.context['is_overview_resource'])
+        self.assertEqual(overview_response.context['cluster_summary']['cpu_capacity'], '12 核')
+        self.assertEqual(overview_response.context['cluster_summary']['memory_capacity'], '48 GiB')
+        self.assertEqual(overview_response.context['cluster_summary']['namespace_count'], 2)
+        self.assertContains(overview_response, 'CPU 总容量')
+        self.assertContains(overview_response, '资源统计')
+        self.assertContains(overview_response, 'v1.31.2')
+
+        self.assertEqual(node_response.status_code, 200)
+        self.assertFalse(node_response.context['is_overview_resource'])
+        self.assertEqual(node_response.context['active_resource_label'], 'Node')
+        self.assertEqual(node_response.context['resources'][0]['name'], 'worker-01')
+        self.assertContains(node_response, 'worker-01')
+        self.assertContains(node_response, '10.0.0.11')
+        self.assertContains(node_response, reverse('devops:k8s_node_detail', args=[cluster.id, 'worker-01']))
+        self.assertContains(node_response, 'worker | Kubelet v1.31.2')
+
+    def test_node_detail_page_renders_metrics_all_pods_pagination_search_and_permissions(self):
+        cluster = self.create_cluster('node-detail-page-cluster')
+        pods = [
+            {
+                'name': 'pod-%02d' % index,
+                'namespace': 'namespace-%02d' % (index % 3),
+                'status': 'Running', 'pod_ip': '10.244.0.%s' % index,
+                'created_at': '-', 'cpu_request': '0.1 核', 'cpu_limit': '0.2 核',
+                'memory_request': '0.25 GiB', 'memory_limit': '0.5 GiB',
+            }
+            for index in range(45)
+        ]
+        detail = {
+            'ok': True, 'message': '节点详情读取成功', 'metrics_message': '',
+            'from_cache': True,
+            'node': {
+                'name': 'worker-01', 'status': 'Ready', 'ip_address': '10.0.0.11',
+                'roles': 'worker', 'created_at': '-', 'kubelet_version': 'v1.31.2',
+                'container_runtime': 'containerd://1.7', 'os_image': 'Linux',
+                'kernel_version': '6.1', 'architecture': 'amd64',
+            },
+            'summary': {
+                'cpu_total': '4 核', 'cpu_allocatable': '3.8 核',
+                'cpu_usage': '1.25 核', 'cpu_request': '1.5 核', 'cpu_limit': '3 核',
+                'memory_total': '8 GiB', 'memory_allocatable': '7 GiB',
+                'memory_usage': '2 GiB', 'memory_request': '1.25 GiB',
+                'memory_limit': '2.5 GiB', 'pod_total': 45,
+            },
+            'pods': pods,
+        }
+
+        with mock.patch('devops.views.load_cached_k8s_node_detail', return_value=detail) as loader:
+            response = self.client.get(
+                reverse('devops:k8s_node_detail', args=[cluster.id, 'worker-01']),
+                {'page': '2'},
+            )
+            search_response = self.client.get(
+                reverse('devops:k8s_node_detail', args=[cluster.id, 'worker-01']),
+                {'q': 'pod-44'},
+            )
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.context['pod_page'].number, 2)
+        self.assertEqual(response.context['pod_page'].paginator.count, 45)
+        self.assertEqual(len(response.context['pods']), 20)
+        self.assertContains(response, '4 核')
+        self.assertContains(response, '1.25 核')
+        self.assertContains(response, '8 GiB')
+        self.assertContains(response, '总数 45')
+        self.assertContains(response, '第 2 / 3 页，共 45 条')
+        self.assertEqual([item['name'] for item in search_response.context['pods']], ['pod-44'])
+        self.assertEqual(loader.call_count, 2)
+
+        DevOpsModulePermission.objects.update_or_create(
+            user=self.user,
+            module=DevOpsModulePermission.MODULE_CLUSTER,
+            defaults={'role': DevOpsRole.ROLE_VIEWER},
+        )
+        with mock.patch('devops.views.load_cached_k8s_node_detail') as denied_loader:
+            denied = self.client.get(
+                reverse('devops:k8s_node_detail', args=[cluster.id, 'worker-01']),
+                {'refresh': '1'},
+            )
+        self.assertEqual(denied.status_code, 403)
+        denied_loader.assert_not_called()
+
+    def test_node_detail_rejects_invalid_node_name_before_loading(self):
+        cluster = self.create_cluster('invalid-node-detail-cluster')
+        with mock.patch('devops.views.load_cached_k8s_node_detail') as loader:
+            response = self.client.get('/devops/clusters/%s/nodes/bad%%2Fnode/' % cluster.id)
+        self.assertEqual(response.status_code, 404)
+        loader.assert_not_called()
+
+    def test_namespace_switcher_only_renders_inside_namespaced_resource_pages(self):
+        cluster = self.create_cluster('namespace-switcher-cluster')
+        detail = {
+            'overview': {
+                'ok': True, 'message': 'ok', 'version': 'v1', 'namespace': 'default',
+                'cluster_capacity': {
+                    'node_count': 0, 'ready_nodes': 0, 'cpu_capacity': '0 核',
+                    'cpu_allocatable': '0 核', 'memory_capacity': '0 GiB',
+                    'memory_allocatable': '0 GiB',
+                },
+                'resources': {}, 'resource_errors': {}, 'resource_matches': [],
+            },
+            'namespace_result': {
+                'ok': True, 'message': 'ok',
+                'namespaces': [
+                    {'name': 'default', 'status': 'Active'},
+                    {'name': 'operations', 'status': 'Active'},
+                ],
+            },
+            'from_cache': True,
+        }
+        namespaced_resources = (
+            'deployments', 'statefulsets', 'daemonsets', 'jobs', 'cronjobs',
+            'services', 'ingresses', 'persistentvolumeclaims', 'configmaps', 'secrets',
+        )
+        cluster_scoped_resources = (
+            'overview', 'namespaces', 'nodes', 'persistentvolumes', 'storageclasses',
+        )
+
+        with mock.patch('devops.views.load_cached_k8s_cluster_detail', return_value=detail):
+            for resource_key in namespaced_resources:
+                with self.subTest(namespaced_resource=resource_key):
+                    response = self.client.get(
+                        reverse('devops:k8s_cluster_detail', args=[cluster.id]),
+                        {'resource': resource_key},
+                    )
+                    body = response.content.decode()
+                    self.assertTrue(response.context['show_namespace_switcher'])
+                    self.assertEqual(body.count('id="k8s-namespace-select"'), 1)
+                    self.assertLess(
+                        body.find('class="k8s-workload-actions"'),
+                        body.find('id="k8s-namespace-select"'),
+                    )
+
+            for resource_key in cluster_scoped_resources:
+                with self.subTest(cluster_scoped_resource=resource_key):
+                    response = self.client.get(
+                        reverse('devops:k8s_cluster_detail', args=[cluster.id]),
+                        {'resource': resource_key},
+                    )
+                    self.assertFalse(response.context['show_namespace_switcher'])
+                    self.assertNotContains(response, 'id="k8s-namespace-select"')
+
+    def test_cluster_scoped_pages_ignore_namespace_query_parameter(self):
+        cluster = self.create_cluster('cluster-scoped-namespace-cluster')
+        detail = {
+            'overview': {
+                'ok': True, 'message': 'ok', 'version': 'v1', 'namespace': 'default',
+                'cluster_capacity': {
+                    'node_count': 1, 'ready_nodes': 1, 'cpu_capacity': '4 核',
+                    'cpu_allocatable': '3.8 核', 'memory_capacity': '8 GiB',
+                    'memory_allocatable': '7 GiB',
+                },
+                'resources': {
+                    'nodes': [{'kind': 'Node', 'name': 'worker-01', 'status': 'Ready'}],
+                },
+                'resource_errors': {}, 'resource_matches': [],
+            },
+            'namespace_result': {
+                'ok': True, 'message': 'ok',
+                'namespaces': [
+                    {'name': 'default', 'status': 'Active'},
+                    {'name': 'operations', 'status': 'Active'},
+                ],
+            },
+            'from_cache': True,
+        }
+        cluster_scoped_resources = (
+            'overview', 'namespaces', 'nodes', 'persistentvolumes', 'storageclasses',
+        )
+
+        with mock.patch('devops.views.load_cached_k8s_cluster_detail', return_value=detail) as loader:
+            for resource_key in cluster_scoped_resources:
+                with self.subTest(resource=resource_key):
+                    response = self.client.get(
+                        reverse('devops:k8s_cluster_detail', args=[cluster.id]),
+                        {'resource': resource_key, 'namespace': 'operations'},
+                    )
+                    self.assertEqual(response.status_code, 200)
+                    self.assertEqual(response.context['selected_namespace'], 'default')
+
+        self.assertEqual(loader.call_count, len(cluster_scoped_resources))
+        for call in loader.call_args_list:
+            self.assertEqual(call.args[2], 'default')
+
+    def test_offline_detail_returns_immediately_without_loading_or_exposing_errors(self):
+        cluster = self.create_cluster('offline-detail-cluster')
+        secret_marker = 'offline-private-token-must-not-render'
+        cluster.status = K8sCluster.STATUS_OFFLINE
+        cluster.last_error = secret_marker
+        cluster.save(update_fields=['status', 'last_error', 'updated_at'])
+
+        with mock.patch('devops.views.load_cached_k8s_cluster_detail') as loader:
+            response = self.client.get(reverse('devops:k8s_cluster_detail', args=[cluster.id]))
+
+        self.assertEqual(response.status_code, 200)
+        self.assertTemplateUsed(response, 'devops/k8s_cluster_detail.html')
+        loader.assert_not_called()
+        self.assertEqual(response.context['overview']['ok'], False)
+        self.assertEqual(response.context['overview']['resources'], {})
+        self.assertEqual(response.context['overview']['resource_errors'], {})
+        self.assertEqual(response.context['resources'], [])
+        self.assertEqual(response.context['workloads'], [])
+        self.assertEqual(response.context['namespace_options'], ['default'])
+        self.assertEqual(response.context['selected_namespace'], 'default')
+        self.assertEqual(response.context['active_resource'], 'deployments')
+        self.assertTrue(response.context['is_workload_resource'])
+        self.assertEqual([tab['count'] for tab in response.context['resource_tabs']], [0, 0, 0, 0, 0])
+        self.assertFalse(response.context['from_cache'])
+        self.assertFalse(response.context['k8s_detail_from_cache'])
+        self.assertContains(response, '集群当前处于离线状态，请测试连接或强制刷新后重试。')
+        self.assertNotContains(response, secret_marker)
+        self.assertNotContains(response, self.secret)
+
+    def test_offline_generic_resource_context_is_safe(self):
+        cluster = self.create_cluster('offline-generic-cluster')
+        cluster.status = K8sCluster.STATUS_OFFLINE
+        cluster.last_error = 'offline-secret-must-not-render'
+        cluster.save(update_fields=['status', 'last_error', 'updated_at'])
+
+        with mock.patch('devops.views.load_cached_k8s_cluster_detail') as loader:
+            response = self.client.get(
+                reverse('devops:k8s_cluster_detail', args=[cluster.id]),
+                {'resource': 'configmaps'},
+            )
+
+        self.assertEqual(response.status_code, 200)
+        loader.assert_not_called()
+        self.assertEqual(response.context['active_resource'], 'configmaps')
+        self.assertEqual(response.context['active_resource_label'], '配置')
+        self.assertFalse(response.context['is_workload_resource'])
+        self.assertEqual(response.context['resources'], [])
+        self.assertEqual(response.context['resource_error'], '')
+        self.assertNotContains(response, 'offline-secret-must-not-render')
+
+    def test_offline_detail_admin_refresh_still_calls_loader(self):
+        cluster = self.create_cluster('offline-refresh-cluster')
+        cluster.status = K8sCluster.STATUS_OFFLINE
+        cluster.save(update_fields=['status', 'updated_at'])
+        detail = {
+            'overview': {
+                'ok': True, 'message': 'ok', 'version': 'v1', 'namespace': 'default',
+                'resources': {}, 'resource_errors': {}, 'resource_matches': [],
+            },
+            'namespace_result': {
+                'ok': True, 'message': 'ok',
+                'namespaces': [{'name': 'default', 'status': 'Active'}],
+            },
+            'from_cache': False,
+        }
+
+        with mock.patch('devops.views.load_cached_k8s_cluster_detail', return_value=detail) as loader:
+            response = self.client.get(
+                reverse('devops:k8s_cluster_detail', args=[cluster.id]),
+                {'refresh': '1'},
+            )
+
+        self.assertEqual(response.status_code, 200)
+        loader.assert_called_once_with(
+            cluster.id,
+            cluster.decrypted_kubeconfig,
+            'default',
+            refresh=True,
+        )
+
+    def test_detail_invalid_resource_and_namespace_fall_back(self):
+        cluster = self.create_cluster('fallback-cluster')
+        detail = {
+            'overview': {'ok': True, 'message': 'ok', 'version': 'v1', 'namespace': 'default', 'resources': {}, 'resource_errors': {}, 'resource_matches': []},
+            'namespace_result': {'ok': False, 'message': 'failed', 'namespaces': []},
+            'from_cache': False,
+        }
+        with mock.patch('devops.views.load_cached_k8s_cluster_detail', return_value=detail) as loader:
+            response = self.client.get(reverse('devops:k8s_cluster_detail', args=[cluster.id]), {
+                'resource': 'events', 'namespace': 'bad/path',
+            })
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.context['active_resource'], 'deployments')
+        self.assertTrue(response.context['is_workload_resource'])
+        self.assertEqual(response.context['selected_namespace'], 'default')
+        loader.assert_called_once_with(cluster.id, cluster.decrypted_kubeconfig, 'default', refresh=False)
 
 
 class DevOpsViewTests(TestCase):

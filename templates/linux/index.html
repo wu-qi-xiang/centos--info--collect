@@ -10,7 +10,7 @@
         <p class="ops-page-subtitle">主机资产、监控告警和 DevOps 自动化的统一入口。</p>
     </div>
     <div class="d-flex gap-2">
-        <a class="btn btn-outline-primary" href="{% url 'linux_detail' %}"><i class="fas fa-server me-1"></i>服务器列表</a>
+        <a class="btn btn-outline-primary" href="{% url 'asset_management' %}"><i class="fas fa-boxes-stacked me-1"></i>资产管理</a>
         <a class="btn btn-primary" href="{% url 'devops:dashboard' %}"><i class="fas fa-tools me-1"></i>DevOps</a>
     </div>
 </div>
@@ -67,9 +67,9 @@
         <div class="card h-100">
             <div class="card-body">
                 <i class="fas fa-key text-warning mb-3"></i>
-                <h5>密码管理</h5>
+                <h5>凭据管理</h5>
                 <p class="text-muted">管理当前用户的账号密码记录。</p>
-                <a class="btn btn-sm btn-outline-primary" href="{% url 'password:password_manage' %}">进入</a>
+                <a class="btn btn-sm btn-outline-primary" href="{% url 'password:credential_management' %}">进入</a>
             </div>
         </div>
     </div>

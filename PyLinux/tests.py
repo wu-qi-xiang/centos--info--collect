@@ -2,7 +2,7 @@ from django.core.exceptions import ImproperlyConfigured
 from django.test import SimpleTestCase, override_settings
 
 from .checks import development_security_warning, production_security_check
-from .settings import database_config_from_env
+from .settings import database_config_from_env, k8s_cache_config_from_env
 
 
 class DatabaseConfigTests(SimpleTestCase):
@@ -36,6 +36,44 @@ class DatabaseConfigTests(SimpleTestCase):
 	def test_non_sqlite_requires_database_name(self):
 		with self.assertRaises(ImproperlyConfigured):
 			database_config_from_env({'DB_ENGINE': 'postgres'}, '/app')
+
+
+class K8sCacheConfigTests(SimpleTestCase):
+	def test_default_cache_is_persistent_file_cache(self):
+		timeout, caches = k8s_cache_config_from_env({}, '/app')
+		default_cache = caches['default']
+
+		self.assertEqual(timeout, 86400)
+		self.assertEqual(
+			default_cache['BACKEND'],
+			'django.core.cache.backends.filebased.FileBasedCache',
+		)
+		self.assertEqual(default_cache['LOCATION'], '/app/.cache/k8s')
+		self.assertEqual(default_cache['TIMEOUT'], 86400)
+		self.assertEqual(default_cache['OPTIONS']['MAX_ENTRIES'], 1000)
+
+	def test_cache_environment_overrides_path_and_timeout(self):
+		timeout, caches = k8s_cache_config_from_env({
+			'K8S_CACHE_DIR': '/var/cache/pylinux/k8s',
+			'K8S_DETAIL_CACHE_TIMEOUT_SECONDS': '7200',
+		}, '/app')
+
+		self.assertEqual(timeout, 7200)
+		self.assertEqual(caches['default']['LOCATION'], '/var/cache/pylinux/k8s')
+		self.assertEqual(caches['default']['TIMEOUT'], 7200)
+
+	def test_relative_cache_path_is_resolved_from_base_dir(self):
+		_, caches = k8s_cache_config_from_env({'K8S_CACHE_DIR': 'runtime/k8s'}, '/app')
+
+		self.assertEqual(caches['default']['LOCATION'], '/app/runtime/k8s')
+
+	def test_cache_timeout_must_be_positive_integer(self):
+		for value in ('0', '-1', 'invalid'):
+			with self.subTest(value=value):
+				with self.assertRaises(ImproperlyConfigured):
+					k8s_cache_config_from_env({
+						'K8S_DETAIL_CACHE_TIMEOUT_SECONDS': value,
+					}, '/app')
 
 
 class ProductionChecksTests(SimpleTestCase):

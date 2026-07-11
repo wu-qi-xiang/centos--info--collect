@@ -1,10 +1,16 @@
 import csv
 import json
+import re
 from datetime import timedelta
+try:
+    from urllib import parse as urlparse
+except ImportError:
+    import urllib.parse as urlparse
 
 from django.conf import settings
+from django.core.paginator import Paginator
 from django.db import models
-from django.http import HttpResponse, HttpResponseForbidden, HttpResponseNotAllowed
+from django.http import Http404, HttpResponse, HttpResponseForbidden, HttpResponseNotAllowed
 from django.shortcuts import get_object_or_404, redirect, render
 from django.utils import timezone
 try:
@@ -31,6 +37,8 @@ from .forms import (
     FileDistributionForm,
     HostGroupForm,
     HostTagForm,
+    K8sClusterConnectionForm,
+    K8sClusterForm,
     NotificationChannelForm,
     ServiceOperationForm,
 )
@@ -52,6 +60,7 @@ from .models import (
     FileDistribution,
     HostGroup,
     HostTag,
+    K8sCluster,
     MetricSample,
     NotificationChannel,
     NotificationLog,
@@ -80,8 +89,12 @@ from .services import (
     visible_hosts_for_request,
     service_command,
     latest_metric_map,
+    clear_k8s_detail_cache,
+    load_cached_k8s_cluster_detail,
+    load_cached_k8s_node_detail,
     notify_approval,
     send_notification_channel,
+    test_k8s_cluster_connection,
 )
 
 
@@ -95,6 +108,117 @@ MODULE_ALERT = DevOpsModulePermission.MODULE_ALERT
 MODULE_METRIC = DevOpsModulePermission.MODULE_METRIC
 MODULE_SECURITY = DevOpsModulePermission.MODULE_SECURITY
 MODULE_AUDIT = DevOpsModulePermission.MODULE_AUDIT
+MODULE_CLUSTER = DevOpsModulePermission.MODULE_CLUSTER
+
+K8S_WORKLOAD_RESOURCE_TABS = (
+    ('deployments', '无状态负载'),
+    ('statefulsets', '有状态负载'),
+    ('daemonsets', '守护进程'),
+    ('jobs', '普通服务'),
+    ('cronjobs', '定时服务'),
+)
+K8S_SERVICE_RESOURCE_TABS = (
+    ('services', 'Service'),
+    ('ingresses', 'Ingress'),
+)
+K8S_STORAGE_RESOURCE_TABS = (
+    ('persistentvolumeclaims', 'PVC'),
+    ('persistentvolumes', 'PV'),
+    ('storageclasses', 'SC'),
+)
+K8S_CONFIG_RESOURCE_TABS = (
+    ('configmaps', 'ConfigMap'),
+    ('secrets', 'Secret'),
+)
+K8S_GENERIC_RESOURCE_TYPES = (
+    ('overview', '概览'),
+    ('namespaces', 'Namespace'),
+    ('nodes', 'Node'),
+    ('services', '服务'),
+    ('ingresses', 'Ingress'),
+    ('persistentvolumeclaims', '存储'),
+    ('persistentvolumes', 'PV'),
+    ('storageclasses', 'SC'),
+    ('configmaps', '配置'),
+    ('secrets', 'Secret'),
+)
+K8S_DETAIL_RESOURCE_TYPES = K8S_WORKLOAD_RESOURCE_TABS + K8S_GENERIC_RESOURCE_TYPES
+K8S_NAMESPACED_RESOURCE_KEYS = tuple(
+    key for key, _label in (
+        K8S_WORKLOAD_RESOURCE_TABS
+        + K8S_SERVICE_RESOURCE_TABS
+        + (('persistentvolumeclaims', 'PVC'),)
+        + K8S_CONFIG_RESOURCE_TABS
+    )
+)
+K8S_CLUSTER_SCOPED_RESOURCE_KEYS = (
+    'overview', 'namespaces', 'nodes', 'persistentvolumes', 'storageclasses',
+)
+K8S_OVERVIEW_RESOURCE_COUNTS = (
+    ('nodes', 'Node'),
+    ('pods', 'Pod'),
+    ('deployments', 'Deployment'),
+    ('statefulsets', 'StatefulSet'),
+    ('daemonsets', 'DaemonSet'),
+    ('services', 'Service'),
+    ('ingresses', 'Ingress'),
+    ('persistentvolumeclaims', 'PVC'),
+    ('persistentvolumes', 'PV'),
+    ('storageclasses', 'StorageClass'),
+    ('configmaps', 'ConfigMap'),
+    ('secrets', 'Secret'),
+)
+K8S_SAFE_VIEW_FIELDS = (
+    'kind', 'name', 'status', 'replicas', 'namespace', 'created_at', 'detail',
+    'labels', 'annotations', 'ip_address',
+)
+K8S_OFFLINE_DETAIL_MESSAGE = '集群当前处于离线状态，请测试连接或强制刷新后重试。'
+
+
+def clean_k8s_namespace(value, fallback='default'):
+    fallback = (fallback or 'default').strip().lower()
+    namespace = (value or '').strip().lower()
+    if namespace and len(namespace) <= 63 and re.match(r'^[a-z0-9]([-a-z0-9]*[a-z0-9])?$', namespace):
+        return namespace
+    return fallback if re.match(r'^[a-z0-9]([-a-z0-9]*[a-z0-9])?$', fallback) else 'default'
+
+
+def clean_k8s_created_at(value):
+    return re.sub(r'\s+GMT[+-]\d{4}$', '', str(value or '-')).strip() or '-'
+
+
+def safe_k8s_view_resource(resource):
+    safe = {key: resource.get(key) for key in K8S_SAFE_VIEW_FIELDS if key in resource}
+    if 'created_at' in safe:
+        safe['created_at'] = clean_k8s_created_at(safe['created_at'])
+    return safe
+
+
+def attach_k8s_matched_resources(workloads, resource_matches, fallback_pods, fallback_services):
+    rows = []
+    for workload in workloads or []:
+        row = safe_k8s_view_resource(workload)
+        matched_pods = []
+        matched_services = []
+        for group in resource_matches or []:
+            primary = group.get('primary') or {}
+            if primary.get('name') == row.get('name') and primary.get('namespace') == row.get('namespace'):
+                matched_pods = (group.get('resources') or {}).get('pods', []) or []
+                matched_services = (group.get('resources') or {}).get('services', []) or []
+                break
+        if not matched_pods:
+            prefix = (row.get('name') or '') + '-'
+            matched_pods = [pod for pod in fallback_pods or [] if (pod.get('name') or '').startswith(prefix) and pod.get('namespace') == row.get('namespace')]
+        if not matched_services:
+            name = row.get('name') or ''
+            matched_services = [service for service in fallback_services or [] if ((service.get('name') or '') == name or (service.get('name') or '').startswith(name + '-')) and service.get('namespace') == row.get('namespace')]
+        else:
+            name = row.get('name') or ''
+            matched_services = [service for service in matched_services if ((service.get('name') or '') == name or (service.get('name') or '').startswith(name + '-')) and service.get('namespace') == row.get('namespace')]
+        row['matched_pods'] = [safe_k8s_view_resource(pod) for pod in matched_pods]
+        row['matched_services'] = [safe_k8s_view_resource(service) for service in matched_services]
+        rows.append(row)
+    return rows
 
 
 def require_devops_role(request, minimum_role, module=''):
@@ -1014,6 +1138,433 @@ def notification_test(request, id):
     )
     audit(request, '测试通知渠道', 'NotificationChannel', channel.id, channel.name)
     return redirect('devops:notification_channels')
+
+
+def cluster_count_context(request):
+    clusters = K8sCluster.objects.all()
+    return {
+        'cluster_count': clusters.count(),
+        'online_count': clusters.filter(status=K8sCluster.STATUS_ONLINE).count(),
+        'offline_count': clusters.filter(status=K8sCluster.STATUS_OFFLINE).count(),
+        'unknown_count': clusters.filter(status=K8sCluster.STATUS_UNKNOWN).count(),
+        'can_manage': has_role(request, DevOpsRole.ROLE_ADMIN, MODULE_CLUSTER),
+    }
+
+
+def cluster_list_context(request, form=None, editing_cluster=None):
+    context = cluster_count_context(request)
+    context.update({
+        'clusters': K8sCluster.objects.all(),
+        'form': form,
+        'editing_cluster': editing_cluster,
+    })
+    return context
+
+
+def _save_k8s_cluster_connection(request, form):
+    cluster = form.save(commit=False)
+    cluster.created_by = request.session.get('user_name', '')
+    cluster.save()
+    audit(request, '创建K8s集群', 'K8sCluster', cluster.id, '名称=%s' % cluster.name)
+    return cluster
+
+
+@session_login_required
+def clusters(request):
+    denied = require_devops_role(request, DevOpsRole.ROLE_VIEWER, MODULE_CLUSTER)
+    if denied:
+        return denied
+    if request.method != 'GET':
+        return HttpResponseNotAllowed(['GET'])
+    return render(request, 'devops/cluster_management.html', cluster_count_context(request))
+
+
+@session_login_required
+def cluster_connect(request):
+    denied = require_devops_role(request, DevOpsRole.ROLE_ADMIN, MODULE_CLUSTER)
+    if denied:
+        return denied
+    if request.method != 'GET':
+        return HttpResponseNotAllowed(['GET'])
+    return render(request, 'devops/cluster_connection.html', {
+        'form': K8sClusterConnectionForm(),
+        'can_manage': True,
+    })
+
+
+@session_login_required
+def cluster_list(request):
+    denied = require_devops_role(request, DevOpsRole.ROLE_VIEWER, MODULE_CLUSTER)
+    if denied:
+        return denied
+    if request.method != 'GET':
+        return HttpResponseNotAllowed(['GET'])
+    return render(request, 'devops/cluster_list.html', cluster_list_context(request))
+
+
+@session_login_required
+def cluster_create(request):
+    denied = require_devops_role(request, DevOpsRole.ROLE_ADMIN, MODULE_CLUSTER)
+    if denied:
+        return denied
+    if request.method != 'POST':
+        return HttpResponseNotAllowed(['POST'])
+    form = K8sClusterConnectionForm(request.POST, request.FILES)
+    if not form.is_valid():
+        return render(request, 'devops/cluster_connection.html', {
+            'form': form,
+            'can_manage': True,
+        }, status=400)
+    _save_k8s_cluster_connection(request, form)
+    return redirect('devops:cluster_list')
+
+
+@session_login_required
+def cluster_connect_test(request):
+    denied = require_devops_role(request, DevOpsRole.ROLE_ADMIN, MODULE_CLUSTER)
+    if denied:
+        return denied
+    if request.method != 'POST':
+        return HttpResponseNotAllowed(['POST'])
+    form = K8sClusterConnectionForm(request.POST, request.FILES)
+    if not form.is_valid():
+        return render(request, 'devops/cluster_connection.html', {
+            'form': form,
+            'can_manage': True,
+        }, status=400)
+    cluster = _save_k8s_cluster_connection(request, form)
+    success, _message = test_k8s_cluster_connection(cluster)
+    audit(
+        request,
+        '测试K8s集群连接',
+        'K8sCluster',
+        cluster.id,
+        '名称=%s, 状态=%s' % (cluster.name, 'online' if success else 'offline'),
+    )
+    return redirect('devops:cluster_list')
+
+
+@session_login_required
+def cluster_update(request, id):
+    denied = require_devops_role(request, DevOpsRole.ROLE_ADMIN, MODULE_CLUSTER)
+    if denied:
+        return denied
+    if request.method != 'POST':
+        return HttpResponseNotAllowed(['POST'])
+    cluster = get_object_or_404(K8sCluster, id=id)
+    old_kubeconfig = cluster.decrypted_kubeconfig
+    form = K8sClusterForm(request.POST, instance=cluster)
+    if not form.is_valid():
+        return render(
+            request,
+            'devops/cluster_list.html',
+            cluster_list_context(request, form, editing_cluster=cluster),
+            status=400,
+        )
+    cluster = form.save()
+    clear_k8s_detail_cache(cluster.id, old_kubeconfig)
+    clear_k8s_detail_cache(cluster.id, cluster.decrypted_kubeconfig)
+    audit(request, '更新K8s集群', 'K8sCluster', cluster.id, '名称=%s' % cluster.name)
+    return redirect('devops:cluster_list')
+
+
+@session_login_required
+def cluster_delete(request, id):
+    denied = require_devops_role(request, DevOpsRole.ROLE_ADMIN, MODULE_CLUSTER)
+    if denied:
+        return denied
+    if request.method != 'POST':
+        return HttpResponseNotAllowed(['POST'])
+    cluster = get_object_or_404(K8sCluster, id=id)
+    cluster_id = cluster.id
+    cluster_name = cluster.name
+    clear_k8s_detail_cache(cluster.id, cluster.decrypted_kubeconfig)
+    cluster.delete()
+    audit(request, '删除K8s集群', 'K8sCluster', cluster_id, '名称=%s' % cluster_name)
+    return redirect('devops:cluster_list')
+
+
+@session_login_required
+def cluster_test(request, id):
+    denied = require_devops_role(request, DevOpsRole.ROLE_ADMIN, MODULE_CLUSTER)
+    if denied:
+        return denied
+    if request.method != 'POST':
+        return HttpResponseNotAllowed(['POST'])
+    cluster = get_object_or_404(K8sCluster, id=id)
+    success, _message = test_k8s_cluster_connection(cluster)
+    audit(
+        request,
+        '测试K8s集群连接',
+        'K8sCluster',
+        cluster.id,
+        '名称=%s, 状态=%s' % (cluster.name, 'online' if success else 'offline'),
+    )
+    return redirect('devops:cluster_list')
+
+
+@session_login_required
+def k8s_cluster_detail(request, id):
+    denied = require_devops_role(request, DevOpsRole.ROLE_VIEWER, MODULE_CLUSTER)
+    if denied:
+        return denied
+    cluster = get_object_or_404(K8sCluster, id=id)
+    active_resource = (request.GET.get('resource') or 'deployments').strip().lower()
+    valid_resources = [key for key, _label in K8S_DETAIL_RESOURCE_TYPES]
+    if active_resource not in valid_resources:
+        active_resource = 'deployments'
+    workload_resource_keys = [key for key, _label in K8S_WORKLOAD_RESOURCE_TABS]
+    is_workload_resource = active_resource in workload_resource_keys
+    is_overview_resource = active_resource == 'overview'
+    is_namespace_resource = active_resource == 'namespaces'
+    show_namespace_switcher = active_resource in K8S_NAMESPACED_RESOURCE_KEYS
+    resource_group = ''
+    secondary_tab_definitions = ()
+    for group_key, group_tabs in (
+        ('service', K8S_SERVICE_RESOURCE_TABS),
+        ('storage', K8S_STORAGE_RESOURCE_TABS),
+        ('config', K8S_CONFIG_RESOURCE_TABS),
+    ):
+        if active_resource in [key for key, _label in group_tabs]:
+            resource_group = group_key
+            secondary_tab_definitions = group_tabs
+            break
+    selected_namespace = clean_k8s_namespace(request.GET.get('namespace'), cluster.default_namespace)
+    if active_resource in K8S_CLUSTER_SCOPED_RESOURCE_KEYS:
+        selected_namespace = clean_k8s_namespace('', cluster.default_namespace)
+    query = (request.GET.get('q') or '').strip()[:100]
+    refresh_requested = request.GET.get('refresh') == '1'
+    can_refresh = has_role(request, DevOpsRole.ROLE_ADMIN, MODULE_CLUSTER)
+    if refresh_requested and not can_refresh:
+        return HttpResponseForbidden('只有 K8s 集群管理员可以强制刷新数据')
+
+    if cluster.status == K8sCluster.STATUS_OFFLINE and not refresh_requested:
+        detail = {
+            'overview': {
+                'ok': False,
+                'message': K8S_OFFLINE_DETAIL_MESSAGE,
+                'version': '',
+                'namespace': selected_namespace,
+                'resources': {},
+                'resource_errors': {},
+                'resource_matches': [],
+            },
+            'namespace_result': {
+                'ok': False,
+                'message': K8S_OFFLINE_DETAIL_MESSAGE,
+                'namespaces': [{'name': selected_namespace, 'status': 'Unknown'}],
+            },
+            'from_cache': False,
+        }
+    else:
+        detail = load_cached_k8s_cluster_detail(
+            cluster.id,
+            cluster.decrypted_kubeconfig,
+            selected_namespace,
+            refresh=refresh_requested,
+        )
+    overview = detail.get('overview') or {}
+    namespace_result = detail.get('namespace_result') or {}
+    all_resources = overview.get('resources') or {}
+    if is_namespace_resource:
+        resources = [
+            {
+                'kind': 'Namespace',
+                'name': item.get('name'),
+                'status': item.get('status') or '-',
+                'replicas': '-',
+                'namespace': '-',
+                'created_at': item.get('created_at') or '-',
+                'detail': '集群级资源',
+                'labels': item.get('labels') or '-',
+            }
+            for item in namespace_result.get('namespaces', []) or []
+        ]
+    else:
+        resources = all_resources.get(active_resource, []) or []
+    if is_workload_resource:
+        resources = attach_k8s_matched_resources(
+            resources,
+            overview.get('resource_matches') or [],
+            all_resources.get('pods', []) or [],
+            all_resources.get('services', []) or [],
+        )
+    else:
+        resources = [safe_k8s_view_resource(item) for item in resources]
+    if query:
+        lowered = query.lower()
+        filtered = []
+        for item in resources:
+            search_values = [item.get(key) for key in K8S_SAFE_VIEW_FIELDS]
+            if is_workload_resource:
+                for pod in item.get('matched_pods', []) or []:
+                    search_values.extend(pod.get(key) for key in K8S_SAFE_VIEW_FIELDS)
+                for service in item.get('matched_services', []) or []:
+                    search_values.extend(service.get(key) for key in K8S_SAFE_VIEW_FIELDS)
+            if lowered in ' '.join(str(value or '') for value in search_values).lower():
+                filtered.append(item)
+        resources = filtered
+
+    namespace_options = []
+    for item in namespace_result.get('namespaces', []) or []:
+        name = (item.get('name') or '').strip().lower()
+        if (
+            name
+            and len(name) <= 63
+            and re.match(r'^[a-z0-9]([-a-z0-9]*[a-z0-9])?$', name)
+            and name not in namespace_options
+        ):
+            namespace_options.append(name)
+    if selected_namespace not in namespace_options:
+        namespace_options.insert(0, selected_namespace)
+
+    overview_resource_counts = [
+        {'key': key, 'label': label, 'count': len(all_resources.get(key, []) or [])}
+        for key, label in K8S_OVERVIEW_RESOURCE_COUNTS
+    ]
+    cluster_summary = dict(overview.get('cluster_capacity') or {})
+    cluster_summary.update({
+        'namespace_count': len(namespace_options),
+        'resource_count': sum(item['count'] for item in overview_resource_counts),
+        'version': overview.get('version') or '-',
+        'selected_namespace': selected_namespace,
+    })
+
+    paginator = Paginator(resources, 20)
+    resource_page = paginator.get_page(request.GET.get('page'))
+    resources = list(resource_page.object_list)
+
+    resource_tabs = []
+    active_tab_definitions = K8S_WORKLOAD_RESOURCE_TABS if is_workload_resource else secondary_tab_definitions
+    for key, label in active_tab_definitions:
+        resource_tabs.append({
+            'key': key,
+            'label': label,
+            'count': len(all_resources.get(key, []) or []),
+            'active': key == active_resource,
+            'namespace': selected_namespace,
+            'query': query,
+        })
+    refresh_params = {'resource': active_resource, 'namespace': selected_namespace, 'refresh': '1'}
+    if query:
+        refresh_params['q'] = query
+    pagination_params = {'resource': active_resource, 'namespace': selected_namespace}
+    if query:
+        pagination_params['q'] = query
+    load_message = (
+        namespace_result.get('message') if is_namespace_resource
+        else overview.get('message') or namespace_result.get('message')
+    ) or ''
+    from_cache = bool(detail.get('from_cache'))
+    return render(request, 'devops/k8s_cluster_detail.html', {
+        'cluster': cluster,
+        'overview': overview,
+        'resource_tabs': resource_tabs,
+        'active_resource': active_resource,
+        'active_resource_label': dict(K8S_DETAIL_RESOURCE_TYPES)[active_resource],
+        'is_workload_resource': is_workload_resource,
+        'is_overview_resource': is_overview_resource,
+        'is_namespace_resource': is_namespace_resource,
+        'show_namespace_switcher': show_namespace_switcher,
+        'resource_group': resource_group,
+        'show_resource_tabs': bool(active_tab_definitions),
+        'workload_resource_keys': workload_resource_keys,
+        'cluster_summary': cluster_summary,
+        'overview_resource_counts': overview_resource_counts,
+        'resources': resources,
+        'workloads': resources,
+        'resource_page': resource_page,
+        'pagination_query': urlparse.urlencode(pagination_params),
+        'query': query,
+        'selected_namespace': selected_namespace,
+        'namespace_options': namespace_options,
+        'load_message': load_message,
+        'from_cache': from_cache,
+        'k8s_detail_from_cache': from_cache,
+        'refresh_query': urlparse.urlencode(refresh_params),
+        'resource_error': (
+            namespace_result.get('message', '') if is_namespace_resource and not namespace_result.get('ok')
+            else (overview.get('resource_errors') or {}).get(active_resource, '')
+        ),
+        'can_refresh': can_refresh,
+    })
+
+
+@session_login_required
+def k8s_node_detail(request, id, node_name):
+    denied = require_devops_role(request, DevOpsRole.ROLE_VIEWER, MODULE_CLUSTER)
+    if denied:
+        return denied
+    if (
+        not node_name
+        or len(node_name) > 253
+        or not re.match(r'^[a-z0-9]([-a-z0-9.]*[a-z0-9])?$', node_name)
+    ):
+        raise Http404('Node 不存在')
+    cluster = get_object_or_404(K8sCluster, id=id)
+    refresh_requested = request.GET.get('refresh') == '1'
+    can_refresh = has_role(request, DevOpsRole.ROLE_ADMIN, MODULE_CLUSTER)
+    if refresh_requested and not can_refresh:
+        return HttpResponseForbidden('只有 K8s 集群管理员可以强制刷新数据')
+
+    if cluster.status == K8sCluster.STATUS_OFFLINE and not refresh_requested:
+        detail = {
+            'ok': False,
+            'message': K8S_OFFLINE_DETAIL_MESSAGE,
+            'metrics_message': '',
+            'node': {'name': node_name},
+            'summary': {'pod_total': 0},
+            'pods': [],
+            'from_cache': False,
+        }
+    else:
+        detail = load_cached_k8s_node_detail(
+            cluster.id,
+            cluster.decrypted_kubeconfig,
+            node_name,
+            refresh=refresh_requested,
+        )
+
+    query = (request.GET.get('q') or '').strip()[:100]
+    node = dict(detail.get('node') or {'name': node_name})
+    node['created_at'] = clean_k8s_created_at(node.get('created_at'))
+    pods = []
+    for item in detail.get('pods') or []:
+        pod = dict(item)
+        pod['created_at'] = clean_k8s_created_at(pod.get('created_at'))
+        pods.append(pod)
+    if query:
+        lowered = query.lower()
+        pods = [
+            item for item in pods
+            if lowered in ' '.join(str(item.get(key) or '') for key in (
+                'name', 'namespace', 'status', 'pod_ip', 'cpu_request', 'cpu_limit',
+                'memory_request', 'memory_limit',
+            )).lower()
+        ]
+    pod_page = Paginator(pods, 20).get_page(request.GET.get('page'))
+    pagination_params = {}
+    if query:
+        pagination_params['q'] = query
+    refresh_params = {'refresh': '1'}
+    if query:
+        refresh_params['q'] = query
+    return render(request, 'devops/k8s_node_detail.html', {
+        'cluster': cluster,
+        'node_name': node_name,
+        'node': node,
+        'summary': detail.get('summary') or {'pod_total': 0},
+        'pod_page': pod_page,
+        'pods': list(pod_page.object_list),
+        'query': query,
+        'load_message': detail.get('message') or '',
+        'metrics_message': detail.get('metrics_message') or '',
+        'detail_ok': bool(detail.get('ok')),
+        'from_cache': bool(detail.get('from_cache')),
+        'can_refresh': can_refresh,
+        'pagination_query': urlparse.urlencode(pagination_params),
+        'refresh_query': urlparse.urlencode(refresh_params),
+    })
 
 
 @session_login_required

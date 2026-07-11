@@ -54,6 +54,15 @@ Use this when changing `PyLinux/settings.py`, `PyLinux/checks.py`, `.env.example
 
 `DEVOPS_SYNC_TASKS` is not env-driven; it is true during `manage.py test` via `sys.argv`.
 
+## K8s Detail Cache
+
+| Env var | Default | Notes |
+|---|---:|---|
+| `K8S_CACHE_DIR` | `<BASE_DIR>/.cache/k8s` | Local file-cache directory. Relative paths resolve from `BASE_DIR`. It must be writable; use a persistent mount when cache data must survive container replacement. |
+| `K8S_DETAIL_CACHE_TIMEOUT_SECONDS` | `86400` | K8s detail cache lifetime in seconds. Must be a positive integer. |
+
+The cache contains only safe resource summaries used by the cluster detail page. It must not contain kubeconfig content, access tokens, client certificates, or raw Kubernetes Secret values. A user-requested refresh bypasses the cached result and replaces it with a fresh K8s API query.
+
 ## Gunicorn Deployment Vars
 
 These appear in `.env.example` for deployment scripts/configs, not in `PyLinux/settings.py`:
@@ -76,4 +85,3 @@ When adding or changing an env var:
 4. Update `README.md` or deployment docs.
 5. Do not include real secrets.
 6. Run `.venv/bin/python manage.py check`.
-

@@ -1,6 +1,7 @@
 from django import forms
 import re
 import posixpath
+import yaml
 try:
     from urllib import parse as urlparse
 except ImportError:
@@ -21,6 +22,7 @@ from .models import (
     FileDistribution,
     HostGroup,
     HostTag,
+    K8sCluster,
     NotificationChannel,
 )
 
@@ -252,6 +254,179 @@ class NotificationChannelForm(forms.ModelForm):
         if self.instance and self.instance.pk:
             return self.instance.secret
         return ''
+
+
+class K8sClusterForm(forms.ModelForm):
+    kubeconfig = forms.CharField(
+        label='Kubeconfig',
+        required=False,
+        strip=False,
+        widget=forms.Textarea(attrs={
+            'class': 'form-control',
+            'rows': 8,
+            'placeholder': '粘贴 kubeconfig；编辑时留空表示保持原配置',
+            'autocomplete': 'off',
+            'spellcheck': 'false',
+        }),
+    )
+
+    class Meta:
+        model = K8sCluster
+        fields = ('name', 'api_server', 'default_namespace', 'kubeconfig')
+        widgets = {
+            'name': forms.TextInput(attrs={'class': 'form-control', 'autocomplete': 'off'}),
+            'api_server': forms.URLInput(attrs={'class': 'form-control', 'placeholder': 'https://kubernetes.example.com:6443'}),
+            'default_namespace': forms.TextInput(attrs={'class': 'form-control', 'placeholder': 'default'}),
+        }
+
+    def clean_name(self):
+        return (self.cleaned_data.get('name') or '').strip()
+
+    def clean_api_server(self):
+        return (self.cleaned_data.get('api_server') or '').strip()
+
+    def clean_default_namespace(self):
+        return (self.cleaned_data.get('default_namespace') or '').strip() or 'default'
+
+    def clean_kubeconfig(self):
+        value = self.cleaned_data.get('kubeconfig')
+        if value and value.strip():
+            return value
+        if self.instance and self.instance.pk:
+            return self.instance.kubeconfig
+        raise forms.ValidationError('Kubeconfig 不能为空')
+
+
+class K8sClusterConnectionForm(forms.ModelForm):
+    MAX_KUBECONFIG_SIZE = 1024 * 1024
+    NAMESPACE_PATTERN = re.compile(r'^[a-z0-9]([-a-z0-9]*[a-z0-9])?$')
+
+    kubeconfig_file = forms.FileField(
+        label='Kubeconfig',
+        required=True,
+        widget=forms.ClearableFileInput(attrs={
+            'class': 'form-control',
+        }),
+    )
+
+    class Meta:
+        model = K8sCluster
+        fields = ('name',)
+        widgets = {
+            'name': forms.TextInput(attrs={'class': 'form-control', 'autocomplete': 'off'}),
+        }
+
+    def __init__(self, *args, **kwargs):
+        super(K8sClusterConnectionForm, self).__init__(*args, **kwargs)
+        self._parsed_kubeconfig = None
+
+    def clean_name(self):
+        return (self.cleaned_data.get('name') or '').strip()
+
+    def clean_kubeconfig_file(self):
+        uploaded = self.cleaned_data.get('kubeconfig_file')
+        if not uploaded:
+            return uploaded
+        if uploaded.size > self.MAX_KUBECONFIG_SIZE:
+            raise forms.ValidationError('Kubeconfig 文件不能超过 1 MiB')
+
+        try:
+            content = uploaded.read().decode('utf-8-sig')
+        except UnicodeDecodeError:
+            raise forms.ValidationError('Kubeconfig 文件必须使用 UTF-8 编码')
+        finally:
+            uploaded.seek(0)
+
+        try:
+            config = yaml.safe_load(content)
+        except yaml.YAMLError:
+            raise forms.ValidationError('Kubeconfig 文件格式无效')
+        if not isinstance(config, dict):
+            raise forms.ValidationError('Kubeconfig 必须是有效的 YAML 映射')
+
+        contexts = config.get('contexts')
+        clusters = config.get('clusters')
+        if not isinstance(contexts, list) or not contexts:
+            raise forms.ValidationError('Kubeconfig 缺少 contexts 配置')
+        if not isinstance(clusters, list) or not clusters:
+            raise forms.ValidationError('Kubeconfig 缺少 clusters 配置')
+
+        raw_context_name = config.get('current-context')
+        if raw_context_name is not None and not isinstance(raw_context_name, str):
+            raise forms.ValidationError('Kubeconfig 无法解析 current-context')
+        context_name = self._clean_text(raw_context_name)
+        if not context_name:
+            first_context = contexts[0] if isinstance(contexts[0], dict) else {}
+            context_name = self._clean_text(first_context.get('name'))
+        context_entry = self._find_named_entry(contexts, context_name)
+        context = context_entry.get('context') if context_entry else None
+        if not isinstance(context, dict):
+            raise forms.ValidationError('Kubeconfig 无法解析 current-context')
+
+        cluster_name = self._clean_text(context.get('cluster'))
+        cluster_entry = self._find_named_entry(clusters, cluster_name)
+        cluster_config = cluster_entry.get('cluster') if cluster_entry else None
+        if not isinstance(cluster_config, dict):
+            raise forms.ValidationError('Kubeconfig 中 current-context 引用的集群不存在')
+
+        api_server = self._clean_text(cluster_config.get('server'))
+        if not self._valid_api_server(api_server):
+            raise forms.ValidationError('Kubeconfig 中的 API Server 必须是有效的 http 或 https 地址')
+
+        namespace = self._clean_text(context.get('namespace')) or 'default'
+        namespace = namespace.lower()
+        if len(namespace) > 63 or not self.NAMESPACE_PATTERN.match(namespace):
+            raise forms.ValidationError('Kubeconfig 中的 Namespace 格式无效')
+
+        self._parsed_kubeconfig = {
+            'api_server': api_server,
+            'default_namespace': namespace,
+            'kubeconfig': content,
+        }
+        return uploaded
+
+    @staticmethod
+    def _find_named_entry(entries, name):
+        if not name:
+            return None
+        for entry in entries:
+            if isinstance(entry, dict) and entry.get('name') == name:
+                return entry
+        return None
+
+    @staticmethod
+    def _clean_text(value):
+        return value.strip() if isinstance(value, str) else ''
+
+    @staticmethod
+    def _valid_api_server(value):
+        try:
+            parsed = urlparse.urlparse(value)
+            parsed.port
+        except (TypeError, ValueError):
+            return False
+        return bool(
+            parsed.scheme in ('http', 'https')
+            and len(value) <= 300
+            and not any(character.isspace() for character in value)
+            and parsed.netloc
+            and parsed.hostname
+            and not parsed.username
+            and not parsed.password
+            and not parsed.query
+            and not parsed.fragment
+        )
+
+    def save(self, commit=True):
+        cluster = super(K8sClusterConnectionForm, self).save(commit=False)
+        if not self._parsed_kubeconfig:
+            raise ValueError('Kubeconfig must be validated before saving')
+        cluster.api_server = self._parsed_kubeconfig['api_server']
+        cluster.default_namespace = self._parsed_kubeconfig['default_namespace']
+        cluster.kubeconfig = self._parsed_kubeconfig['kubeconfig']
+        if commit:
+            cluster.save()
+        return cluster
 
 
 def validate_remote_path_value(remote_path):

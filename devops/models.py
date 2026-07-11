@@ -39,6 +39,7 @@ class DevOpsModulePermission(models.Model):
     MODULE_METRIC = 'metric'
     MODULE_SECURITY = 'security'
     MODULE_AUDIT = 'audit'
+    MODULE_CLUSTER = 'cluster'
 
     MODULE_CHOICES = (
         (MODULE_COMMAND, '命令执行'),
@@ -51,6 +52,7 @@ class DevOpsModulePermission(models.Model):
         (MODULE_METRIC, '监控历史'),
         (MODULE_SECURITY, '安全策略'),
         (MODULE_AUDIT, '审计日志'),
+        (MODULE_CLUSTER, 'K8s集群'),
     )
 
     user = models.ForeignKey(User, on_delete=models.CASCADE)
@@ -145,6 +147,44 @@ class AuditLog(models.Model):
     class Meta:
         db_table = "devops_audit_log"
         ordering = ['-created_at']
+
+
+class K8sCluster(models.Model):
+    STATUS_UNKNOWN = 'unknown'
+    STATUS_ONLINE = 'online'
+    STATUS_OFFLINE = 'offline'
+
+    STATUS_CHOICES = (
+        (STATUS_UNKNOWN, '未检测'),
+        (STATUS_ONLINE, '在线'),
+        (STATUS_OFFLINE, '离线'),
+    )
+
+    name = models.CharField(max_length=100, unique=True)
+    api_server = models.CharField(max_length=300, blank=True)
+    default_namespace = models.CharField(max_length=100, default='default')
+    kubeconfig = models.TextField()
+    status = models.CharField(max_length=20, choices=STATUS_CHOICES, default=STATUS_UNKNOWN)
+    last_error = models.CharField(max_length=300, blank=True)
+    created_by = models.CharField(max_length=100, blank=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+    last_checked_at = models.DateTimeField(null=True, blank=True)
+
+    class Meta:
+        db_table = "devops_k8s_cluster"
+        ordering = ['name']
+
+    def __str__(self):
+        return self.name
+
+    @property
+    def decrypted_kubeconfig(self):
+        return decrypt_text(self.kubeconfig)
+
+    def save(self, *args, **kwargs):
+        self.kubeconfig = encrypt_text(self.kubeconfig)
+        super(K8sCluster, self).save(*args, **kwargs)
 
 
 class CommandExecution(models.Model):

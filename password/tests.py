@@ -34,6 +34,36 @@ class PasswordRevealTests(TestCase):
 		self.assertNotContains(response, 'secret-password')
 		self.assertContains(response, '••••••••')
 
+	def test_credential_management_links_to_credential_list(self):
+		response = self.client.get(reverse('password:credential_management'))
+
+		self.assertEqual(response.status_code, 200)
+		self.assertContains(response, '凭据管理')
+		self.assertContains(response, '凭据列表')
+		self.assertContains(response, reverse('password:password_manage'))
+
+	def test_credential_management_rejects_non_get_requests(self):
+		response = self.client.post(reverse('password:credential_management'))
+
+		self.assertEqual(response.status_code, 405)
+
+	def test_credential_management_requires_login(self):
+		session = self.client.session
+		session.flush()
+
+		response = self.client.get(reverse('password:credential_management'))
+
+		self.assertEqual(response.status_code, 302)
+		self.assertIn(reverse('userprofile:login'), response.url)
+
+	def test_password_list_uses_credential_list_wording(self):
+		response = self.client.get(reverse('password:password_manage'))
+
+		self.assertEqual(response.status_code, 200)
+		self.assertContains(response, '凭据列表')
+		self.assertContains(response, '新增凭据')
+		self.assertNotContains(response, '密码管理')
+
 	def test_password_list_does_not_render_unimplemented_placeholder_actions(self):
 		response = self.client.get(reverse('password:password_manage'))
 

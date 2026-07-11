@@ -409,7 +409,7 @@ def linux_detail(request):
     return render_vue_page(
         request,
         'host-list',
-        '服务器列表',
+        '资产列表',
         _host_list_payload(request, pages, sum, keyword, actions, '管理授权范围内服务器'),
         content,
     )

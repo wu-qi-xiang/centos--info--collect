@@ -10,20 +10,34 @@
         <div class="sidebar-section">
             <div class="sidebar-label">导航</div>
             <ul class="navbar-nav sidebar-nav">
-                <li class="nav-item">
-                    <a class="nav-link" href="{% url 'linux' %}" data-tooltip="查看本地Linux系统信息">
-                        <i class="fas fa-desktop"></i><span>本地Linux</span>
+                <li class="nav-item sidebar-nav-group">
+                    <a class="nav-link sidebar-parent-link" href="{% url 'asset_management' %}" data-tooltip="统一管理本地与远程资产">
+                        <i class="fas fa-boxes-stacked"></i><span>资产管理</span>
                     </a>
+                    <ul class="sidebar-subnav">
+                        <li>
+                            <a class="nav-link sidebar-subnav-link" href="{% url 'linux' %}" data-tooltip="查看本地资产系统信息">
+                                <i class="fas fa-desktop"></i><span>本地资产</span>
+                            </a>
+                        </li>
+                        <li>
+                            <a class="nav-link sidebar-subnav-link" href="{% url 'linux_detail' %}" data-tooltip="管理所有 Linux 资产">
+                                <i class="fas fa-list"></i><span>资产列表</span>
+                            </a>
+                        </li>
+                    </ul>
                 </li>
-                <li class="nav-item">
-                    <a class="nav-link" href="{% url 'linux_detail' %}" data-tooltip="管理所有Linux服务器">
-                        <i class="fas fa-list"></i><span>服务器列表</span>
+                <li class="nav-item sidebar-nav-group">
+                    <a class="nav-link sidebar-parent-link" href="{% url 'password:credential_management' %}" data-tooltip="统一管理账号凭据">
+                        <i class="fas fa-key"></i><span>凭据管理</span>
                     </a>
-                </li>
-                <li class="nav-item">
-                    <a class="nav-link" href="{% url 'password:password_manage' %}" data-tooltip="管理服务器密码">
-                        <i class="fas fa-key"></i><span>密码管理</span>
-                    </a>
+                    <ul class="sidebar-subnav">
+                        <li>
+                            <a class="nav-link sidebar-subnav-link" href="{% url 'password:password_manage' %}" data-tooltip="查看和维护凭据">
+                                <i class="fas fa-list"></i><span>凭据列表</span>
+                            </a>
+                        </li>
+                    </ul>
                 </li>
                 <li class="nav-item">
                     <a class="nav-link" href="{% url 'monitor:monitor_index' %}" data-tooltip="配置监控告警">
@@ -34,6 +48,23 @@
                     <a class="nav-link" href="{% url 'devops:dashboard' %}" data-tooltip="DevOps自动化平台">
                         <i class="fas fa-tools"></i><span>DevOps</span>
                     </a>
+                </li>
+                <li class="nav-item sidebar-nav-group">
+                    <a class="nav-link sidebar-parent-link" href="{% url 'devops:clusters' %}" data-tooltip="统一管理 Kubernetes 集群">
+                        <i class="fas fa-cubes"></i><span>K8s集群管理</span>
+                    </a>
+                    <ul class="sidebar-subnav">
+                        <li>
+                            <a class="nav-link sidebar-subnav-link" href="{% url 'devops:cluster_connect' %}" data-tooltip="新增 Kubernetes 集群连接">
+                                <i class="fas fa-plug"></i><span>K8s集群连接</span>
+                            </a>
+                        </li>
+                        <li>
+                            <a class="nav-link sidebar-subnav-link" href="{% url 'devops:cluster_list' %}" data-tooltip="查看已保存的 Kubernetes 集群">
+                                <i class="fas fa-list"></i><span>K8s集群列表</span>
+                            </a>
+                        </li>
+                    </ul>
                 </li>
                 <li class="nav-item">
                     <a class="nav-link" href="{% url 'aiops:dashboard' %}" data-tooltip="智能运维分析">

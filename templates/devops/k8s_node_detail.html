@@ -1,0 +1,123 @@
+{% extends "base.html" %}
+
+{% block title %}{{ node.name|default:node_name }} - Node 详情{% endblock %}
+
+{% block content %}
+<div class="k8s-node-detail-page">
+    <header class="k8s-node-detail-header">
+        <a class="k8s-icon-button" href="{% url 'devops:k8s_cluster_detail' cluster.id %}?resource=nodes#k8s-resources" title="返回 Node 列表" aria-label="返回 Node 列表">
+            <i class="fas fa-arrow-left" aria-hidden="true"></i>
+        </a>
+        <span class="k8s-cluster-mark" aria-hidden="true"><i class="fas fa-server"></i></span>
+        <div class="k8s-node-detail-heading">
+            <div>
+                <h1>{{ node.name|default:node_name }}</h1>
+                <span class="k8s-resource-status">
+                    {% if node.status == "Ready" %}<i class="fas fa-circle is-ok" aria-hidden="true"></i>{% else %}<i class="fas fa-circle is-warn" aria-hidden="true"></i>{% endif %}
+                    {{ node.status|default:"-" }}
+                </span>
+            </div>
+            <span><i class="fas fa-network-wired" aria-hidden="true"></i> {{ node.ip_address|default:"-" }}</span>
+        </div>
+        {% if can_refresh %}
+        <a class="k8s-icon-button" href="?{{ refresh_query }}" title="刷新节点详情" aria-label="刷新节点详情">
+            <i class="fas fa-sync-alt" aria-hidden="true"></i>
+        </a>
+        {% endif %}
+    </header>
+
+    <main class="k8s-node-detail-main">
+        {% if not detail_ok %}
+        <div class="k8s-load-error" role="alert">
+            <i class="fas fa-exclamation-triangle" aria-hidden="true"></i>
+            <strong>节点详情读取失败</strong>
+            <span>{{ load_message }}</span>
+        </div>
+        {% elif from_cache %}
+        <div class="k8s-load-note" role="status"><i class="fas fa-database" aria-hidden="true"></i><span>当前显示缓存数据</span></div>
+        {% endif %}
+        {% if metrics_message %}
+        <div class="k8s-load-note k8s-node-metrics-note" role="status"><i class="fas fa-chart-line" aria-hidden="true"></i><span>{{ metrics_message }}</span></div>
+        {% endif %}
+
+        <section class="k8s-node-metric-section" aria-labelledby="node-cpu-title">
+            <div class="k8s-node-section-title"><h2 id="node-cpu-title">CPU</h2><span>节点 CPU 资源</span></div>
+            <div class="k8s-node-metric-grid">
+                <div><span>总量</span><strong>{{ summary.cpu_total|default:"-" }}</strong><small>可分配 {{ summary.cpu_allocatable|default:"-" }}</small></div>
+                <div><span>使用量</span><strong>{{ summary.cpu_usage|default:"-" }}</strong><small>Metrics API</small></div>
+                <div><span>Requests</span><strong>{{ summary.cpu_request|default:"-" }}</strong><small>全部 Pod</small></div>
+                <div><span>Limits</span><strong>{{ summary.cpu_limit|default:"-" }}</strong><small>全部 Pod</small></div>
+            </div>
+        </section>
+
+        <section class="k8s-node-metric-section" aria-labelledby="node-memory-title">
+            <div class="k8s-node-section-title"><h2 id="node-memory-title">内存</h2><span>节点内存资源</span></div>
+            <div class="k8s-node-metric-grid is-memory">
+                <div><span>总量</span><strong>{{ summary.memory_total|default:"-" }}</strong><small>可分配 {{ summary.memory_allocatable|default:"-" }}</small></div>
+                <div><span>使用量</span><strong>{{ summary.memory_usage|default:"-" }}</strong><small>Metrics API</small></div>
+                <div><span>Requests</span><strong>{{ summary.memory_request|default:"-" }}</strong><small>全部 Pod</small></div>
+                <div><span>Limits</span><strong>{{ summary.memory_limit|default:"-" }}</strong><small>全部 Pod</small></div>
+            </div>
+        </section>
+
+        <section class="k8s-node-info-section" aria-labelledby="node-info-title">
+            <h2 id="node-info-title">节点信息</h2>
+            <dl>
+                <div><dt>角色</dt><dd>{{ node.roles|default:"-" }}</dd></div>
+                <div><dt>Kubelet</dt><dd>{{ node.kubelet_version|default:"-" }}</dd></div>
+                <div><dt>容器运行时</dt><dd>{{ node.container_runtime|default:"-" }}</dd></div>
+                <div><dt>操作系统</dt><dd>{{ node.os_image|default:"-" }}</dd></div>
+                <div><dt>内核</dt><dd>{{ node.kernel_version|default:"-" }}</dd></div>
+                <div><dt>架构</dt><dd>{{ node.architecture|default:"-" }}</dd></div>
+                <div><dt>创建时间</dt><dd>{{ node.created_at|default:"-" }}</dd></div>
+                <div><dt>所属集群</dt><dd>{{ cluster.name|default:"-" }}</dd></div>
+            </dl>
+        </section>
+
+        <section class="k8s-node-pod-section" aria-labelledby="node-pods-title">
+            <div class="k8s-node-pod-toolbar">
+                <div><h2 id="node-pods-title">运行中的 Pod</h2><span>总数 {{ summary.pod_total|default:0 }}</span></div>
+                <form class="k8s-search-row" method="get" role="search">
+                    <i class="fas fa-search" aria-hidden="true"></i>
+                    <input type="search" name="q" value="{{ query }}" placeholder="搜索 Pod 名称、Namespace、状态或 IP" aria-label="搜索 Pod">
+                    <button type="submit" title="搜索" aria-label="搜索"><i class="fas fa-search" aria-hidden="true"></i></button>
+                    {% if query %}<a href="?" title="清除搜索" aria-label="清除搜索"><i class="fas fa-times" aria-hidden="true"></i></a>{% endif %}
+                </form>
+            </div>
+            <div class="k8s-node-pod-list" role="table" aria-label="节点 Pod 列表">
+                <div class="k8s-node-pod-head" role="row">
+                    <span>Pod 名称</span><span>Namespace</span><span>状态</span><span>Pod IP</span><span>CPU R / L</span><span>内存 R / L</span><span>创建时间</span>
+                </div>
+                {% for pod in pods %}
+                <div class="k8s-node-pod-row" role="row">
+                    <strong class="k8s-cell-ellipsis" title="{{ pod.name|default:'-' }}">{{ pod.name|default:"-" }}</strong>
+                    <span class="k8s-cell-ellipsis" title="{{ pod.namespace|default:'-' }}">{{ pod.namespace|default:"-" }}</span>
+                    <span class="k8s-resource-status">{% if pod.status == "Running" or pod.status == "Succeeded" %}<i class="fas fa-circle is-ok" aria-hidden="true"></i>{% else %}<i class="fas fa-circle is-warn" aria-hidden="true"></i>{% endif %}{{ pod.status|default:"-" }}</span>
+                    <code class="k8s-cell-ellipsis" title="{{ pod.pod_ip|default:'-' }}">{{ pod.pod_ip|default:"-" }}</code>
+                    <span class="k8s-node-resource-pair"><span>{{ pod.cpu_request|default:"-" }}</span><span>{{ pod.cpu_limit|default:"-" }}</span></span>
+                    <span class="k8s-node-resource-pair"><span>{{ pod.memory_request|default:"-" }}</span><span>{{ pod.memory_limit|default:"-" }}</span></span>
+                    <span class="k8s-cell-ellipsis" title="{{ pod.created_at|default:'-' }}">{{ pod.created_at|default:"-" }}</span>
+                </div>
+                {% empty %}
+                <div class="k8s-empty-workload"><i class="fas fa-cubes" aria-hidden="true"></i><strong>暂无 Pod 数据</strong><span>{% if query %}没有匹配“{{ query }}”的 Pod{% else %}该节点当前没有运行 Pod{% endif %}</span></div>
+                {% endfor %}
+            </div>
+
+            {% if pod_page.paginator.num_pages > 1 %}
+            <nav class="k8s-resource-pagination" aria-label="Pod 列表分页">
+                <span>第 {{ pod_page.number }} / {{ pod_page.paginator.num_pages }} 页，共 {{ pod_page.paginator.count }} 条</span>
+                <div>
+                    {% if pod_page.has_previous %}<a href="?{{ pagination_query }}{% if pagination_query %}&amp;{% endif %}page={{ pod_page.previous_page_number }}" title="上一页" aria-label="上一页"><i class="fas fa-chevron-left" aria-hidden="true"></i></a>{% else %}<span aria-hidden="true"><i class="fas fa-chevron-left"></i></span>{% endif %}
+                    {% for page_number in pod_page.paginator.page_range %}
+                        {% if page_number == pod_page.number %}<strong aria-current="page">{{ page_number }}</strong>{% elif page_number >= pod_page.number|add:"-2" and page_number <= pod_page.number|add:"2" %}<a href="?{{ pagination_query }}{% if pagination_query %}&amp;{% endif %}page={{ page_number }}">{{ page_number }}</a>{% endif %}
+                    {% endfor %}
+                    {% if pod_page.has_next %}<a href="?{{ pagination_query }}{% if pagination_query %}&amp;{% endif %}page={{ pod_page.next_page_number }}" title="下一页" aria-label="下一页"><i class="fas fa-chevron-right" aria-hidden="true"></i></a>{% else %}<span aria-hidden="true"><i class="fas fa-chevron-right"></i></span>{% endif %}
+                </div>
+            </nav>
+            {% elif pod_page.paginator.count %}
+            <div class="k8s-resource-pagination k8s-resource-pagination-single">共 {{ pod_page.paginator.count }} 条</div>
+            {% endif %}
+        </section>
+    </main>
+</div>
+{% endblock %}
