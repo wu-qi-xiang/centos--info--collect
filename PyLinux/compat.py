@@ -1,3 +1,5 @@
+"""Compatibility shims for running legacy Django 2.1 on modern Python."""
+
 import gettext
 import inspect
 
