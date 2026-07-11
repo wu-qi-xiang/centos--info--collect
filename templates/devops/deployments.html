@@ -1,0 +1,75 @@
+{% extends "base.html" %}
+
+{% block title %}发布部署 - DevOps平台{% endblock %}
+
+{% block content %}
+<div class="container-fluid px-4">
+    <h1 class="h3 mb-3">发布部署</h1>
+    {% include "devops/_nav.html" %}
+
+    <div class="row g-3 mb-3">
+        <div class="col-lg-4">
+            <div class="card"><div class="card-header">新增应用</div><div class="card-body">
+                <form method="post">
+                    {% csrf_token %}
+                    <input type="hidden" name="form_type" value="app">
+                    <div class="mb-3"><label class="form-label">应用名称</label>{{ app_form.name }}</div>
+                    <div class="mb-3"><label class="form-label">说明</label>{{ app_form.description }}</div>
+                    <button class="btn btn-primary" type="submit">保存应用</button>
+                </form>
+            </div></div>
+        </div>
+        <div class="col-lg-8">
+            <div class="card"><div class="card-header">创建发布单</div><div class="card-body">
+                <div class="alert alert-info py-2">发布和回滚提交后会在后台执行，可进入详情查看执行结果。</div>
+                <form method="post">
+                    {% csrf_token %}
+                    <input type="hidden" name="form_type" value="release">
+                    <div class="row g-3">
+                        <div class="col-md-4"><label class="form-label">应用</label>{{ release_form.app }}</div>
+                        <div class="col-md-4"><label class="form-label">版本</label>{{ release_form.version }}</div>
+                        <div class="col-md-4"><label class="form-label">说明</label>{{ release_form.description }}</div>
+                        <div class="col-md-6"><label class="form-label">发布脚本</label>{{ release_form.deploy_script }}</div>
+                        <div class="col-md-6"><label class="form-label">回滚脚本</label>{{ release_form.rollback_script }}</div>
+                        <div class="col-12"><label class="form-label">目标主机</label>{{ release_form.hosts }}</div>
+                    </div>
+                    <button class="btn btn-danger mt-3" name="submit_mode" value="execute" type="submit">执行发布</button>
+                    <button class="btn btn-outline-primary mt-3" name="submit_mode" value="approval" type="submit">提交审批</button>
+                </form>
+            </div></div>
+        </div>
+    </div>
+
+    <div class="card mb-3">
+        <div class="card-header">应用列表</div>
+        <div class="card-body table-responsive">
+            <table class="table table-sm">
+                <tr><th>应用</th><th>说明</th><th>创建人</th></tr>
+                {% for app in apps %}
+                <tr><td>{{ app.name }}</td><td>{{ app.description }}</td><td>{{ app.created_by }}</td></tr>
+                {% empty %}<tr><td colspan="3" class="text-muted">暂无应用</td></tr>{% endfor %}
+            </table>
+        </div>
+    </div>
+
+    <div class="card">
+        <div class="card-header">发布记录</div>
+        <div class="card-body table-responsive">
+            <table class="table table-hover">
+                <tr><th>时间</th><th>应用</th><th>版本</th><th>状态</th><th>主机数</th><th>摘要</th><th>操作</th></tr>
+                {% for release in releases %}
+                <tr>
+                    <td>{{ release.created_at|date:"Y-m-d H:i:s" }}</td>
+                    <td>{{ release.app.name }}</td>
+                    <td>{{ release.version }}</td>
+                    <td>{{ release.get_status_display }}</td>
+                    <td>{{ release.hosts.count }}</td>
+                    <td>{{ release.summary }}</td>
+                    <td><a class="btn btn-sm btn-outline-primary" href="{% url 'devops:deployment_detail' release.id %}">详情</a></td>
+                </tr>
+                {% empty %}<tr><td colspan="7" class="text-muted">暂无发布记录</td></tr>{% endfor %}
+            </table>
+        </div>
+    </div>
+</div>
+{% endblock %}

@@ -1,0 +1,4 @@
+interface:
+  display_name: "CentOS Feature Dev"
+  short_description: "Route centos--info--collect changes to the fastest safe implementation path."
+  default_prompt: "Use this skill first when implementing or debugging a centos--info--collect feature."

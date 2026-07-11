@@ -1,0 +1,273 @@
+.aiops-shell {
+    display: grid;
+    gap: 14px;
+    color: var(--ops-text, #0f172a);
+}
+
+.aiops-head,
+.aiops-panel,
+.aiops-card {
+    background: var(--ops-surface, #fff);
+    border: 1px solid var(--ops-border, #e2e8f0);
+    border-radius: 8px;
+    box-shadow: var(--ops-shadow, 0 1px 2px rgba(15, 23, 42, .06));
+}
+
+.aiops-head {
+    display: flex;
+    justify-content: space-between;
+    gap: 12px;
+    padding: 16px;
+}
+
+.aiops-head h1 {
+    margin: 0;
+    font-size: 22px;
+    font-weight: 800;
+}
+
+.aiops-head p,
+.aiops-updated,
+.aiops-row span,
+.aiops-row small,
+.aiops-capability span,
+.aiops-runbook span,
+.aiops-capacity span,
+.aiops-muted {
+    color: var(--ops-muted, #64748b);
+}
+
+.aiops-tabs {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 8px;
+}
+
+.aiops-tabs button {
+    display: inline-flex;
+    align-items: center;
+    gap: 8px;
+    border: 1px solid var(--ops-border, #e2e8f0);
+    border-radius: 8px;
+    background: #fff;
+    color: var(--ops-muted, #64748b);
+    padding: 9px 12px;
+    font-weight: 700;
+}
+
+.aiops-tabs button.active,
+.aiops-tabs button:hover {
+    color: var(--ops-primary, #2563eb);
+    background: #eff6ff;
+}
+
+.aiops-kpis,
+.aiops-grid {
+    display: grid;
+    gap: 12px;
+}
+
+.aiops-kpis {
+    grid-template-columns: repeat(6, minmax(0, 1fr));
+    margin-bottom: 12px;
+}
+
+.aiops-grid.two {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+}
+
+.aiops-wide {
+    grid-column: 1 / -1;
+}
+
+.aiops-card,
+.aiops-panel {
+    padding: 14px;
+}
+
+.aiops-card span {
+    display: block;
+    color: var(--ops-muted, #64748b);
+    font-size: 12px;
+    font-weight: 700;
+}
+
+.aiops-card strong {
+    display: block;
+    margin-top: 6px;
+    font-size: 28px;
+}
+
+.aiops-panel h2 {
+    margin: 0 0 12px;
+    font-size: 16px;
+    font-weight: 800;
+}
+
+.aiops-capability,
+.aiops-row,
+.aiops-runbook,
+.aiops-capacity {
+    border: 1px solid var(--ops-border, #e2e8f0);
+    border-radius: 8px;
+    padding: 10px 12px;
+    background: #fff;
+}
+
+.aiops-capability,
+.aiops-runbook {
+    display: grid;
+    gap: 4px;
+    margin-bottom: 8px;
+}
+
+.aiops-row {
+    display: grid;
+    grid-template-columns: minmax(0, 1fr) auto;
+    gap: 12px;
+    align-items: center;
+    margin-bottom: 8px;
+}
+
+.aiops-row > div {
+    display: grid;
+    gap: 4px;
+}
+
+.aiops-row.compact em {
+    color: var(--ops-muted, #64748b);
+    font-style: normal;
+    font-size: 12px;
+}
+
+.aiops-badge,
+.aiops-score {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    min-width: 58px;
+    border-radius: 8px;
+    padding: 6px 9px;
+    background: #eff6ff;
+    color: #1d4ed8;
+    font-size: 12px;
+}
+
+.aiops-badge.warning {
+    background: #fff7ed;
+    color: #c2410c;
+}
+
+.aiops-badge.danger {
+    background: #fef2f2;
+    color: #b91c1c;
+}
+
+.aiops-capacity {
+    display: grid;
+    grid-template-columns: minmax(180px, 1fr) minmax(140px, 260px) auto;
+    gap: 12px;
+    align-items: center;
+    margin-bottom: 8px;
+}
+
+.aiops-bar {
+    height: 8px;
+    overflow: hidden;
+    border-radius: 999px;
+    background: #e2e8f0;
+}
+
+.aiops-bar i {
+    display: block;
+    height: 100%;
+    border-radius: inherit;
+    background: var(--ops-primary, #2563eb);
+}
+
+.aiops-runbook ol {
+    margin: 4px 0 0;
+    padding-left: 20px;
+    color: var(--ops-muted, #64748b);
+}
+
+.aiops-form {
+    display: grid;
+    gap: 12px;
+}
+
+.aiops-form label {
+    display: grid;
+    gap: 6px;
+    color: var(--ops-muted, #64748b);
+    font-size: 13px;
+    font-weight: 700;
+}
+
+.aiops-check {
+    display: flex !important;
+    align-items: center;
+    gap: 8px;
+}
+
+.aiops-check input {
+    width: 16px;
+    height: 16px;
+}
+
+.aiops-webhook {
+    overflow-wrap: anywhere;
+    border: 1px solid var(--ops-border, #e2e8f0);
+    border-radius: 8px;
+    background: #f8fafc;
+    padding: 10px 12px;
+    font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+    font-size: 13px;
+}
+
+.aiops-example {
+    display: grid;
+    gap: 8px;
+    margin-top: 12px;
+}
+
+.aiops-example pre {
+    overflow: auto;
+    border-radius: 8px;
+    background: #0f172a;
+    color: #e2e8f0;
+    padding: 12px;
+    margin: 0;
+    font-size: 12px;
+}
+
+.aiops-empty {
+    border: 1px dashed var(--ops-border, #e2e8f0);
+    border-radius: 8px;
+    padding: 22px;
+    color: var(--ops-muted, #64748b);
+    text-align: center;
+}
+
+@media (max-width: 1100px) {
+    .aiops-kpis {
+        grid-template-columns: repeat(3, minmax(0, 1fr));
+    }
+
+    .aiops-grid.two {
+        grid-template-columns: 1fr;
+    }
+}
+
+@media (max-width: 640px) {
+    .aiops-head,
+    .aiops-row,
+    .aiops-capacity {
+        grid-template-columns: 1fr;
+        display: grid;
+    }
+
+    .aiops-kpis {
+        grid-template-columns: repeat(2, minmax(0, 1fr));
+    }
+}

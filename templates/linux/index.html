@@ -1,408 +1,120 @@
 {% extends "base.html" %}
 {% load staticfiles %}
 
-{% block title %}Linux服务器监控系统 - 首页{% endblock %}
+{% block title %}运维控制台 - Linux监控系统{% endblock %}
 
 {% block content %}
-<div class="container-fluid px-4">
-    <!-- 英雄区域 -->
-    <div class="hero-section">
-        <div class="container">
-            <div class="row align-items-center">
-                <div class="col-lg-8">
-                    <div class="hero-content">
-                        <h1 class="hero-title">
-                            <i class="fas fa-server me-3"></i>
-                            Linux服务器监控系统
-                        </h1>
-                        <p class="hero-subtitle">
-                            简单高效的服务器管理平台，让运维变得更轻松
-                        </p>
-                        <div class="hero-actions mt-4">
-                            <a class="btn btn-light btn-lg me-3" href="{% url 'linux_detail' %}">
-                                <i class="fas fa-list me-2"></i>查看服务器
-                            </a>
-                            <a class="btn btn-outline-light btn-lg" href="https://github.com/helloworldff/centos--info--collect" 
-                               target="_blank" rel="noopener">
-                                <i class="fab fa-github me-2"></i>GitHub源码
-                            </a>
-                        </div>
-                    </div>
-                </div>
-                <div class="col-lg-4 d-none d-lg-block">
-                    <div class="hero-image text-center">
-                        <img src="{% static 'images/rectangle.jpg' %}" alt="服务器监控" 
-                             class="img-fluid rounded shadow">
-                    </div>
-                </div>
-            </div>
-        </div>
+<div class="ops-page-header">
+    <div>
+        <h1 class="ops-page-title">运维控制台</h1>
+        <p class="ops-page-subtitle">主机资产、监控告警和 DevOps 自动化的统一入口。</p>
     </div>
+    <div class="d-flex gap-2">
+        <a class="btn btn-outline-primary" href="{% url 'asset_management' %}"><i class="fas fa-boxes-stacked me-1"></i>资产管理</a>
+        <a class="btn btn-primary" href="{% url 'devops:dashboard' %}"><i class="fas fa-tools me-1"></i>DevOps</a>
+    </div>
+</div>
 
-    <!-- 功能特性 -->
-    <div class="row mt-5">
-        <div class="col-12">
-            <h2 class="text-center mb-5">
-                <i class="fas fa-star me-2"></i>核心功能
-            </h2>
-        </div>
+<div class="ops-stat-grid mb-3">
+    <div class="ops-stat">
+        <div class="ops-stat-label">服务器总数</div>
+        <div class="ops-stat-value">{{ nwl|default:0 }}</div>
     </div>
-    
-    <div class="row g-4">
-        <div class="col-md-6 col-lg-3">
-            <div class="card-custom h-100 text-center p-4">
-                <div class="feature-icon-large mb-3">
-                    <i class="fas fa-server fa-3x text-primary"></i>
-                </div>
-                <h5 class="card-title">服务器管理</h5>
-                <p class="card-text">连接Linux服务器，获取基本的服务器信息，实时监控系统状态</p>
-                <a href="{% url 'linux_detail' %}" class="btn btn-outline-primary btn-sm">
-                    查看详情 <i class="fas fa-arrow-right ms-1"></i>
-                </a>
-            </div>
-        </div>
-        
-        <div class="col-md-6 col-lg-3">
-            <div class="card-custom h-100 text-center p-4">
-                <div class="feature-icon-large mb-3">
-                    <i class="fas fa-terminal fa-3x text-success"></i>
-                </div>
-                <h5 class="card-title">WebSSH终端</h5>
-                <p class="card-text">网页端直接连接服务器，无需安装额外软件，随时随地管理服务器</p>
-                <a href="{% url 'linux_detail' %}" class="btn btn-outline-success btn-sm">
-                    立即体验 <i class="fas fa-arrow-right ms-1"></i>
-                </a>
-            </div>
-        </div>
-        
-        <div class="col-md-6 col-lg-3">
-            <div class="card-custom h-100 text-center p-4">
-                <div class="feature-icon-large mb-3">
-                    <i class="fas fa-key fa-3x text-warning"></i>
-                </div>
-                <h5 class="card-title">密码管理</h5>
-                <p class="card-text">安全存储和管理服务器密码，支持加密存储，保障账户安全</p>
-                <a href="{% url 'password:password_manage' %}" class="btn btn-outline-warning btn-sm">
-                    管理密码 <i class="fas fa-arrow-right ms-1"></i>
-                </a>
-            </div>
-        </div>
-        
-        <div class="col-md-6 col-lg-3">
-            <div class="card-custom h-100 text-center p-4">
-                <div class="feature-icon-large mb-3">
-                    <i class="fas fa-chart-line fa-3x text-info"></i>
-                </div>
-                <h5 class="card-title">监控告警</h5>
-                <p class="card-text">实时监控服务器状态，支持邮件告警，及时发现和处理问题</p>
-                <a href="{% url 'monitor:monitor_index' %}" class="btn btn-outline-info btn-sm">
-                    配置监控 <i class="fas fa-arrow-right ms-1"></i>
-                </a>
-            </div>
-        </div>
+    <div class="ops-stat">
+        <div class="ops-stat-label">监控能力</div>
+        <div class="ops-stat-value">3</div>
+        <div class="text-muted small">CPU / 内存 / 磁盘</div>
     </div>
+    <div class="ops-stat">
+        <div class="ops-stat-label">自动化模块</div>
+        <div class="ops-stat-value">8</div>
+        <div class="text-muted small">命令、分发、发布、审批等</div>
+    </div>
+</div>
 
-    <!-- 快速开始 -->
-    <div class="row mt-5">
-        <div class="col-12">
-            <div class="card-custom">
-                <div class="card-body p-5">
-                    <div class="row align-items-center">
-                        <div class="col-lg-8">
-                            <h3 class="mb-3">
-                                <i class="fas fa-rocket me-2"></i>快速开始
-                            </h3>
-                            <p class="lead mb-3">
-                                三步即可开始使用Linux服务器监控系统
-                            </p>
-                            <div class="row">
-                                <div class="col-md-4 mb-3">
-                                    <div class="d-flex align-items-center">
-                                        <div class="step-number me-3">1</div>
-                                        <div>
-                                            <h6 class="mb-1">添加服务器</h6>
-                                            <small class="text-muted">配置服务器连接信息</small>
-                                        </div>
-                                    </div>
-                                </div>
-                                <div class="col-md-4 mb-3">
-                                    <div class="d-flex align-items-center">
-                                        <div class="step-number me-3">2</div>
-                                        <div>
-                                            <h6 class="mb-1">设置监控</h6>
-                                            <small class="text-muted">配置告警阈值和通知</small>
-                                        </div>
-                                    </div>
-                                </div>
-                                <div class="col-md-4 mb-3">
-                                    <div class="d-flex align-items-center">
-                                        <div class="step-number me-3">3</div>
-                                        <div>
-                                            <h6 class="mb-1">开始管理</h6>
-                                            <small class="text-muted">实时监控服务器状态</small>
-                                        </div>
-                                    </div>
-                                </div>
-                            </div>
-                        </div>
-                        <div class="col-lg-4 text-center">
-                            <a href="{% url 'linux_create' %}" class="btn btn-primary btn-lg">
-                                <i class="fas fa-plus me-2"></i>添加第一台服务器
-                            </a>
-                        </div>
-                    </div>
-                </div>
+<div class="row g-3">
+    <div class="col-lg-3 col-md-6">
+        <div class="card h-100">
+            <div class="card-body">
+                <i class="fas fa-server text-primary mb-3"></i>
+                <h5>服务器管理</h5>
+                <p class="text-muted">维护主机资产、连接信息和 WebSSH 入口。</p>
+                <a class="btn btn-sm btn-outline-primary" href="{% url 'linux_detail' %}">进入</a>
             </div>
         </div>
     </div>
-
-    <!-- 系统统计 -->
-    <div class="row mt-5 mb-5">
-        <div class="col-md-3 col-sm-6 mb-4">
-            <div class="card-custom text-center p-4 stat-card" data-aos="fade-up" data-aos-delay="100">
-                <div class="stat-icon mb-3">
-                    <div class="icon-wrapper">
-                        <i class="fas fa-server fa-2x text-primary"></i>
-                    </div>
-                </div>
-                <h4 class="stat-number" data-target="{{ nwl|default:0 }}">0</h4>
-                <p class="stat-label">服务器总数</p>
-                <div class="stat-progress">
-                    <div class="progress-custom">
-                        <div class="progress-bar-custom" style="width: 100%"></div>
-                    </div>
-                </div>
-            </div>
-        </div>
-        <div class="col-md-3 col-sm-6 mb-4">
-            <div class="card-custom text-center p-4 stat-card" data-aos="fade-up" data-aos-delay="200">
-                <div class="stat-icon mb-3">
-                    <div class="icon-wrapper">
-                        <i class="fas fa-check-circle fa-2x text-success"></i>
-                    </div>
-                </div>
-                <h4 class="stat-number" data-target="{{ nwl|default:0 }}">0</h4>
-                <p class="stat-label">在线服务器</p>
-                <div class="stat-progress">
-                    <div class="progress-custom">
-                        <div class="progress-bar-custom bg-success" style="width: 95%"></div>
-                    </div>
-                </div>
-            </div>
-        </div>
-        <div class="col-md-3 col-sm-6 mb-4">
-            <div class="card-custom text-center p-4 stat-card" data-aos="fade-up" data-aos-delay="300">
-                <div class="stat-icon mb-3">
-                    <div class="icon-wrapper">
-                        <i class="fas fa-exclamation-triangle fa-2x text-warning"></i>
-                    </div>
-                </div>
-                <h4 class="stat-number" data-target="2">0</h4>
-                <p class="stat-label">告警数量</p>
-                <div class="stat-progress">
-                    <div class="progress-custom">
-                        <div class="progress-bar-custom bg-warning" style="width: 15%"></div>
-                    </div>
-                </div>
-            </div>
-        </div>
-        <div class="col-md-3 col-sm-6 mb-4">
-            <div class="card-custom text-center p-4 stat-card" data-aos="fade-up" data-aos-delay="400">
-                <div class="stat-icon mb-3">
-                    <div class="icon-wrapper">
-                        <i class="fas fa-clock fa-2x text-info"></i>
-                    </div>
-                </div>
-                <h4 class="stat-number" data-target="99.8">0</h4>
-                <p class="stat-label">系统运行时间(%)</p>
-                <div class="stat-progress">
-                    <div class="progress-custom">
-                        <div class="progress-bar-custom bg-info" style="width: 99.8%"></div>
-                    </div>
-                </div>
+    <div class="col-lg-3 col-md-6">
+        <div class="card h-100">
+            <div class="card-body">
+                <i class="fas fa-chart-line text-info mb-3"></i>
+                <h5>监控告警</h5>
+                <p class="text-muted">配置阈值，查看告警记录和指标趋势。</p>
+                <a class="btn btn-sm btn-outline-primary" href="{% url 'monitor:monitor_index' %}">进入</a>
             </div>
         </div>
     </div>
-
-    <!-- 最近活动 -->
-    <div class="row mt-5">
-        <div class="col-lg-8">
-            <div class="card-custom">
-                <div class="card-header d-flex justify-content-between align-items-center">
-                    <h5 class="mb-0">
-                        <i class="fas fa-history me-2"></i>最近活动
-                    </h5>
-                    <small class="text-muted">实时更新</small>
-                </div>
-                <div class="card-body">
-                    <div class="activity-timeline">
-                        <div class="activity-item">
-                            <div class="activity-icon bg-success">
-                                <i class="fas fa-plus"></i>
-                            </div>
-                            <div class="activity-content">
-                                <div class="activity-title">新增服务器</div>
-                                <div class="activity-desc">添加了新的服务器 "Web-Server-01"</div>
-                                <div class="activity-time">2分钟前</div>
-                            </div>
-                        </div>
-                        <div class="activity-item">
-                            <div class="activity-icon bg-info">
-                                <i class="fas fa-sync"></i>
-                            </div>
-                            <div class="activity-content">
-                                <div class="activity-title">状态更新</div>
-                                <div class="activity-desc">服务器 "DB-Server-02" 状态检查完成</div>
-                                <div class="activity-time">5分钟前</div>
-                            </div>
-                        </div>
-                        <div class="activity-item">
-                            <div class="activity-icon bg-warning">
-                                <i class="fas fa-exclamation-triangle"></i>
-                            </div>
-                            <div class="activity-content">
-                                <div class="activity-title">告警通知</div>
-                                <div class="activity-desc">服务器 "Cache-Server-01" CPU使用率过高</div>
-                                <div class="activity-time">10分钟前</div>
-                            </div>
-                        </div>
-                    </div>
-                    <div class="text-center mt-3">
-                        <a href="#" class="btn btn-outline-primary btn-sm">查看全部活动</a>
-                    </div>
-                </div>
+    <div class="col-lg-3 col-md-6">
+        <div class="card h-100">
+            <div class="card-body">
+                <i class="fas fa-tools text-success mb-3"></i>
+                <h5>DevOps 自动化</h5>
+                <p class="text-muted">批量命令、文件分发、发布部署和审批流。</p>
+                <a class="btn btn-sm btn-outline-primary" href="{% url 'devops:dashboard' %}">进入</a>
             </div>
         </div>
-        <div class="col-lg-4">
-            <div class="card-custom">
-                <div class="card-header">
-                    <h5 class="mb-0">
-                        <i class="fas fa-chart-pie me-2"></i>资源使用概览
-                    </h5>
-                </div>
-                <div class="card-body">
-                    <div class="resource-item mb-3">
-                        <div class="d-flex justify-content-between align-items-center mb-1">
-                            <span class="resource-label">
-                                <i class="fas fa-microchip text-danger me-2"></i>CPU平均使用率
-                            </span>
-                            <span class="resource-value">45%</span>
-                        </div>
-                        <div class="progress-custom">
-                            <div class="progress-bar-custom bg-danger" style="width: 45%"></div>
-                        </div>
-                    </div>
-                    <div class="resource-item mb-3">
-                        <div class="d-flex justify-content-between align-items-center mb-1">
-                            <span class="resource-label">
-                                <i class="fas fa-memory text-warning me-2"></i>内存平均使用率
-                            </span>
-                            <span class="resource-value">68%</span>
-                        </div>
-                        <div class="progress-custom">
-                            <div class="progress-bar-custom bg-warning" style="width: 68%"></div>
-                        </div>
-                    </div>
-                    <div class="resource-item mb-3">
-                        <div class="d-flex justify-content-between align-items-center mb-1">
-                            <span class="resource-label">
-                                <i class="fas fa-hdd text-info me-2"></i>磁盘平均使用率
-                            </span>
-                            <span class="resource-value">32%</span>
-                        </div>
-                        <div class="progress-custom">
-                            <div class="progress-bar-custom bg-info" style="width: 32%"></div>
-                        </div>
-                    </div>
-                    <div class="resource-item">
-                        <div class="d-flex justify-content-between align-items-center mb-1">
-                            <span class="resource-label">
-                                <i class="fas fa-network-wired text-success me-2"></i>网络流量
-                            </span>
-                            <span class="resource-value">1.2GB/s</span>
-                        </div>
-                        <div class="progress-custom">
-                            <div class="progress-bar-custom bg-success" style="width: 60%"></div>
-                        </div>
-                    </div>
-                </div>
+    </div>
+    <div class="col-lg-3 col-md-6">
+        <div class="card h-100">
+            <div class="card-body">
+                <i class="fas fa-key text-warning mb-3"></i>
+                <h5>凭据管理</h5>
+                <p class="text-muted">管理当前用户的账号密码记录。</p>
+                <a class="btn btn-sm btn-outline-primary" href="{% url 'password:credential_management' %}">进入</a>
             </div>
         </div>
     </div>
 </div>
 
-<style>
-.feature-icon-large {
-    height: 80px;
-    display: flex;
-    align-items: center;
-    justify-content: center;
-}
-
-.step-number {
-    width: 40px;
-    height: 40px;
-    background: var(--primary-color);
-    color: white;
-    border-radius: 50%;
-    display: flex;
-    align-items: center;
-    justify-content: center;
-    font-weight: bold;
-    font-size: 1.2rem;
-}
-
-.stat-number {
-    font-size: 2.5rem;
-    font-weight: bold;
-    margin: 0;
-    color: var(--primary-color);
-}
-
-.stat-label {
-    color: #6c757d;
-    margin: 0;
-    font-size: 0.9rem;
-}
-
-.hero-actions .btn {
-    min-width: 160px;
-}
-</style>
-
-<script>
-// 数字动画效果
-document.addEventListener('DOMContentLoaded', function() {
-    const statNumbers = document.querySelectorAll('.stat-number');
-    
-    const animateNumber = (element) => {
-        const target = parseInt(element.getAttribute('data-target'));
-        const duration = 2000;
-        const step = target / (duration / 16);
-        let current = 0;
-        
-        const timer = setInterval(() => {
-            current += step;
-            if (current >= target) {
-                current = target;
-                clearInterval(timer);
-            }
-            element.textContent = Math.floor(current);
-        }, 16);
-    };
-    
-    // 使用Intersection Observer来触发动画
-    const observer = new IntersectionObserver((entries) => {
-        entries.forEach(entry => {
-            if (entry.isIntersecting) {
-                animateNumber(entry.target);
-                observer.unobserve(entry.target);
-            }
-        });
-    });
-    
-    statNumbers.forEach(number => observer.observe(number));
-});
-</script>
+<div class="row g-3 mt-1">
+    <div class="col-lg-8">
+        <div class="card">
+            <div class="card-header">推荐工作流</div>
+            <div class="card-body">
+                <div class="row g-3">
+                    <div class="col-md-4">
+                        <div class="border rounded p-3 h-100">
+                            <strong>1. 录入主机</strong>
+                            <p class="text-muted mb-0 mt-2">添加 SSH 登录信息，按分组和标签管理资产。</p>
+                        </div>
+                    </div>
+                    <div class="col-md-4">
+                        <div class="border rounded p-3 h-100">
+                            <strong>2. 配置监控</strong>
+                            <p class="text-muted mb-0 mt-2">设置阈值和通知渠道，跟踪历史趋势。</p>
+                        </div>
+                    </div>
+                    <div class="col-md-4">
+                        <div class="border rounded p-3 h-100">
+                            <strong>3. 自动化操作</strong>
+                            <p class="text-muted mb-0 mt-2">通过审批流执行高风险命令和发布动作。</p>
+                        </div>
+                    </div>
+                </div>
+            </div>
+        </div>
+    </div>
+    <div class="col-lg-4">
+        <div class="card">
+            <div class="card-header">快捷入口</div>
+            <div class="card-body d-grid gap-2">
+                {% if can_manage_hosts %}
+                <a class="btn btn-outline-primary text-start" href="{% url 'linux_create' %}"><i class="fas fa-plus me-2"></i>新增服务器</a>
+                {% endif %}
+                <a class="btn btn-outline-primary text-start" href="{% url 'devops:command_center' %}"><i class="fas fa-terminal me-2"></i>命令执行</a>
+                <a class="btn btn-outline-primary text-start" href="{% url 'devops:metrics_history' %}"><i class="fas fa-chart-area me-2"></i>监控历史</a>
+                <a class="btn btn-outline-primary text-start" href="{% url 'devops:audit_logs' %}"><i class="fas fa-clipboard-list me-2"></i>审计日志</a>
+            </div>
+        </div>
+    </div>
+</div>
 {% endblock content %}
-</html>

@@ -35,6 +35,7 @@
 
                 <form method="post" enctype="multipart/form-data" id="monitorForm">
                     {% csrf_token %}
+                    {% include "includes/form_errors.html" %}
                     
                     <!-- 邮箱设置 -->
                     <div class="form-group-custom">
@@ -50,13 +51,17 @@
                                    id="monitor_email" 
                                    name="monitor_email" 
                                    placeholder="请输入接收告警的邮箱地址"
+                                   value="{{ request.POST.monitor_email }}"
+                                   {% if not can_manage_monitor %}readonly{% endif %}
                                    required>
+                            {% if can_manage_monitor %}
                             {% for a in monitor %}
                             <a href="{% url 'monitor:monitor_update' a.id %}" 
                                class="btn btn-outline-primary">
                                 <i class="fas fa-edit me-1"></i>更新配置
                             </a>
                             {% endfor %}
+                            {% endif %}
                         </div>
                         <small class="form-text text-muted">
                             <i class="fas fa-info-circle me-1"></i>
@@ -77,8 +82,10 @@
                                            id="monitor_cpu" 
                                            name="monitor_cpu" 
                                            placeholder="80"
+                                           value="{{ request.POST.monitor_cpu }}"
                                            min="1" 
                                            max="100"
+                                           {% if not can_manage_monitor %}readonly{% endif %}
                                            required>
                                     <span class="input-group-text">%</span>
                                 </div>
@@ -97,8 +104,10 @@
                                            id="monitor_men" 
                                            name="monitor_men" 
                                            placeholder="85"
+                                           value="{{ request.POST.monitor_men }}"
                                            min="1" 
                                            max="100"
+                                           {% if not can_manage_monitor %}readonly{% endif %}
                                            required>
                                     <span class="input-group-text">%</span>
                                 </div>
@@ -117,8 +126,10 @@
                                            id="monitor_disk" 
                                            name="monitor_disk" 
                                            placeholder="90"
+                                           value="{{ request.POST.monitor_disk }}"
                                            min="1" 
                                            max="100"
+                                           {% if not can_manage_monitor %}readonly{% endif %}
                                            required>
                                     <span class="input-group-text">%</span>
                                 </div>
@@ -168,12 +179,16 @@
 
                     <!-- 提交按钮 -->
                     <div class="d-flex justify-content-end mt-4">
+                        {% if can_manage_monitor %}
                         <button type="button" class="btn btn-outline-secondary me-2" onclick="resetForm()">
                             <i class="fas fa-undo me-1"></i>重置
                         </button>
                         <button type="submit" class="btn btn-success btn-custom">
                             <i class="fas fa-save me-1"></i>保存配置
                         </button>
+                        {% else %}
+                        <span class="text-muted">当前账号没有监控配置权限</span>
+                        {% endif %}
                     </div>
                 </form>
             </div>
@@ -189,33 +204,21 @@
                     
                     <div class="monitor-status-item">
                         <div class="d-flex justify-content-between align-items-center">
-                            <span>监控服务</span>
-                            <span class="badge bg-success">
-                                <i class="fas fa-check-circle me-1"></i>运行中
+                            <span>阈值配置</span>
+                            {% if has_monitor_config %}
+                            <span class="badge bg-success"><i class="fas fa-check-circle me-1"></i>已配置</span>
+                            {% else %}
+                            <span class="badge bg-secondary"><i class="fas fa-minus-circle me-1"></i>未配置</span>
+                            {% endif %}
+                        </div>
+                    </div>
+
+                    <div class="monitor-status-item">
+                        <div class="d-flex justify-content-between align-items-center">
+                            <span>未恢复告警</span>
+                            <span class="badge {% if open_alert_count %}bg-warning{% else %}bg-success{% endif %}">
+                                {{ open_alert_count|default:0 }}
                             </span>
-                        </div>
-                    </div>
-                    
-                    <div class="monitor-status-item">
-                        <div class="d-flex justify-content-between align-items-center">
-                            <span>邮件服务</span>
-                            <span class="badge bg-success">
-                                <i class="fas fa-check-circle me-1"></i>正常
-                            </span>
-                        </div>
-                    </div>
-                    
-                    <div class="monitor-status-item">
-                        <div class="d-flex justify-content-between align-items-center">
-                            <span>上次检查</span>
-                            <span class="text-muted">2分钟前</span>
-                        </div>
-                    </div>
-                    
-                    <div class="monitor-status-item">
-                        <div class="d-flex justify-content-between align-items-center">
-                            <span>今日告警</span>
-                            <span class="badge bg-warning">3</span>
                         </div>
                     </div>
                 </div>
@@ -229,39 +232,23 @@
                     </h6>
                     
                     <div class="alert-history">
+                        {% if latest_alert %}
                         <div class="alert-item">
                             <div class="d-flex align-items-start">
                                 <i class="fas fa-exclamation-triangle text-warning me-2 mt-1"></i>
                                 <div class="flex-grow-1">
-                                    <small class="text-muted">2小时前</small>
-                                    <div>服务器-01 CPU使用率达到85%</div>
+                                    <small class="text-muted">{{ latest_alert.created_at|date:"Y-m-d H:i" }}</small>
+                                    <div>{{ latest_alert.message }}</div>
                                 </div>
                             </div>
                         </div>
-                        
-                        <div class="alert-item">
-                            <div class="d-flex align-items-start">
-                                <i class="fas fa-exclamation-circle text-danger me-2 mt-1"></i>
-                                <div class="flex-grow-1">
-                                    <small class="text-muted">5小时前</small>
-                                    <div>服务器-02 磁盘空间不足</div>
-                                </div>
-                            </div>
-                        </div>
-                        
-                        <div class="alert-item">
-                            <div class="d-flex align-items-start">
-                                <i class="fas fa-info-circle text-info me-2 mt-1"></i>
-                                <div class="flex-grow-1">
-                                    <small class="text-muted">1天前</small>
-                                    <div>监控配置已更新</div>
-                                </div>
-                            </div>
-                        </div>
+                        {% else %}
+                        <div class="text-muted small">暂无告警记录</div>
+                        {% endif %}
                     </div>
                     
                     <div class="text-center mt-3">
-                        <a href="#" class="btn btn-outline-primary btn-sm">
+                        <a href="{% url 'devops:alert_events' %}" class="btn btn-outline-primary btn-sm">
                             查看全部告警历史
                         </a>
                     </div>
@@ -313,8 +300,6 @@
 <script>
 // 表单验证和提交
 document.getElementById('monitorForm').addEventListener('submit', function(e) {
-    e.preventDefault();
-    
     // 获取表单数据
     const formData = new FormData(this);
     const email = formData.get('monitor_email');
@@ -325,28 +310,17 @@ document.getElementById('monitorForm').addEventListener('submit', function(e) {
     // 验证邮箱格式
     const emailRegex = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
     if (!emailRegex.test(email)) {
+        e.preventDefault();
         showNotification('请输入有效的邮箱地址', 'error');
         return;
     }
     
     // 验证阈值范围
     if (cpu < 1 || cpu > 100 || memory < 1 || memory > 100 || disk < 1 || disk > 100) {
+        e.preventDefault();
         showNotification('阈值必须在1-100之间', 'error');
         return;
     }
-    
-    // 提交表单
-    const submitBtn = this.querySelector('button[type="submit"]');
-    const originalText = submitBtn.innerHTML;
-    submitBtn.innerHTML = '<span class="loading"></span> 保存中...';
-    submitBtn.disabled = true;
-    
-    // 模拟提交过程
-    setTimeout(() => {
-        showNotification('监控配置保存成功', 'success');
-        submitBtn.innerHTML = originalText;
-        submitBtn.disabled = false;
-    }, 1500);
 });
 
 // 重置表单

@@ -4,11 +4,16 @@ import gettext
 import inspect
 
 
-if 'codeset' not in inspect.signature(gettext.translation).parameters:
-    _translation = gettext.translation
+def patch_gettext_translation():
+    signature = inspect.signature(gettext.translation)
+    if 'codeset' in signature.parameters:
+        return
 
-    def translation(domain, localedir=None, languages=None, class_=None, fallback=False, codeset=None):
-        return _translation(
+    original_translation = gettext.translation
+
+    def translation(domain, localedir=None, languages=None, class_=None,
+                    fallback=False, codeset=None):
+        return original_translation(
             domain,
             localedir=localedir,
             languages=languages,
@@ -17,3 +22,6 @@ if 'codeset' not in inspect.signature(gettext.translation).parameters:
         )
 
     gettext.translation = translation
+
+
+patch_gettext_translation()

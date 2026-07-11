@@ -1,0 +1,93 @@
+{% extends "base.html" %}
+
+{% block title %}通知渠道 - DevOps平台{% endblock %}
+
+{% block content %}
+<div class="container-fluid px-4">
+    <h1 class="h3 mb-3">通知渠道</h1>
+    {% include "devops/_nav.html" %}
+
+    <div class="alert alert-info py-2">Webhook URL 和签名密钥会加密保存；编辑已有渠道时留空表示保持原值。</div>
+
+    <div class="row g-3 mb-3">
+        <div class="col-lg-4">
+            <div class="card">
+                <div class="card-header">新增通知渠道</div>
+                <div class="card-body">
+                    <form method="post" action="{% url 'devops:notification_create' %}">
+                        {% csrf_token %}
+                        <div class="mb-3"><label class="form-label">名称</label>{{ form.name }}</div>
+                        <div class="mb-3"><label class="form-label">类型</label>{{ form.channel_type }}</div>
+                        <div class="mb-3"><label class="form-label">Webhook URL</label>{{ form.webhook_url }}</div>
+                        <div class="mb-3"><label class="form-label">签名密钥</label>{{ form.secret }}</div>
+                        <div class="form-check mb-2">{{ form.notify_alert }} <label class="form-check-label" for="{{ form.notify_alert.id_for_label }}">告警通知</label></div>
+                        <div class="form-check mb-2">{{ form.notify_approval }} <label class="form-check-label" for="{{ form.notify_approval.id_for_label }}">审批通知</label></div>
+                        <div class="form-check mb-2">{{ form.notify_deployment }} <label class="form-check-label" for="{{ form.notify_deployment.id_for_label }}">发布通知</label></div>
+                        <div class="form-check mb-3">{{ form.enabled }} <label class="form-check-label" for="{{ form.enabled.id_for_label }}">启用</label></div>
+                        <button class="btn btn-primary" type="submit">保存渠道</button>
+                    </form>
+                </div>
+            </div>
+        </div>
+        <div class="col-lg-8">
+            <div class="card">
+                <div class="card-header">渠道列表</div>
+                <div class="card-body table-responsive">
+                    <table class="table table-sm align-middle">
+                        <tr><th>名称</th><th>类型</th><th>通知范围</th><th>状态</th><th>操作</th></tr>
+                        {% for channel in channels %}
+                        <tr>
+                            <td>
+                                <form id="channel-update-{{ channel.id }}" method="post" action="{% url 'devops:notification_update' channel.id %}">{% csrf_token %}</form>
+                                <input form="channel-update-{{ channel.id }}" name="name" class="form-control form-control-sm" value="{{ channel.name }}">
+                            </td>
+                            <td>
+                                <select form="channel-update-{{ channel.id }}" name="channel_type" class="form-select form-select-sm">
+                                    <option value="wecom" {% if channel.channel_type == "wecom" %}selected{% endif %}>企业微信</option>
+                                    <option value="dingtalk" {% if channel.channel_type == "dingtalk" %}selected{% endif %}>钉钉</option>
+                                    <option value="webhook" {% if channel.channel_type == "webhook" %}selected{% endif %}>Webhook</option>
+                                </select>
+                                <textarea form="channel-update-{{ channel.id }}" name="webhook_url" class="form-control form-control-sm mt-2" rows="2" placeholder="留空保持 URL 不变"></textarea>
+                                <input form="channel-update-{{ channel.id }}" name="secret" type="password" class="form-control form-control-sm mt-2" placeholder="留空保持密钥不变">
+                            </td>
+                            <td>
+                                <label class="d-block"><input form="channel-update-{{ channel.id }}" name="notify_alert" type="checkbox" {% if channel.notify_alert %}checked{% endif %}> 告警</label>
+                                <label class="d-block"><input form="channel-update-{{ channel.id }}" name="notify_approval" type="checkbox" {% if channel.notify_approval %}checked{% endif %}> 审批</label>
+                                <label class="d-block"><input form="channel-update-{{ channel.id }}" name="notify_deployment" type="checkbox" {% if channel.notify_deployment %}checked{% endif %}> 发布</label>
+                            </td>
+                            <td><label><input form="channel-update-{{ channel.id }}" name="enabled" type="checkbox" {% if channel.enabled %}checked{% endif %}> 启用</label></td>
+                            <td>
+                                <div class="d-flex flex-wrap gap-1">
+                                    <button form="channel-update-{{ channel.id }}" class="btn btn-sm btn-outline-primary" type="submit">保存</button>
+                                    <form method="post" action="{% url 'devops:notification_test' channel.id %}">{% csrf_token %}<button class="btn btn-sm btn-outline-success" type="submit">测试</button></form>
+                                    <form method="post" action="{% url 'devops:notification_delete' channel.id %}">{% csrf_token %}<button class="btn btn-sm btn-outline-danger" type="submit">删除</button></form>
+                                </div>
+                            </td>
+                        </tr>
+                        {% empty %}<tr><td colspan="5" class="text-muted">暂无通知渠道</td></tr>{% endfor %}
+                    </table>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <div class="card">
+        <div class="card-header">近期发送日志</div>
+        <div class="card-body table-responsive">
+            <table class="table table-sm">
+                <tr><th>时间</th><th>渠道</th><th>事件</th><th>标题</th><th>状态</th><th>响应</th></tr>
+                {% for log in logs %}
+                <tr>
+                    <td>{{ log.created_at|date:"Y-m-d H:i:s" }}</td>
+                    <td>{{ log.channel.name|default:"-" }}</td>
+                    <td>{{ log.get_event_type_display }}</td>
+                    <td>{{ log.title }}</td>
+                    <td>{{ log.get_status_display }}</td>
+                    <td><code>{{ log.response|truncatechars:120 }}</code></td>
+                </tr>
+                {% empty %}<tr><td colspan="6" class="text-muted">暂无发送日志</td></tr>{% endfor %}
+            </table>
+        </div>
+    </div>
+</div>
+{% endblock %}

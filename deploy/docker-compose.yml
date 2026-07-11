@@ -1,0 +1,15 @@
+services:
+  web:
+    build:
+      context: ..
+      dockerfile: deploy/Dockerfile
+    env_file:
+      - path: ../.env
+        required: false
+    ports:
+      - "8000:8000"
+    volumes:
+      - ../db.sqlite3:/app/db.sqlite3
+      - ../uploads:/app/uploads
+      - ../logs:/app/logs
+    command: gunicorn PyLinux.wsgi:application -c deploy/gunicorn.conf.py

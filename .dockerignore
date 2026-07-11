@@ -1,0 +1,16 @@
+.git
+.gitignore
+.dockerignore
+.venv
+venv
+__pycache__
+*.pyc
+.idea
+.vscode
+.playwright-mcp
+db.sqlite3
+logs
+uploads
+docs/audit-screenshots
+*.png
+.env

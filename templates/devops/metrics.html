@@ -1,0 +1,196 @@
+{% extends "base.html" %}
+
+{% block title %}监控历史 - DevOps平台{% endblock %}
+
+{% block content %}
+<div class="container-fluid px-4">
+    <h1 class="h3 mb-3">监控历史</h1>
+    {% include "devops/_nav.html" %}
+
+    <div class="card mb-3">
+        <div class="card-body">
+            <form method="get" class="row g-3 align-items-end">
+                <div class="col-md-5">
+                    <label class="form-label">主机</label>
+                    <select class="form-select" name="host">
+                        {% for host in hosts %}
+                        <option value="{{ host.id }}" {% if selected_host_id == host.id|stringformat:"s" %}selected{% endif %}>{{ host.linux_name|default:host.linux_ip }} - {{ host.linux_ip }}</option>
+                        {% endfor %}
+                    </select>
+                </div>
+                <div class="col-md-3">
+                    <label class="form-label">时间范围</label>
+                    <select class="form-select" name="range">
+                        {% for key,label in range_options %}
+                        <option value="{{ key }}" {% if range_key == key %}selected{% endif %}>{{ label }}</option>
+                        {% endfor %}
+                    </select>
+                </div>
+                <div class="col-md-2">
+                    <button class="btn btn-primary w-100" type="submit">筛选</button>
+                </div>
+            </form>
+        </div>
+    </div>
+
+    <div class="card mb-3">
+        <div class="card-header d-flex justify-content-between align-items-center">
+            <span>指标趋势</span>
+            <span class="text-muted small" id="trendSubtitle">-</span>
+        </div>
+        <div class="card-body">
+            <div class="metric-chart-wrap">
+                <svg id="metricTrendChart" viewBox="0 0 960 320" preserveAspectRatio="none" role="img" aria-label="监控指标趋势图"></svg>
+            </div>
+            <div class="d-flex gap-3 mt-2 small">
+                <span><i class="metric-legend cpu"></i>CPU</span>
+                <span><i class="metric-legend memory"></i>内存</span>
+                <span><i class="metric-legend disk"></i>磁盘</span>
+            </div>
+        </div>
+    </div>
+
+    <div class="card mb-3">
+        <div class="card-header">主机最近指标</div>
+        <div class="card-body table-responsive">
+            <table class="table table-hover align-middle">
+                <tr><th>主机</th><th>IP</th><th>CPU</th><th>内存</th><th>磁盘</th><th>最近采集</th></tr>
+                {% for item in host_metrics %}
+                <tr>
+                    <td>{{ item.host.linux_name }}</td>
+                    <td>{{ item.host.linux_ip }}</td>
+                    <td>{% if item.cpu %}{{ item.cpu_percent|floatformat:2 }}%{% else %}<span class="text-muted">暂无</span>{% endif %}</td>
+                    <td>{% if item.memory %}{{ item.memory_percent|floatformat:2 }}%{% else %}<span class="text-muted">暂无</span>{% endif %}</td>
+                    <td>{% if item.disk %}{{ item.disk_percent|floatformat:2 }}%{% else %}<span class="text-muted">暂无</span>{% endif %}</td>
+                    <td>
+                        {% if item.cpu %}{{ item.cpu.collected_at|date:"Y-m-d H:i:s" }}
+                        {% elif item.memory %}{{ item.memory.collected_at|date:"Y-m-d H:i:s" }}
+                        {% elif item.disk %}{{ item.disk.collected_at|date:"Y-m-d H:i:s" }}
+                        {% else %}<span class="text-muted">暂无</span>{% endif %}
+                    </td>
+                </tr>
+                {% empty %}<tr><td colspan="6" class="text-muted">暂无主机</td></tr>{% endfor %}
+            </table>
+        </div>
+    </div>
+
+    <div class="card">
+        <div class="card-header">最近采样记录</div>
+        <div class="card-body table-responsive">
+            <table class="table table-sm">
+                <tr><th>时间</th><th>主机</th><th>指标</th><th>值</th></tr>
+                {% for row in sample_rows %}
+                <tr>
+                    <td>{{ row.sample.collected_at|date:"Y-m-d H:i:s" }}</td>
+                    <td>{{ row.sample.host.linux_name }}</td>
+                    <td>{{ row.sample.get_metric_display }}</td>
+                    <td>{{ row.value_percent|floatformat:2 }}%</td>
+                </tr>
+                {% empty %}<tr><td colspan="4" class="text-muted">暂无采样记录，等待定时监控任务写入</td></tr>{% endfor %}
+            </table>
+        </div>
+    </div>
+</div>
+
+<style>
+    .metric-chart-wrap {
+        width: 100%;
+        height: 320px;
+        border: 1px solid #e5e7eb;
+        background: #ffffff;
+        overflow: hidden;
+    }
+    #metricTrendChart {
+        width: 100%;
+        height: 100%;
+        display: block;
+    }
+    .metric-legend {
+        display: inline-block;
+        width: 22px;
+        height: 3px;
+        margin-right: 6px;
+        vertical-align: middle;
+    }
+    .metric-legend.cpu { background: #2563eb; }
+    .metric-legend.memory { background: #16a34a; }
+    .metric-legend.disk { background: #dc2626; }
+</style>
+
+<script>
+    (function () {
+        const chartData = {{ chart_json|safe }};
+        const svg = document.getElementById('metricTrendChart');
+        const subtitle = document.getElementById('trendSubtitle');
+        const width = 960;
+        const height = 320;
+        const padding = { left: 48, right: 20, top: 24, bottom: 42 };
+        const plotWidth = width - padding.left - padding.right;
+        const plotHeight = height - padding.top - padding.bottom;
+        const colors = { cpu: '#2563eb', memory: '#16a34a', disk: '#dc2626' };
+        const names = { cpu: 'CPU', memory: '内存', disk: '磁盘' };
+
+        subtitle.textContent = chartData.host_name ? `${chartData.host_name} · ${chartData.range_label}` : '请选择主机';
+
+        function el(name, attrs) {
+            const node = document.createElementNS('http://www.w3.org/2000/svg', name);
+            Object.keys(attrs || {}).forEach(key => node.setAttribute(key, attrs[key]));
+            return node;
+        }
+
+        function y(value) {
+            return padding.top + plotHeight - (Math.max(0, Math.min(100, value)) / 100) * plotHeight;
+        }
+
+        function x(index) {
+            if (chartData.labels.length <= 1) return padding.left;
+            return padding.left + (index / (chartData.labels.length - 1)) * plotWidth;
+        }
+
+        function linePath(values) {
+            let path = '';
+            values.forEach((value, index) => {
+                if (value === null || value === undefined) return;
+                path += `${path ? ' L' : 'M'} ${x(index).toFixed(1)} ${y(value).toFixed(1)}`;
+            });
+            return path;
+        }
+
+        svg.innerHTML = '';
+        [0, 25, 50, 75, 100].forEach(value => {
+            const yy = y(value);
+            svg.appendChild(el('line', { x1: padding.left, y1: yy, x2: width - padding.right, y2: yy, stroke: '#e5e7eb', 'stroke-width': '1' }));
+            const label = el('text', { x: 12, y: yy + 4, fill: '#6b7280', 'font-size': '12' });
+            label.textContent = `${value}%`;
+            svg.appendChild(label);
+        });
+
+        if (!chartData.labels.length) {
+            const empty = el('text', { x: width / 2, y: height / 2, fill: '#6b7280', 'font-size': '16', 'text-anchor': 'middle' });
+            empty.textContent = '当前范围暂无趋势数据';
+            svg.appendChild(empty);
+            return;
+        }
+
+        Object.keys(chartData.series).forEach(metric => {
+            const path = linePath(chartData.series[metric]);
+            if (!path) return;
+            svg.appendChild(el('path', { d: path, fill: 'none', stroke: colors[metric], 'stroke-width': '2.5', 'stroke-linejoin': 'round', 'stroke-linecap': 'round' }));
+            chartData.series[metric].forEach((value, index) => {
+                if (value === null || value === undefined) return;
+                const point = el('circle', { cx: x(index), cy: y(value), r: 3, fill: colors[metric] });
+                point.appendChild(el('title', {}));
+                point.querySelector('title').textContent = `${names[metric]} ${value.toFixed(2)}% · ${chartData.labels[index]}`;
+                svg.appendChild(point);
+            });
+        });
+
+        const firstLabel = el('text', { x: padding.left, y: height - 12, fill: '#6b7280', 'font-size': '12' });
+        firstLabel.textContent = chartData.labels[0];
+        svg.appendChild(firstLabel);
+        const lastLabel = el('text', { x: width - padding.right, y: height - 12, fill: '#6b7280', 'font-size': '12', 'text-anchor': 'end' });
+        lastLabel.textContent = chartData.labels[chartData.labels.length - 1];
+        svg.appendChild(lastLabel);
+    })();
+</script>
+{% endblock %}

@@ -1,0 +1,381 @@
+{% extends "base.html" %}
+
+{% block title %}{{ cluster.name|default:"K8s 集群" }} - DevOps平台{% endblock %}
+
+{% block content %}
+<div class="k8s-detail-page">
+    <header class="k8s-detail-header" id="cluster-overview">
+        <a class="k8s-icon-button" href="{% url 'devops:cluster_list' %}" title="返回集群列表" aria-label="返回集群列表">
+            <i class="fas fa-arrow-left" aria-hidden="true"></i>
+        </a>
+        <span class="k8s-cluster-mark" aria-hidden="true"><i class="fas fa-dharmachakra"></i></span>
+        <div class="k8s-cluster-heading">
+            <div class="k8s-cluster-title-row">
+                <h1 title="{{ cluster.name|default:'K8s 集群' }}">{{ cluster.name|default:"K8s 集群" }}</h1>
+                {% if overview.version %}<span class="k8s-version">{{ overview.version }}</span>{% endif %}
+                {% if cluster.status == "online" %}
+                <span class="k8s-status k8s-status-online"><i class="fas fa-circle" aria-hidden="true"></i> 在线</span>
+                {% elif cluster.status == "offline" %}
+                <span class="k8s-status k8s-status-offline"><i class="fas fa-circle" aria-hidden="true"></i> 离线</span>
+                {% else %}
+                <span class="k8s-status k8s-status-unknown"><i class="fas fa-circle" aria-hidden="true"></i> 未检测</span>
+                {% endif %}
+            </div>
+            <div class="k8s-cluster-meta" title="{{ cluster.api_server|default:'-' }}">
+                <i class="fas fa-link" aria-hidden="true"></i>
+                <span>{{ cluster.api_server|default:"-" }}</span>
+            </div>
+        </div>
+
+        {% if can_refresh %}
+        <div class="k8s-detail-controls">
+            <a class="k8s-icon-button" href="?{% if refresh_query %}{{ refresh_query }}{% else %}resource={{ active_resource|urlencode }}&namespace={{ selected_namespace|urlencode }}{% if query %}&q={{ query|urlencode }}{% endif %}&refresh=1{% endif %}#k8s-resources" title="刷新集群资源" aria-label="刷新集群资源">
+                <i class="fas fa-sync-alt" aria-hidden="true"></i>
+            </a>
+        </div>
+        {% endif %}
+    </header>
+
+    <div class="k8s-detail-workspace">
+        <aside class="k8s-resource-rail" aria-label="集群资源导航">
+            <nav>
+                <a class="{% if is_overview_resource %}is-active{% endif %}" href="?resource=overview&amp;namespace={{ selected_namespace|default:cluster.default_namespace|default:'default'|urlencode }}#k8s-resources"><i class="fas fa-chart-pie" aria-hidden="true"></i><span>概览</span></a>
+                <span class="k8s-resource-rail-label">Kubernetes 资源</span>
+                <a class="{% if is_namespace_resource %}is-active{% endif %}" href="?resource=namespaces&amp;namespace={{ selected_namespace|default:cluster.default_namespace|default:'default'|urlencode }}#k8s-resources"><i class="fas fa-project-diagram" aria-hidden="true"></i><span>Namespace</span></a>
+                <a class="{% if active_resource == 'nodes' %}is-active{% endif %}" href="?resource=nodes&amp;namespace={{ selected_namespace|default:cluster.default_namespace|default:'default'|urlencode }}#k8s-resources"><i class="fas fa-server" aria-hidden="true"></i><span>Node</span></a>
+                <a class="{% if is_workload_resource %}is-active{% endif %}" href="?resource=deployments&amp;namespace={{ selected_namespace|default:cluster.default_namespace|default:'default'|urlencode }}#k8s-resources"><i class="fas fa-layer-group" aria-hidden="true"></i><span>工作负载</span></a>
+                <a class="{% if resource_group == 'service' %}is-active{% endif %}" href="?resource=services&amp;namespace={{ selected_namespace|default:cluster.default_namespace|default:'default'|urlencode }}#k8s-resources"><i class="fas fa-network-wired" aria-hidden="true"></i><span>服务</span></a>
+                <a class="{% if resource_group == 'storage' %}is-active{% endif %}" href="?resource=persistentvolumeclaims&amp;namespace={{ selected_namespace|default:cluster.default_namespace|default:'default'|urlencode }}#k8s-resources"><i class="fas fa-hdd" aria-hidden="true"></i><span>存储</span></a>
+                <a class="{% if resource_group == 'config' %}is-active{% endif %}" href="?resource=configmaps&amp;namespace={{ selected_namespace|default:cluster.default_namespace|default:'default'|urlencode }}#k8s-resources"><i class="fas fa-sliders-h" aria-hidden="true"></i><span>配置</span></a>
+            </nav>
+        </aside>
+
+        <section class="k8s-detail-main" aria-label="集群资源">
+            {% if load_message or from_cache or k8s_detail_from_cache %}
+            <div class="k8s-load-note" role="status">
+                <i class="fas {% if from_cache or k8s_detail_from_cache %}fa-database{% else %}fa-clock{% endif %}" aria-hidden="true"></i>
+                <span>{% if load_message %}{{ load_message }}{% elif from_cache or k8s_detail_from_cache %}当前显示缓存数据{% endif %}</span>
+            </div>
+            {% endif %}
+
+            {% if resource_error %}
+            <div class="k8s-load-error" role="alert">
+                <i class="fas fa-exclamation-triangle" aria-hidden="true"></i>
+                <strong>{{ active_resource_label|default:"资源" }}读取失败</strong>
+                <span>{{ resource_error }}</span>
+            </div>
+            {% elif overview.message and not overview.ok %}
+            <div class="k8s-load-error" role="alert">
+                <i class="fas fa-exclamation-triangle" aria-hidden="true"></i>
+                <strong>集群信息读取失败</strong>
+                <span>{{ overview.message }}</span>
+            </div>
+            {% endif %}
+
+            {% if is_overview_resource %}
+            <section class="k8s-overview-console" id="k8s-resources" aria-labelledby="k8s-overview-title">
+                <header class="k8s-overview-heading">
+                    <div>
+                        <h2 id="k8s-overview-title">集群概览</h2>
+                        <span>{{ cluster.name }} · {{ cluster_summary.version }}</span>
+                    </div>
+                    <span>统计 Namespace：{{ selected_namespace }}</span>
+                </header>
+
+                <div class="k8s-overview-metrics">
+                    <article>
+                        <span class="k8s-overview-metric-icon is-cpu"><i class="fas fa-microchip" aria-hidden="true"></i></span>
+                        <div><span>CPU 总容量</span><strong>{{ cluster_summary.cpu_capacity|default:"0 核" }}</strong><small>可分配 {{ cluster_summary.cpu_allocatable|default:"0 核" }}</small></div>
+                    </article>
+                    <article>
+                        <span class="k8s-overview-metric-icon is-memory"><i class="fas fa-memory" aria-hidden="true"></i></span>
+                        <div><span>内存总容量</span><strong>{{ cluster_summary.memory_capacity|default:"0 GiB" }}</strong><small>可分配 {{ cluster_summary.memory_allocatable|default:"0 GiB" }}</small></div>
+                    </article>
+                    <article>
+                        <span class="k8s-overview-metric-icon is-node"><i class="fas fa-server" aria-hidden="true"></i></span>
+                        <div><span>Node 状态</span><strong>{{ cluster_summary.ready_nodes|default:0 }} / {{ cluster_summary.node_count|default:0 }}</strong><small>Ready / 全部节点</small></div>
+                    </article>
+                    <article>
+                        <span class="k8s-overview-metric-icon is-namespace"><i class="fas fa-project-diagram" aria-hidden="true"></i></span>
+                        <div><span>Namespace</span><strong>{{ cluster_summary.namespace_count|default:0 }}</strong><small>资源合计 {{ cluster_summary.resource_count|default:0 }}</small></div>
+                    </article>
+                </div>
+
+                <section class="k8s-overview-section" aria-labelledby="k8s-cluster-info-title">
+                    <h3 id="k8s-cluster-info-title">集群信息</h3>
+                    <dl class="k8s-overview-info">
+                        <div><dt>集群名称</dt><dd>{{ cluster.name|default:"-" }}</dd></div>
+                        <div><dt>Kubernetes 版本</dt><dd>{{ cluster_summary.version|default:"-" }}</dd></div>
+                        <div><dt>API Server</dt><dd title="{{ cluster.api_server|default:'-' }}">{{ cluster.api_server|default:"-" }}</dd></div>
+                        <div><dt>连接状态</dt><dd>{{ cluster.get_status_display|default:cluster.status|default:"-" }}</dd></div>
+                        <div><dt>默认 Namespace</dt><dd>{{ cluster.default_namespace|default:"default" }}</dd></div>
+                        <div><dt>数据来源</dt><dd>{% if from_cache or k8s_detail_from_cache %}本地缓存{% else %}Kubernetes API{% endif %}</dd></div>
+                        <div><dt>最近检测</dt><dd>{{ cluster.last_checked_at|date:"Y-m-d H:i:s"|default:"-" }}</dd></div>
+                        <div><dt>创建人</dt><dd>{{ cluster.created_by|default:"-" }}</dd></div>
+                    </dl>
+                </section>
+
+                <section class="k8s-overview-section" aria-labelledby="k8s-resource-summary-title">
+                    <div class="k8s-overview-section-title">
+                        <h3 id="k8s-resource-summary-title">资源统计</h3>
+                        <span>{{ selected_namespace }} 及集群级资源</span>
+                    </div>
+                    <div class="k8s-overview-resource-grid">
+                        {% for item in overview_resource_counts %}
+                        <div><span>{{ item.label }}</span><strong>{{ item.count }}</strong></div>
+                        {% endfor %}
+                    </div>
+                </section>
+            </section>
+            {% else %}
+            <section class="k8s-workload-console" id="k8s-resources" aria-labelledby="k8s-resource-title">
+                {% if show_resource_tabs %}
+                <nav class="k8s-resource-tabs" aria-label="资源类型">
+                    {% for tab in resource_tabs %}
+                    <a class="{% if tab.active or tab.key == active_resource %}is-active{% endif %}" href="?resource={{ tab.key|urlencode }}&namespace={{ selected_namespace|default:cluster.default_namespace|default:'default'|urlencode }}{% if query %}&q={{ query|urlencode }}{% endif %}#k8s-resources">
+                        <span>{{ tab.label }}</span>
+                        {% if tab.count != None %}<span class="k8s-tab-count">{{ tab.count }}</span>{% endif %}
+                    </a>
+                    {% empty %}
+                    <span class="k8s-tabs-empty">暂无资源分类</span>
+                    {% endfor %}
+                </nav>
+                {% endif %}
+
+                <section class="k8s-workload-panel">
+                    <div class="k8s-workload-toolbar">
+                        <div>
+                            <h2 id="k8s-resource-title">{{ active_resource_label|default:"工作负载" }}</h2>
+                            <span>{% if show_namespace_switcher %}{{ selected_namespace|default:cluster.default_namespace|default:"default" }}{% else %}集群级资源{% endif %}</span>
+                        </div>
+                        <div class="k8s-workload-actions">
+                            {% if show_namespace_switcher %}
+                            <form class="k8s-namespace-switcher" method="get">
+                                <input type="hidden" name="resource" value="{{ active_resource }}">
+                                {% if query %}<input type="hidden" name="q" value="{{ query }}">{% endif %}
+                                <label for="k8s-namespace-select">Namespace</label>
+                                <select id="k8s-namespace-select" name="namespace" onchange="this.form.submit()" title="切换 Namespace">
+                                    {% for namespace in namespace_options %}
+                                    <option value="{{ namespace }}" {% if namespace == selected_namespace %}selected{% endif %}>{{ namespace }}</option>
+                                    {% empty %}
+                                    <option value="{{ selected_namespace|default:cluster.default_namespace|default:'default' }}" selected>{{ selected_namespace|default:cluster.default_namespace|default:"default" }}</option>
+                                    {% endfor %}
+                                </select>
+                            </form>
+                            {% endif %}
+                            <form class="k8s-search-row" method="get" role="search">
+                                <input type="hidden" name="resource" value="{{ active_resource }}">
+                                <input type="hidden" name="namespace" value="{{ selected_namespace|default:cluster.default_namespace|default:'default' }}">
+                                <i class="fas fa-search" aria-hidden="true"></i>
+                                <input type="search" name="q" value="{{ query }}" placeholder="搜索{{ active_resource_label|default:'资源' }}名称、状态或详情" aria-label="搜索{{ active_resource_label|default:'资源' }}">
+                                <button type="submit" title="搜索" aria-label="搜索"><i class="fas fa-search" aria-hidden="true"></i></button>
+                                {% if query %}
+                                <a href="?resource={{ active_resource|urlencode }}&namespace={{ selected_namespace|default:cluster.default_namespace|default:'default'|urlencode }}#k8s-resources" title="清除搜索" aria-label="清除搜索"><i class="fas fa-times" aria-hidden="true"></i></a>
+                                {% endif %}
+                            </form>
+                        </div>
+                    </div>
+
+                    {% if is_workload_resource %}
+                    <div class="k8s-workload-list">
+                        <div class="k8s-workload-list-head" aria-hidden="true">
+                            <span></span><span>资源名称</span><span>类型</span><span>状态</span><span>实例/数量</span><span>Namespace</span><span>标签</span><span>创建时间</span>
+                        </div>
+                        {% for item in resources %}
+                        <details class="k8s-workload-row">
+                            <summary>
+                                <span class="k8s-expand-icon" aria-hidden="true"><i class="fas fa-chevron-right"></i></span>
+                                <span class="k8s-workload-name">
+                                    <strong title="{{ item.name }}">{{ item.name|default:"-" }}</strong>
+                                    <small>{{ item.matched_pods|length }} 个 Pod · {{ item.matched_services|length }} 个 Service</small>
+                                </span>
+                                <span>{{ item.kind|default:active_resource_label|default:"-" }}</span>
+                                <span class="k8s-resource-status">
+                                    {% if item.status == "运行中" or item.status == "Ready" or item.status == "启用" or item.status == "Active" or item.status == "Running" or item.status == "Succeeded" %}<i class="fas fa-circle is-ok" aria-hidden="true"></i>{% else %}<i class="fas fa-circle is-warn" aria-hidden="true"></i>{% endif %}
+                                    {{ item.status|default:"-" }}
+                                </span>
+                                <span>{{ item.replicas|default:"-" }}</span>
+                                <span class="k8s-cell-ellipsis" title="{{ item.namespace|default:selected_namespace }}">{{ item.namespace|default:selected_namespace|default:"default" }}</span>
+                                <span class="k8s-labels-cell" tabindex="0" data-expandable-labels title="{{ item.labels|default:'-' }}">{{ item.labels|default:"-" }}</span>
+                                <span class="k8s-cell-ellipsis" title="{{ item.created_at|default:'-' }}">{{ item.created_at|default:"-" }}</span>
+                            </summary>
+                            <div class="k8s-workload-detail">
+                                <div class="k8s-workload-detail-meta"><span>镜像地址</span><code>{{ item.detail|default:"-" }}</code></div>
+                                <div class="k8s-workload-detail-meta is-annotations"><span>注解</span><code>{{ item.annotations|default:"-" }}</code></div>
+                                <div class="k8s-pod-title"><i class="fas fa-cube" aria-hidden="true"></i> 匹配 Pod</div>
+                                {% if item.matched_pods %}
+                                <div class="k8s-pod-list">
+                                    <div class="k8s-pod-list-head" aria-hidden="true"><span>Pod 名称</span><span>状态</span><span>Namespace</span><span>创建时间</span><span>Node</span></div>
+                                    {% for pod in item.matched_pods %}
+                                    <div class="k8s-pod-item">
+                                        <strong title="{{ pod.name }}">{{ pod.name|default:"-" }}</strong>
+                                        <span class="k8s-resource-status">
+                                            {% if pod.status == "运行中" or pod.status == "Ready" or pod.status == "Active" or pod.status == "Running" or pod.status == "Succeeded" %}<i class="fas fa-circle is-ok" aria-hidden="true"></i>{% else %}<i class="fas fa-circle is-warn" aria-hidden="true"></i>{% endif %}
+                                            {{ pod.status|default:"-" }}
+                                        </span>
+                                        <span title="{{ pod.namespace|default:item.namespace }}">{{ pod.namespace|default:item.namespace|default:selected_namespace|default:"default" }}</span>
+                                        <span title="{{ pod.created_at|default:'-' }}">{{ pod.created_at|default:"-" }}</span>
+                                        <code title="{{ pod.detail|default:'-' }}">{{ pod.detail|default:"-" }}</code>
+                                    </div>
+                                    {% endfor %}
+                                </div>
+                                {% else %}<div class="k8s-pod-empty">暂无匹配 Pod</div>{% endif %}
+
+                                <div class="k8s-service-title"><i class="fas fa-network-wired" aria-hidden="true"></i> 匹配 Service</div>
+                                {% if item.matched_services %}
+                                <div class="k8s-service-match-list">
+                                    <div class="k8s-service-match-head" aria-hidden="true"><span>Service 名称</span><span>类型</span><span>Cluster IP</span><span>Namespace</span><span>创建时间</span></div>
+                                    {% for service in item.matched_services %}
+                                    <div class="k8s-service-match-row">
+                                        <strong title="{{ service.name|default:'-' }}">{{ service.name|default:"-" }}</strong>
+                                        <span>{{ service.status|default:"-" }}</span>
+                                        <code title="{{ service.detail|default:'-' }}">{{ service.detail|default:"-" }}</code>
+                                        <span title="{{ service.namespace|default:item.namespace }}">{{ service.namespace|default:item.namespace|default:selected_namespace|default:"default" }}</span>
+                                        <span title="{{ service.created_at|default:'-' }}">{{ service.created_at|default:"-" }}</span>
+                                    </div>
+                                    {% endfor %}
+                                </div>
+                                {% else %}<div class="k8s-pod-empty">暂无匹配 Service</div>{% endif %}
+                            </div>
+                        </details>
+                        {% empty %}
+                        <div class="k8s-empty-workload">
+                            <i class="fas fa-layer-group" aria-hidden="true"></i>
+                            <strong>暂无{{ active_resource_label|default:"工作负载" }}数据</strong>
+                            <span>{% if query %}没有匹配“{{ query }}”的{{ active_resource_label|default:"工作负载" }}{% elif resource_error %}资源读取失败，请检查上方错误信息{% else %}当前 Namespace 下没有{{ active_resource_label|default:"该类型资源" }}{% endif %}</span>
+                        </div>
+                        {% endfor %}
+                    </div>
+                    {% elif is_namespace_resource %}
+                    <div class="k8s-generic-resource-list k8s-namespace-resource-list" role="table" aria-label="Namespace 列表">
+                        <div class="k8s-namespace-resource-head" role="row">
+                            <span role="columnheader">资源名称</span><span role="columnheader">状态</span><span role="columnheader">标签</span><span role="columnheader">创建时间</span>
+                        </div>
+                        {% for item in resources %}
+                        <div class="k8s-namespace-resource-row" role="row">
+                            <strong class="k8s-cell-ellipsis" role="cell" title="{{ item.name|default:'-' }}">{{ item.name|default:"-" }}</strong>
+                            <span class="k8s-resource-status" role="cell">
+                                {% if item.status == "Active" %}<i class="fas fa-circle is-ok" aria-hidden="true"></i>{% else %}<i class="fas fa-circle is-warn" aria-hidden="true"></i>{% endif %}
+                                {{ item.status|default:"-" }}
+                            </span>
+                            <span class="k8s-labels-cell" role="cell" tabindex="0" data-expandable-labels title="{{ item.labels|default:'-' }}">{{ item.labels|default:"-" }}</span>
+                            <span class="k8s-cell-ellipsis" role="cell" title="{{ item.created_at|default:'-' }}">{{ item.created_at|default:"-" }}</span>
+                        </div>
+                        {% empty %}
+                        <div class="k8s-empty-workload">
+                            <i class="fas fa-inbox" aria-hidden="true"></i>
+                            <strong>暂无 Namespace 数据</strong>
+                            <span>{% if query %}没有匹配“{{ query }}”的 Namespace{% elif resource_error %}资源读取失败，请检查上方错误信息{% else %}当前集群没有 Namespace 数据{% endif %}</span>
+                        </div>
+                        {% endfor %}
+                    </div>
+                    {% elif active_resource == 'nodes' %}
+                    <div class="k8s-generic-resource-list k8s-node-resource-list" role="table" aria-label="Node 列表">
+                        <div class="k8s-node-resource-head" role="row">
+                            <span role="columnheader">节点名称</span><span role="columnheader">类型</span><span role="columnheader">状态</span><span role="columnheader">IP 地址</span><span role="columnheader">创建时间</span><span role="columnheader">详情</span>
+                        </div>
+                        {% for item in resources %}
+                        <div class="k8s-node-resource-row" role="row">
+                            <a class="k8s-node-name-link k8s-cell-ellipsis" role="cell" href="{% url 'devops:k8s_node_detail' cluster.id item.name %}" title="查看节点 {{ item.name|default:'-' }}">{{ item.name|default:"-" }}</a>
+                            <span role="cell">{{ item.kind|default:"Node" }}</span>
+                            <span class="k8s-resource-status" role="cell">
+                                {% if item.status == "Ready" %}<i class="fas fa-circle is-ok" aria-hidden="true"></i>{% else %}<i class="fas fa-circle is-warn" aria-hidden="true"></i>{% endif %}
+                                {{ item.status|default:"-" }}
+                            </span>
+                            <code class="k8s-cell-ellipsis" role="cell" title="{{ item.ip_address|default:'-' }}">{{ item.ip_address|default:"-" }}</code>
+                            <span class="k8s-cell-ellipsis" role="cell" title="{{ item.created_at|default:'-' }}">{{ item.created_at|default:"-" }}</span>
+                            <code class="k8s-cell-ellipsis" role="cell" title="{{ item.detail|default:'-' }}">{{ item.detail|default:"-" }}</code>
+                        </div>
+                        {% empty %}
+                        <div class="k8s-empty-workload">
+                            <i class="fas fa-server" aria-hidden="true"></i>
+                            <strong>暂无 Node 数据</strong>
+                            <span>{% if query %}没有匹配“{{ query }}”的 Node{% elif resource_error %}资源读取失败，请检查上方错误信息{% else %}当前集群没有 Node 数据{% endif %}</span>
+                        </div>
+                        {% endfor %}
+                    </div>
+                    {% else %}
+                    <div class="k8s-generic-resource-list" role="table" aria-label="{{ active_resource_label|default:'资源' }}列表">
+                        <div class="k8s-generic-resource-head" role="row">
+                            <span role="columnheader">资源名称</span><span role="columnheader">类型</span><span role="columnheader">状态</span><span role="columnheader">Namespace</span><span role="columnheader">创建时间</span><span role="columnheader">详情</span>
+                        </div>
+                        {% for item in resources %}
+                        <div class="k8s-generic-resource-row" role="row">
+                            <strong class="k8s-cell-ellipsis" role="cell" title="{{ item.name|default:'-' }}">{{ item.name|default:"-" }}</strong>
+                            <span class="k8s-cell-ellipsis" role="cell" title="{{ item.kind|default:active_resource_label|default:'-' }}">{{ item.kind|default:active_resource_label|default:"-" }}</span>
+                            <span class="k8s-resource-status k8s-cell-ellipsis" role="cell" title="{{ item.status|default:'-' }}">
+                                {% if item.status == "运行中" or item.status == "Ready" or item.status == "启用" or item.status == "Active" or item.status == "Running" or item.status == "Succeeded" or item.status == "Bound" %}<i class="fas fa-circle is-ok" aria-hidden="true"></i>{% else %}<i class="fas fa-circle is-warn" aria-hidden="true"></i>{% endif %}
+                                {{ item.status|default:"-" }}
+                            </span>
+                            <span class="k8s-cell-ellipsis" role="cell" title="{{ item.namespace|default:selected_namespace|default:'default' }}">{{ item.namespace|default:selected_namespace|default:"default" }}</span>
+                            <span class="k8s-cell-ellipsis" role="cell" title="{{ item.created_at|default:'-' }}">{{ item.created_at|default:"-" }}</span>
+                            <code class="k8s-cell-ellipsis" role="cell" title="{{ item.detail|default:'-' }}">{{ item.detail|default:"-" }}</code>
+                        </div>
+                        {% empty %}
+                        <div class="k8s-empty-workload">
+                            <i class="fas fa-inbox" aria-hidden="true"></i>
+                            <strong>暂无{{ active_resource_label|default:"资源" }}数据</strong>
+                            <span>{% if query %}没有匹配“{{ query }}”的{{ active_resource_label|default:"资源" }}{% elif resource_error %}资源读取失败，请检查上方错误信息{% else %}当前 Namespace 下没有{{ active_resource_label|default:"该类型资源" }}{% endif %}</span>
+                        </div>
+                        {% endfor %}
+                    </div>
+                    {% endif %}
+
+                    {% if resource_page.paginator.num_pages > 1 %}
+                    <nav class="k8s-resource-pagination" aria-label="资源列表分页">
+                        <span>第 {{ resource_page.number }} / {{ resource_page.paginator.num_pages }} 页，共 {{ resource_page.paginator.count }} 条</span>
+                        <div>
+                            {% if resource_page.has_previous %}
+                            <a href="?{{ pagination_query }}&amp;page={{ resource_page.previous_page_number }}#k8s-resources" title="上一页" aria-label="上一页"><i class="fas fa-chevron-left" aria-hidden="true"></i></a>
+                            {% else %}
+                            <span aria-hidden="true"><i class="fas fa-chevron-left"></i></span>
+                            {% endif %}
+                            {% for page_number in resource_page.paginator.page_range %}
+                                {% if page_number == resource_page.number %}
+                                <strong aria-current="page">{{ page_number }}</strong>
+                                {% elif page_number >= resource_page.number|add:"-2" and page_number <= resource_page.number|add:"2" %}
+                                <a href="?{{ pagination_query }}&amp;page={{ page_number }}#k8s-resources">{{ page_number }}</a>
+                                {% endif %}
+                            {% endfor %}
+                            {% if resource_page.has_next %}
+                            <a href="?{{ pagination_query }}&amp;page={{ resource_page.next_page_number }}#k8s-resources" title="下一页" aria-label="下一页"><i class="fas fa-chevron-right" aria-hidden="true"></i></a>
+                            {% else %}
+                            <span aria-hidden="true"><i class="fas fa-chevron-right"></i></span>
+                            {% endif %}
+                        </div>
+                    </nav>
+                    {% elif resource_page.paginator.count %}
+                    <div class="k8s-resource-pagination k8s-resource-pagination-single">共 {{ resource_page.paginator.count }} 条</div>
+                    {% endif %}
+                </section>
+            </section>
+            {% endif %}
+        </section>
+    </div>
+</div>
+{% endblock %}
+
+{% block script %}
+<script>
+document.addEventListener('DOMContentLoaded', function () {
+    document.querySelectorAll('[data-expandable-labels]').forEach(function (cell) {
+        function toggleLabels(event) {
+            if (event) {
+                event.preventDefault();
+                event.stopPropagation();
+            }
+            cell.classList.toggle('is-expanded');
+        }
+        cell.addEventListener('click', function (event) {
+            event.stopPropagation();
+        });
+        cell.addEventListener('dblclick', toggleLabels);
+        cell.addEventListener('keydown', function (event) {
+            if (event.key === 'Enter' || event.key === ' ') {
+                toggleLabels(event);
+            }
+        });
+    });
+});
+</script>
+{% endblock script %}

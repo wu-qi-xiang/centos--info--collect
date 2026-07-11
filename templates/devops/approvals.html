@@ -1,0 +1,77 @@
+{% extends "base.html" %}
+
+{% block title %}审批流 - DevOps平台{% endblock %}
+
+{% block content %}
+<div class="container-fluid px-4">
+    <h1 class="h3 mb-3">审批流</h1>
+    {% include "devops/_nav.html" %}
+    <div class="alert alert-info py-2">高危命令会自动转入审批；申请人与审批人不能为同一人。</div>
+
+    <div class="card mb-3">
+        <div class="card-header">提交命令审批</div>
+        <div class="card-body">
+            <form method="post" action="{% url 'devops:command_approval_create' %}">
+                {% csrf_token %}
+                <div class="row g-3">
+                    <div class="col-md-3"><label class="form-label">目标主机</label>{{ command_form.host }}</div>
+                    <div class="col-md-5"><label class="form-label">命令</label>{{ command_form.command }}</div>
+                    <div class="col-md-4"><label class="form-label">申请原因</label>{{ command_form.reason }}</div>
+                </div>
+                <button class="btn btn-primary mt-3" type="submit">提交审批</button>
+            </form>
+        </div>
+    </div>
+
+    <div class="card">
+        <div class="card-header">审批列表</div>
+        <div class="card-body table-responsive">
+            <table class="table table-hover align-middle">
+                <tr><th>时间</th><th>类型</th><th>标题</th><th>状态</th><th>申请人</th><th>原因</th><th>目标</th><th>处理</th></tr>
+                {% for item in approvals %}
+                <tr>
+                    <td>{{ item.created_at|date:"Y-m-d H:i:s" }}</td>
+                    <td>{{ item.get_request_type_display }}</td>
+                    <td>{{ item.title }}</td>
+                    <td>{{ item.get_status_display }}</td>
+                    <td>{{ item.requester }}</td>
+                    <td>{{ item.reason }}</td>
+                    <td>
+                        {% if item.request_type == "command" %}
+                        {{ item.host.linux_name }} <code>{{ item.command|truncatechars:60 }}</code>
+                        {% elif item.deployment_release %}
+                        {{ item.deployment_release.app.name }} {{ item.deployment_release.version }}
+                        {% else %}-{% endif %}
+                    </td>
+                    <td>
+                        {% if item.status == "pending" %}
+                        {% if item.requester == request.session.user_name %}
+                        <span class="text-muted">等待其他审批人处理</span>
+                        {% else %}
+                        <div class="d-flex gap-1">
+                            <form method="post" action="{% url 'devops:approval_decide' item.id %}" class="d-flex gap-1">
+                                {% csrf_token %}
+                                <input type="hidden" name="action" value="approve">
+                                <input name="comment" class="form-control form-control-sm" placeholder="处理意见">
+                                <button class="btn btn-sm btn-outline-primary" type="submit">批准</button>
+                            </form>
+                            <form method="post" action="{% url 'devops:approval_decide' item.id %}">
+                                {% csrf_token %}
+                                <input type="hidden" name="action" value="reject">
+                                <button class="btn btn-sm btn-outline-danger" type="submit">拒绝</button>
+                            </form>
+                        </div>
+                        {% endif %}
+                        {% elif item.command_execution %}
+                        <a class="btn btn-sm btn-outline-primary" href="{% url 'devops:command_detail' item.command_execution.id %}">执行详情</a>
+                        {% else %}
+                        <span class="text-muted">{{ item.comment|default:"-" }}</span>
+                        {% endif %}
+                    </td>
+                </tr>
+                {% empty %}<tr><td colspan="8" class="text-muted">暂无审批</td></tr>{% endfor %}
+            </table>
+        </div>
+    </div>
+</div>
+{% endblock %}

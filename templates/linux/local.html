@@ -1,21 +1,20 @@
 {% extends "base.html" %}
 {% load staticfiles %}
 
-{% block title %}本地服务器 - Linux监控系统{% endblock %}
+{% block title %}本地资产 - Linux监控系统{% endblock %}
 
 {% block content %}
 <div class="container-fluid px-4">
-    <!-- 页面头部 -->
-    <div class="d-flex justify-content-between align-items-center mb-4">
+    <div class="ops-page-header">
         <div>
-            <h1 class="h3 mb-0">
-                <i class="fas fa-desktop me-2 text-success"></i>本地服务器信息
-            </h1>
-            <p class="text-muted mb-0">当前服务器的系统信息概览</p>
+            <h1 class="ops-page-title"><i class="fas fa-desktop me-2 text-primary"></i>本地资产</h1>
+            <p class="ops-page-subtitle">本地资产的系统信息概览。</p>
         </div>
-        <button type="button" class="btn btn-primary" onclick="location.reload()">
-            <i class="fas fa-sync-alt me-1"></i>刷新
-        </button>
+        <div class="ops-header-actions">
+            <button type="button" class="btn btn-primary" onclick="location.reload()">
+                <i class="fas fa-sync-alt me-1"></i>刷新
+            </button>
+        </div>
     </div>
 
 
@@ -71,7 +70,7 @@
                 </div>
                 <div class="card-body text-center">
                     <div class="cpu-display">
-                        <div class="cpu-number">{{ cpu|default:"0" }}</div>
+                        <div class="cpu-number metric-value">{{ cpu|default:"0" }}</div>
                         <div class="cpu-label">CPU核心数</div>
                         <div class="cpu-usage mt-3">
                             <div class="usage-ring">
@@ -93,28 +92,28 @@
                 </div>
                 <div class="card-body">
                     <div class="memory-grid">
-                        <div class="row text-center mb-3">
-                            <div class="col-3">
+                        <div class="row text-center mb-3 metric-grid">
+                            <div class="col-3 metric-col">
                                 <div class="memory-item">
-                                    <div class="memory-value text-primary">{{ total_mem|default:"0" }}</div>
+                                    <div class="memory-value text-primary metric-value">{{ total_mem|default:"0" }}</div>
                                     <div class="memory-label">总内存</div>
                                 </div>
                             </div>
-                            <div class="col-3">
+                            <div class="col-3 metric-col">
                                 <div class="memory-item">
-                                    <div class="memory-value text-danger">{{ used_mem|default:"0" }}</div>
+                                    <div class="memory-value text-danger metric-value">{{ used_mem|default:"0" }}</div>
                                     <div class="memory-label">已使用</div>
                                 </div>
                             </div>
-                            <div class="col-3">
+                            <div class="col-3 metric-col">
                                 <div class="memory-item">
-                                    <div class="memory-value text-success">{{ free_mem|default:"0" }}</div>
+                                    <div class="memory-value text-success metric-value">{{ free_mem|default:"0" }}</div>
                                     <div class="memory-label">空闲</div>
                                 </div>
                             </div>
-                            <div class="col-3">
+                            <div class="col-3 metric-col">
                                 <div class="memory-item">
-                                    <div class="memory-value text-info">{{ available_mem|default:"0" }}</div>
+                                    <div class="memory-value text-info metric-value">{{ available_mem|default:"0" }}</div>
                                     <div class="memory-label">可用</div>
                                 </div>
                             </div>
@@ -141,22 +140,22 @@
                 </div>
                 <div class="card-body">
                     <div class="disk-grid">
-                        <div class="row text-center mb-3">
-                            <div class="col-4">
+                        <div class="row text-center mb-3 metric-grid">
+                            <div class="col-4 metric-col">
                                 <div class="disk-item">
-                                    <div class="disk-value text-primary">{{ total_disk|default:"0" }}</div>
+                                    <div class="disk-value text-primary metric-value">{{ total_disk|default:"0" }}</div>
                                     <div class="disk-label">总容量</div>
                                 </div>
                             </div>
-                            <div class="col-4">
+                            <div class="col-4 metric-col">
                                 <div class="disk-item">
-                                    <div class="disk-value text-danger">{{ used_disk|default:"0" }}</div>
+                                    <div class="disk-value text-danger metric-value">{{ used_disk|default:"0" }}</div>
                                     <div class="disk-label">已使用</div>
                                 </div>
                             </div>
-                            <div class="col-4">
+                            <div class="col-4 metric-col">
                                 <div class="disk-item">
-                                    <div class="disk-value text-success">{{ available_disk|default:"0" }}</div>
+                                    <div class="disk-value text-success metric-value">{{ available_disk|default:"0" }}</div>
                                     <div class="disk-label">可用</div>
                                 </div>
                             </div>
@@ -176,169 +175,6 @@
         </div>
     </div>
 </div>
-
-<style>
-    /* 信息卡片 */
-    .info-card {
-        background: white;
-        border-radius: 10px;
-        box-shadow: 0 2px 10px rgba(0, 0, 0, 0.08);
-        overflow: hidden;
-        height: 100%;
-    }
-
-    .info-card .card-header {
-        background: #f8f9fa;
-        border-bottom: 1px solid #e9ecef;
-        padding: 1rem 1.5rem;
-    }
-
-    .info-card .card-body {
-        padding: 1.5rem;
-    }
-
-    /* 信息表格 */
-    .info-table {
-        display: flex;
-        flex-direction: column;
-        gap: 1rem;
-    }
-
-    .info-row {
-        display: flex;
-        justify-content: space-between;
-        align-items: center;
-        padding: 0.75rem;
-        background: #f8f9fa;
-        border-radius: 6px;
-    }
-
-    .info-label {
-        font-weight: 600;
-        color: #495057;
-    }
-
-    .info-value {
-        font-weight: 500;
-        color: #6c757d;
-    }
-
-    /* CPU显示 */
-    .cpu-display {
-        display: flex;
-        flex-direction: column;
-        align-items: center;
-    }
-
-    .cpu-number {
-        font-size: 3rem;
-        font-weight: bold;
-        color: var(--primary-color);
-        line-height: 1;
-    }
-
-    .cpu-label {
-        font-size: 0.875rem;
-        color: #6c757d;
-        margin-bottom: 1rem;
-    }
-
-    .usage-ring {
-        position: relative;
-        width: 80px;
-        height: 80px;
-        border-radius: 50%;
-        background: conic-gradient(var(--danger-color) 0deg calc(var(--usage) * 3.6deg), #e9ecef calc(var(--usage) * 3.6deg) 360deg);
-        display: flex;
-        align-items: center;
-        justify-content: center;
-        margin: 0 auto 0.5rem;
-    }
-
-    .usage-ring::before {
-        content: '';
-        position: absolute;
-        width: 60px;
-        height: 60px;
-        background: white;
-        border-radius: 50%;
-    }
-
-    .usage-text {
-        position: relative;
-        z-index: 1;
-        font-weight: bold;
-        color: var(--danger-color);
-    }
-
-    .usage-label {
-        font-size: 0.75rem;
-        color: #6c757d;
-    }
-
-    /* 内存和磁盘项目 */
-    .memory-item,
-    .disk-item {
-        padding: 0.5rem;
-    }
-
-    .memory-value,
-    .disk-value {
-        font-size: 1.1rem;
-        font-weight: bold;
-        margin-bottom: 0.25rem;
-    }
-
-    .memory-label,
-    .disk-label {
-        font-size: 0.75rem;
-        color: #6c757d;
-    }
-
-    /* 进度条 */
-    .progress-wrapper {
-        margin-top: 1rem;
-    }
-
-    .progress-info {
-        display: flex;
-        justify-content: space-between;
-        margin-bottom: 0.5rem;
-        font-size: 0.875rem;
-    }
-
-    .progress-bar {
-        height: 8px;
-        background: #e9ecef;
-        border-radius: 4px;
-        overflow: hidden;
-    }
-
-    .progress-fill {
-        height: 100%;
-        background: linear-gradient(90deg, var(--success-color), var(--warning-color), var(--danger-color));
-        border-radius: 4px;
-        transition: width 0.5s ease;
-        width: 0%;
-    }
-
-    /* 响应式设计 */
-    @media (max-width: 768px) {
-        .cpu-number {
-            font-size: 2rem;
-        }
-
-        .usage-ring {
-            width: 60px;
-            height: 60px;
-        }
-
-        .usage-ring::before {
-            width: 45px;
-            height: 45px;
-        }
-    }
-</style>
 
 <script>
     document.addEventListener('DOMContentLoaded', function () {

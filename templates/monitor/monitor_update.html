@@ -1,53 +1,92 @@
-<!DOCTYPE html>
-<html lang="en">
-<head>
-    <meta charset="UTF-8">
-    <title>监控首页</title>
-</head>
 {% extends "base.html" %}
 {% load staticfiles %}
+
+{% block title %}编辑监控配置 - Linux监控系统{% endblock %}
+
 {% block content %}
-<body>
-<div class="table table-hover table-bordered">
-    <thred>
-        <th>
-            <h2 class="text-center"><b>邮箱告警设置</b></h2>
-        </th>
-    </thred>
-</div>
-<div class="container">
-    <div class="row">
-        <div class="col-md-6">
-            <form method="post" enctype="multipart/form-data" action="{% url 'monitor:monitor_update' monitor.id %}">
-                {% csrf_token %}
-                <div class="form-group">
-                    <label><b>接收告警邮箱：</b></label>
-                    <span class="col-md-1"></span>
-                    <input type="text" class="form-control" id="monitor_email" name="monitor_email" style="width: 50%;display: inline-block" placeholder="填写告警接收邮箱 " value="{{ monitor.monitor_email }}">
+<div class="container-fluid px-4">
+    <div class="ops-page-header">
+        <div>
+            <h1 class="ops-page-title"><i class="fas fa-chart-line me-2 text-primary"></i>编辑监控配置</h1>
+            <p class="ops-page-subtitle">更新告警邮箱和资源使用率阈值。</p>
+        </div>
+        <div class="ops-header-actions">
+            <a href="{% url 'monitor:monitor_index' %}" class="btn btn-outline-secondary">
+                <i class="fas fa-arrow-left me-1"></i>返回监控设置
+            </a>
+        </div>
+    </div>
+
+    <div class="row justify-content-center">
+        <div class="col-lg-10 col-xl-8">
+            <div class="ops-form-card">
+                <div class="form-header">
+                    <div class="form-icon">
+                        <i class="fas fa-bell"></i>
+                    </div>
+                    <div>
+                        <h4>告警配置</h4>
+                        <p>这些阈值会用于定时巡检和邮件通知。</p>
+                    </div>
                 </div>
-                <div class="form-group">
-                    <label><b>CPU占用告警：</b></label>
-                    <span class="col-md-1"></span>
-                    <input type="text" class="form-control" id="monitor_cpu" name="monitor_cpu" style="width: 50%;display: inline-block" placeholder="填写cpu占用百分比" value="{{ monitor.monitor_cpu }}">
-                </div>
-                <div class="form-group">
-                    <label><b>内存占用告警：</b></label>
-                    <span class="col-md-1"></span>
-                    <input type="text" class="form-control" id="monitor_men" name="monitor_men" style="width: 50%;display: inline-block" placeholder="填写内存占用百分比" value="{{ monitor.monitor_men }}">
-                </div>
-                <div class="form-group">
-                    <label><b>磁盘占用告警：</b></label>
-                    <span class="col-md-1"></span>
-                    <input type="text" class="form-control" id="monitor_disk" name="monitor_disk" style="width: 50%;display: inline-block" placeholder="填写磁盘占用百分比" value="{{ monitor.monitor_disk }}">
-                </div>
-                <div class="col-md-4">
-                    <div class="col-md-4"></div>
-                    <button type="submit" class="btn btn-success" style="width: 180%;position: relative;left: 90%">更新</button>
-                </div>
-            </form>
+
+                <form method="post" enctype="multipart/form-data" action="{% url 'monitor:monitor_update' monitor.id %}">
+                    {% csrf_token %}
+                    {% include "includes/form_errors.html" %}
+                    <div class="form-section">
+                        <h5 class="form-section-title"><i class="fas fa-envelope me-2"></i>通知信息</h5>
+                        <div class="form-group-custom">
+                            <label class="form-label-custom" for="monitor_email">接收告警邮箱</label>
+                            <input type="email" class="form-control-custom" id="monitor_email" name="monitor_email"
+                                   placeholder="ops@example.com" value="{{ monitor.monitor_email }}" required>
+                            <small class="form-text text-muted">服务器资源超过阈值后会向该邮箱发送告警通知。</small>
+                        </div>
+                    </div>
+
+                    <div class="form-section">
+                        <h5 class="form-section-title"><i class="fas fa-sliders-h me-2"></i>资源阈值</h5>
+                        <div class="ops-form-grid">
+                            <div class="form-group-custom">
+                                <label class="form-label-custom" for="monitor_cpu">CPU 占用告警</label>
+                                <div class="input-group">
+                                    <input type="number" class="form-control-custom" id="monitor_cpu" name="monitor_cpu"
+                                           min="1" max="100" placeholder="80" value="{{ monitor.monitor_cpu }}" required>
+                                    <span class="input-group-text">%</span>
+                                </div>
+                            </div>
+                            <div class="form-group-custom">
+                                <label class="form-label-custom" for="monitor_men">内存占用告警</label>
+                                <div class="input-group">
+                                    <input type="number" class="form-control-custom" id="monitor_men" name="monitor_men"
+                                           min="1" max="100" placeholder="85" value="{{ monitor.monitor_men }}" required>
+                                    <span class="input-group-text">%</span>
+                                </div>
+                            </div>
+                            <div class="form-group-custom ops-span-2">
+                                <label class="form-label-custom" for="monitor_disk">磁盘占用告警</label>
+                                <div class="input-group">
+                                    <input type="number" class="form-control-custom" id="monitor_disk" name="monitor_disk"
+                                           min="1" max="100" placeholder="90" value="{{ monitor.monitor_disk }}" required>
+                                    <span class="input-group-text">%</span>
+                                </div>
+                                <small class="form-text text-muted">建议 CPU/内存设置为 80-90%，磁盘设置为 85-95%。</small>
+                            </div>
+                        </div>
+                    </div>
+
+                    <div class="form-actions">
+                        <div class="ops-action-row">
+                            <a href="{% url 'monitor:monitor_index' %}" class="btn btn-outline-secondary">
+                                <i class="fas fa-times me-1"></i>取消
+                            </a>
+                            <button type="submit" class="btn btn-success">
+                                <i class="fas fa-save me-1"></i>更新配置
+                            </button>
+                        </div>
+                    </div>
+                </form>
+            </div>
         </div>
     </div>
 </div>
-</body>
 {% endblock content %}
-</html>

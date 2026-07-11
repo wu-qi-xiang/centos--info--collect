@@ -1,75 +1,96 @@
 {% load staticfiles %}
 
-<nav class="navbar navbar-expand-lg navbar-light navbar-custom sticky-top">
-    <div class="container-fluid">
-        <!-- 品牌Logo -->
+<nav class="navbar navbar-light navbar-custom app-sidebar">
+    <div class="sidebar-inner">
         <a class="navbar-brand" href="{% url 'index' %}">
-            <i class="fas fa-server me-2"></i>
-            Linux监控系统
+            <i class="fas fa-server"></i>
+            <span>Linux监控系统</span>
         </a>
-        
-        <!-- 移动端切换按钮 -->
-        <button class="navbar-toggler" type="button" data-bs-toggle="collapse" data-bs-target="#navbarNav" 
-                aria-controls="navbarNav" aria-expanded="false" aria-label="切换导航">
-            <span class="navbar-toggler-icon"></span>
-        </button>
-        
-        <!-- 导航菜单 -->
-        <div class="collapse navbar-collapse" id="navbarNav">
-            <ul class="navbar-nav me-auto">
-                <li class="nav-item">
-                    <a class="nav-link" href="{% url 'linux' %}" data-tooltip="查看本地Linux系统信息">
-                        <i class="fas fa-desktop me-1"></i>本地Linux
+
+        <div class="sidebar-section">
+            <div class="sidebar-label">导航</div>
+            <ul class="navbar-nav sidebar-nav">
+                <li class="nav-item sidebar-nav-group">
+                    <a class="nav-link sidebar-parent-link" href="{% url 'asset_management' %}" data-tooltip="统一管理本地与远程资产">
+                        <i class="fas fa-boxes-stacked"></i><span>资产管理</span>
                     </a>
+                    <ul class="sidebar-subnav">
+                        <li>
+                            <a class="nav-link sidebar-subnav-link" href="{% url 'linux' %}" data-tooltip="查看本地资产系统信息">
+                                <i class="fas fa-desktop"></i><span>本地资产</span>
+                            </a>
+                        </li>
+                        <li>
+                            <a class="nav-link sidebar-subnav-link" href="{% url 'linux_detail' %}" data-tooltip="管理所有 Linux 资产">
+                                <i class="fas fa-list"></i><span>资产列表</span>
+                            </a>
+                        </li>
+                    </ul>
                 </li>
-                <li class="nav-item">
-                    <a class="nav-link" href="{% url 'linux_detail' %}" data-tooltip="管理所有Linux服务器">
-                        <i class="fas fa-list me-1"></i>服务器列表
+                <li class="nav-item sidebar-nav-group">
+                    <a class="nav-link sidebar-parent-link" href="{% url 'password:credential_management' %}" data-tooltip="统一管理账号凭据">
+                        <i class="fas fa-key"></i><span>凭据管理</span>
                     </a>
-                </li>
-                <li class="nav-item">
-                    <a class="nav-link" href="{% url 'password:password_manage' %}" data-tooltip="管理服务器密码">
-                        <i class="fas fa-key me-1"></i>密码管理
-                    </a>
+                    <ul class="sidebar-subnav">
+                        <li>
+                            <a class="nav-link sidebar-subnav-link" href="{% url 'password:password_manage' %}" data-tooltip="查看和维护凭据">
+                                <i class="fas fa-list"></i><span>凭据列表</span>
+                            </a>
+                        </li>
+                    </ul>
                 </li>
                 <li class="nav-item">
                     <a class="nav-link" href="{% url 'monitor:monitor_index' %}" data-tooltip="配置监控告警">
-                        <i class="fas fa-chart-line me-1"></i>监控设置
+                        <i class="fas fa-chart-line"></i><span>监控设置</span>
+                    </a>
+                </li>
+                <li class="nav-item">
+                    <a class="nav-link" href="{% url 'devops:dashboard' %}" data-tooltip="DevOps自动化平台">
+                        <i class="fas fa-tools"></i><span>DevOps</span>
+                    </a>
+                </li>
+                <li class="nav-item sidebar-nav-group">
+                    <a class="nav-link sidebar-parent-link" href="{% url 'devops:clusters' %}" data-tooltip="统一管理 Kubernetes 集群">
+                        <i class="fas fa-cubes"></i><span>K8s集群管理</span>
+                    </a>
+                    <ul class="sidebar-subnav">
+                        <li>
+                            <a class="nav-link sidebar-subnav-link" href="{% url 'devops:cluster_connect' %}" data-tooltip="新增 Kubernetes 集群连接">
+                                <i class="fas fa-plug"></i><span>K8s集群连接</span>
+                            </a>
+                        </li>
+                        <li>
+                            <a class="nav-link sidebar-subnav-link" href="{% url 'devops:cluster_list' %}" data-tooltip="查看已保存的 Kubernetes 集群">
+                                <i class="fas fa-list"></i><span>K8s集群列表</span>
+                            </a>
+                        </li>
+                    </ul>
+                </li>
+                <li class="nav-item">
+                    <a class="nav-link" href="{% url 'aiops:dashboard' %}" data-tooltip="智能运维分析">
+                        <i class="fas fa-brain"></i><span>AIOps</span>
                     </a>
                 </li>
             </ul>
-            
-            <!-- 用户信息和操作 -->
-            <ul class="navbar-nav">
-                {% if request.session.is_login %}
-                    <li class="nav-item dropdown">
-                        <a class="nav-link dropdown-toggle" href="#" id="userDropdown" role="button" 
-                           data-bs-toggle="dropdown" aria-expanded="false">
-                            <i class="fas fa-user-circle me-1"></i>
-                            {{ request.session.user_name }}
-                        </a>
-                        <ul class="dropdown-menu dropdown-menu-end">
-                            <li><a class="dropdown-item" href="#"><i class="fas fa-user me-2"></i>个人资料</a></li>
-                            <li><a class="dropdown-item" href="#"><i class="fas fa-cog me-2"></i>系统设置</a></li>
-                            <li><hr class="dropdown-divider"></li>
-                            <li><a class="dropdown-item" href="{% url 'userprofile:logout' %}">
-                                <i class="fas fa-sign-out-alt me-2"></i>退出登录
-                            </a></li>
-                        </ul>
-                    </li>
-                {% else %}
-                    <li class="nav-item">
-                        <a class="nav-link" href="{% url 'userprofile:login' %}">
-                            <i class="fas fa-sign-in-alt me-1"></i>登录
-                        </a>
-                    </li>
-                    <li class="nav-item">
-                        <a class="nav-link" href="{% url 'userprofile:register' %}">
-                            <i class="fas fa-user-plus me-1"></i>注册
-                        </a>
-                    </li>
-                {% endif %}
-            </ul>
+        </div>
+
+        <div class="sidebar-section sidebar-account">
+            {% if request.session.is_login %}
+                <div class="sidebar-user">
+                    <i class="fas fa-user-circle"></i>
+                    <span>{{ request.session.user_name }}</span>
+                </div>
+                <a class="nav-link sidebar-logout" href="{% url 'userprofile:logout' %}">
+                    <i class="fas fa-sign-out-alt"></i><span>退出登录</span>
+                </a>
+            {% else %}
+                <a class="nav-link" href="{% url 'userprofile:login' %}">
+                    <i class="fas fa-sign-in-alt"></i><span>登录</span>
+                </a>
+                <a class="nav-link" href="{% url 'userprofile:register' %}">
+                    <i class="fas fa-user-plus"></i><span>注册</span>
+                </a>
+            {% endif %}
         </div>
     </div>
 </nav>

@@ -1,0 +1,4 @@
+interface:
+  display_name: "CentOS Vault Dev"
+  short_description: "Develop per-user encrypted password/account vault CRUD and reveal flows."
+  default_prompt: "Use this skill for centos--info--collect password vault, secret storage, reveal, CRUD, or search changes."

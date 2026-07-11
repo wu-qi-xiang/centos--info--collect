@@ -1,0 +1,4 @@
+interface:
+  display_name: "CentOS Monitor Dev"
+  short_description: "Develop thresholds, cron metrics, alert lifecycle, silences, and email alerts."
+  default_prompt: "Use this skill for centos--info--collect monitoring, metric collection, alert, silence, or email notification changes."

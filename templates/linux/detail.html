@@ -1,273 +1,124 @@
 {% extends "base.html" %}
 {% load static %}
 
-{% block title %}服务器管理 - Linux监控系统{% endblock %}
+{% block title %}资产列表 - Linux监控系统{% endblock %}
 
 {% block content %}
-<!-- 添加CSRF令牌供JavaScript使用 -->
 <input type="hidden" name="csrfmiddlewaretoken" value="{{ csrf_token }}">
 
-<!-- 覆盖默认容器样式 -->
-<style>
-    .main-content {
-        padding: 0 !important;
-    }
-
-    .container-fluid {
-        padding: 0 !important;
-        max-width: none !important;
-    }
-</style>
-
-<div class="neo-dashboard">
-    <!-- 浮动粒子背景 -->
-    <div class="particle-background">
-        <div class="particle"></div>
-        <div class="particle"></div>
-        <div class="particle"></div>
-        <div class="particle"></div>
-        <div class="particle"></div>
+<div class="ops-page-header">
+    <div>
+        <h1 class="ops-page-title">资产列表</h1>
+        <p class="ops-page-subtitle">集中管理主机资产、连接状态和 SSH 入口。</p>
     </div>
-
-    <!-- 顶部状态栏 -->
-    <div class="neo-header">
-        <div class="header-glass">
-            <div class="brand-zone">
-                <div class="brand-orb">
-                    <div class="orb-inner">
-                        <i class="fas fa-server"></i>
-                    </div>
-                    <div class="orb-pulse"></div>
-                </div>
-                <div class="brand-text">
-                    <h1 class="brand-title">Server Hub</h1>
-                    <span class="brand-subtitle">Infrastructure Management</span>
-                </div>
-            </div>
-
-            <div class="metrics-cluster">
-                <div class="metric-orb total-orb">
-                    <div class="orb-content">
-                        <div class="metric-icon">
-                            <i class="fas fa-database"></i>
-                        </div>
-                        <div class="metric-value">{{ sum|default:0 }}</div>
-                        <div class="metric-label">Total</div>
-                    </div>
-                    <div class="orb-glow"></div>
-                </div>
-
-                <div class="metric-orb online-orb">
-                    <div class="orb-content">
-                        <div class="metric-icon">
-                            <i class="fas fa-circle"></i>
-                        </div>
-                        <div class="metric-value" id="onlineCount">0</div>
-                        <div class="metric-label">Online</div>
-                    </div>
-                    <div class="orb-glow online-glow"></div>
-                </div>
-
-                <div class="metric-orb offline-orb">
-                    <div class="orb-content">
-                        <div class="metric-icon">
-                            <i class="fas fa-circle"></i>
-                        </div>
-                        <div class="metric-value" id="offlineCount">0</div>
-                        <div class="metric-label">Offline</div>
-                    </div>
-                    <div class="orb-glow offline-glow"></div>
-                </div>
-            </div>
-        </div>
+    <div class="d-flex gap-2">
+        <button class="btn btn-outline-secondary" onclick="refreshServers()"><i class="fas fa-sync-alt me-1"></i>刷新</button>
+        {% if can_manage_hosts %}
+        <a class="btn btn-primary" href="{% url 'linux_create' %}"><i class="fas fa-plus me-1"></i>新增服务器</a>
+        {% endif %}
     </div>
-
-    <!-- 控制面板 -->
-    <div class="neo-controls">
-        <div class="controls-glass">
-            <div class="search-pod">
-                <form method="get" action="{% url 'search' %}" class="search-form">
-                    <div class="search-container">
-                        <div class="search-icon">
-                            <i class="fas fa-search"></i>
-                        </div>
-                        <input type="search" class="search-input" placeholder="Search servers..." name="search"
-                            value="{{ keyword|default:'' }}">
-                        <button type="submit" class="search-submit">
-                            <i class="fas fa-arrow-right"></i>
-                        </button>
-                    </div>
-                </form>
-            </div>
-
-            <div class="action-pods">
-                <button class="neo-btn refresh-btn" onclick="refreshServers()">
-                    <div class="btn-content">
-                        <i class="fas fa-sync-alt"></i>
-                        <span>Refresh</span>
-                    </div>
-                    <div class="btn-ripple"></div>
-                </button>
-
-                <a href="{% url 'linux_create' %}" class="neo-btn primary-btn">
-                    <div class="btn-content">
-                        <i class="fas fa-plus"></i>
-                        <span>Add Server</span>
-                    </div>
-                    <div class="btn-ripple"></div>
-                </a>
-            </div>
-        </div>
-    </div>
-
-    <!-- 服务器网格 -->
-    <div class="servers-grid">
-        {% for server in pages %}
-        <div class="server-card" data-server-id="{{ server.id }}">
-            <div class="card-glass">
-                <!-- 卡片头部 -->
-                <div class="card-header">
-                    <div class="server-avatar-zone">
-                        <div class="avatar-orb">
-                            <i class="fas fa-server"></i>
-                        </div>
-                        <div class="status-ring" id="status_{{ server.id }}">
-                            <div class="status-dot"></div>
-                        </div>
-                    </div>
-
-                    <div class="server-info">
-                        <h3 class="server-name">{{ server.linux_name }}</h3>
-                        <span class="server-id">#{{ server.id }}</span>
-                    </div>
-
-                    <div class="card-actions">
-                        <div class="action-dropdown">
-                            <button class="action-trigger">
-                                <i class="fas fa-ellipsis-v"></i>
-                            </button>
-                            <div class="action-menu">
-                                <a href="{% url 'linux_connect' server.id %}" target="_blank"
-                                    class="action-item connect">
-                                    <i class="fas fa-terminal"></i>
-                                    <span>SSH Connect</span>
-                                </a>
-                                <a href="{% url 'linux_list_detail' server.id %}" class="action-item info">
-                                    <i class="fas fa-info-circle"></i>
-                                    <span>Details</span>
-                                </a>
-                                <a href="{% url 'linux_update' server.id %}" class="action-item edit">
-                                    <i class="fas fa-edit"></i>
-                                    <span>Edit</span>
-                                </a>
-                                <button class="action-item delete"
-                                    onclick="confirmDelete('{{ server.id }}', '{{ server.linux_name }}')">
-                                    <i class="fas fa-trash"></i>
-                                    <span>Delete</span>
-                                </button>
-                            </div>
-                        </div>
-                    </div>
-                </div>
-
-                <!-- 卡片内容 -->
-                <div class="card-content">
-                    <div class="info-row">
-                        <div class="info-label">IP Address</div>
-                        <div class="info-value ip-value">
-                            <code>{{ server.linux_ip }}</code>
-                            <button class="copy-btn" onclick="copyToClipboard('{{ server.linux_ip }}')">
-                                <i class="fas fa-copy"></i>
-                            </button>
-                        </div>
-                    </div>
-
-                    <div class="info-row">
-                        <div class="info-label">Hostname</div>
-                        <div class="info-value">{{ server.linux_hostname|default:"--" }}</div>
-                    </div>
-
-                    <div class="info-row">
-                        <div class="info-label">Services</div>
-                        <div class="info-value">
-                            {% if server.linux_app %}
-                            <span class="service-badge">{{ server.linux_app|truncatechars:15 }}</span>
-                            {% else %}
-                            <span class="service-badge empty">No services</span>
-                            {% endif %}
-                        </div>
-                    </div>
-                </div>
-
-                <!-- 卡片底部 -->
-                <div class="card-footer">
-                    <div class="connection-test">
-                        <button class="test-btn" onclick="testConnection('{{ server.id }}')">
-                            <i class="fas fa-wifi"></i>
-                            <span>Test Connection</span>
-                        </button>
-                    </div>
-                </div>
-            </div>
-        </div>
-        {% empty %}
-        <div class="empty-state">
-            <div class="empty-glass">
-                <div class="empty-icon">
-                    <i class="fas fa-server"></i>
-                </div>
-                <h3 class="empty-title">No Servers Found</h3>
-                <p class="empty-message">Start by adding your first server to begin monitoring</p>
-                <a href="{% url 'linux_create' %}" class="neo-btn primary-btn">
-                    <div class="btn-content">
-                        <i class="fas fa-plus"></i>
-                        <span>Add First Server</span>
-                    </div>
-                    <div class="btn-ripple"></div>
-                </a>
-            </div>
-        </div>
-        {% endfor %}
-    </div>
-
-    <!-- 分页控制 -->
-    {% if pages.has_other_pages %}
-    <div class="pagination-zone">
-        <div class="pagination-glass">
-            <div class="pagination-info">
-                <span>Showing {{ pages.start_index }}-{{ pages.end_index }} of {{ pages.paginator.count }}
-                    servers</span>
-            </div>
-
-            <div class="pagination-controls">
-                {% if pages.has_previous %}
-                <a href="?page={{ pages.previous_page_number }}{% if keyword %}&search={{ keyword }}{% endif %}"
-                    class="page-orb">
-                    <i class="fas fa-chevron-left"></i>
-                </a>
-                {% endif %}
-
-                {% for page_num in pages.paginator.page_range %}
-                {% if page_num == pages.number %}
-                <span class="page-orb active">{{ page_num }}</span>
-                {% else %}
-                <a href="?page={{ page_num }}{% if keyword %}&search={{ keyword }}{% endif %}" class="page-orb">{{
-                    page_num }}</a>
-                {% endif %}
-                {% endfor %}
-
-                {% if pages.has_next %}
-                <a href="?page={{ pages.next_page_number }}{% if keyword %}&search={{ keyword }}{% endif %}"
-                    class="page-orb">
-                    <i class="fas fa-chevron-right"></i>
-                </a>
-                {% endif %}
-            </div>
-        </div>
-    </div>
-    {% endif %}
 </div>
 
-<!-- 引入Neo Dashboard JavaScript -->
-<script src="{% static 'js/neo-dashboard.js' %}"></script>
+<div class="ops-stat-grid mb-3">
+    <div class="ops-stat">
+        <div class="ops-stat-label">主机总数</div>
+        <div class="ops-stat-value">{{ sum|default:0 }}</div>
+    </div>
+    <div class="ops-stat">
+        <div class="ops-stat-label">在线主机</div>
+        <div class="ops-stat-value" id="onlineCount">0</div>
+    </div>
+    <div class="ops-stat">
+        <div class="ops-stat-label">离线主机</div>
+        <div class="ops-stat-value" id="offlineCount">0</div>
+    </div>
+</div>
+
+<div class="card mb-3">
+    <div class="card-body">
+        <form method="get" action="{% url 'search' %}" class="row g-2 align-items-center">
+            <div class="col-lg-10">
+                <div class="input-group">
+                    <span class="input-group-text"><i class="fas fa-search"></i></span>
+                    <input type="search" class="form-control" placeholder="搜索服务器名称、IP、主机名或应用..." name="search" value="{{ keyword|default:'' }}">
+                </div>
+            </div>
+            <div class="col-lg-2">
+                <button class="btn btn-primary w-100" type="submit">搜索</button>
+            </div>
+        </form>
+    </div>
+</div>
+
+<div class="server-list">
+    {% for server in pages %}
+    <div class="server-row" data-server-id="{{ server.id }}">
+        <form id="delete-server-form-{{ server.id }}" method="post" action="{% url 'linux_delete' server.id %}" style="display:none;">
+            {% csrf_token %}
+        </form>
+        <div>
+            <div class="server-title">{{ server.linux_name|default:server.linux_ip }}</div>
+            <div class="server-meta">#{{ server.id }} · {{ server.linux_hostname|default:"未设置主机名" }}</div>
+        </div>
+        <div>
+            <div class="server-meta">IP 地址</div>
+            <code>{{ server.linux_ip }}</code>
+        </div>
+        <div>
+            <div class="server-meta">应用说明</div>
+            <span>{{ server.linux_app|default:"-"|truncatechars:28 }}</span>
+        </div>
+        <div class="server-actions">
+            <span class="btn btn-sm btn-outline-secondary disabled" id="status_{{ server.id }}"><span class="status-dot"></span>检测中</span>
+            {% if can_manage_hosts %}
+            <button class="btn btn-sm btn-outline-primary" onclick="testConnection('{{ server.id }}')" type="button"><i class="fas fa-wifi"></i></button>
+            {% endif %}
+            {% if can_use_webssh %}
+            <a class="btn btn-sm btn-outline-primary" href="{% url 'linux_connect' server.id %}" target="_blank"><i class="fas fa-terminal"></i></a>
+            {% endif %}
+            <a class="btn btn-sm btn-outline-primary" href="{% url 'linux_list_detail' server.id %}"><i class="fas fa-info-circle"></i></a>
+            {% if can_manage_hosts %}
+            <a class="btn btn-sm btn-outline-warning" href="{% url 'linux_update' server.id %}"><i class="fas fa-edit"></i></a>
+            <button class="btn btn-sm btn-outline-danger" onclick="confirmDelete('{{ server.id }}', '{{ server.linux_name }}')" type="button"><i class="fas fa-trash"></i></button>
+            {% endif %}
+        </div>
+    </div>
+    {% empty %}
+    <div class="card">
+        <div class="card-body text-center py-5">
+            <i class="fas fa-server fa-3x text-muted mb-3"></i>
+            <h5>暂无服务器</h5>
+            <p class="text-muted">添加第一台服务器后即可开始监控和远程管理。</p>
+            {% if can_manage_hosts %}
+            <a class="btn btn-primary" href="{% url 'linux_create' %}">新增服务器</a>
+            {% endif %}
+        </div>
+    </div>
+    {% endfor %}
+</div>
+
+{% if pages.has_other_pages %}
+<div class="pagination-zone">
+    <div class="pagination-glass">
+        <div class="text-muted small">显示 {{ pages.start_index }}-{{ pages.end_index }} / {{ pages.paginator.count }}</div>
+        <div>
+            {% if pages.has_previous %}
+            <a href="?page={{ pages.previous_page_number }}{% if keyword %}&search={{ keyword }}{% endif %}" class="page-orb"><i class="fas fa-chevron-left"></i></a>
+            {% endif %}
+            {% for page_num in pages.paginator.page_range %}
+            {% if page_num == pages.number %}
+            <span class="page-orb active">{{ page_num }}</span>
+            {% else %}
+            <a href="?page={{ page_num }}{% if keyword %}&search={{ keyword }}{% endif %}" class="page-orb">{{ page_num }}</a>
+            {% endif %}
+            {% endfor %}
+            {% if pages.has_next %}
+            <a href="?page={{ pages.next_page_number }}{% if keyword %}&search={{ keyword }}{% endif %}" class="page-orb"><i class="fas fa-chevron-right"></i></a>
+            {% endif %}
+        </div>
+    </div>
+</div>
+{% endif %}
+
+<script src="{% static 'js/neo-dashboard.js' %}?v=20260622"></script>
 {% endblock %}

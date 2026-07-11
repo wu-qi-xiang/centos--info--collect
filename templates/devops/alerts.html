@@ -1,0 +1,132 @@
+{% extends "base.html" %}
+
+{% block title %}告警记录 - DevOps平台{% endblock %}
+
+{% block content %}
+<div class="container-fluid px-4">
+    <h1 class="h3 mb-3">告警记录</h1>
+    {% include "devops/_nav.html" %}
+    <div class="d-flex flex-wrap gap-2 mb-3">
+        <a class="btn btn-sm btn-outline-secondary" href="{% url 'devops:alert_events' %}">全部告警</a>
+        <a class="btn btn-sm btn-outline-danger" href="{% url 'devops:alert_events' %}?status=open">未处理</a>
+        <a class="btn btn-sm btn-outline-warning" href="{% url 'devops:alert_events' %}?metric=collector">采集失败 {{ collector_open_count }}</a>
+    </div>
+    <div class="row g-3 mb-3">
+        <div class="col-lg-4">
+            <div class="card"><div class="card-header">新增静默规则</div><div class="card-body">
+                <form method="post" action="{% url 'devops:silence_create' %}">
+                    {% csrf_token %}
+                    <div class="mb-3"><label class="form-label">主机</label>{{ silence_form.host }}</div>
+                    <div class="mb-3"><label class="form-label">指标</label>{{ silence_form.metric }}</div>
+                    <div class="mb-3"><label class="form-label">原因</label>{{ silence_form.reason }}</div>
+                    <div class="mb-3"><label class="form-label">开始时间</label>{{ silence_form.starts_at }}</div>
+                    <div class="mb-3"><label class="form-label">结束时间</label>{{ silence_form.ends_at }}</div>
+                    <button class="btn btn-primary" type="submit">保存静默</button>
+                </form>
+            </div></div>
+        </div>
+        <div class="col-lg-8">
+            <div class="card"><div class="card-header">静默规则</div><div class="card-body table-responsive">
+                <table class="table table-sm">
+                    <tr><th>主机</th><th>指标</th><th>时间</th><th>原因</th><th>操作</th></tr>
+                    {% for silence in silences %}
+                    <tr>
+                        <td>{{ silence.host.linux_name|default:"全部" }}</td>
+                        <td>{{ silence.metric|default:"全部" }}</td>
+                        <td>{{ silence.starts_at|date:"m-d H:i" }} - {{ silence.ends_at|date:"m-d H:i" }}</td>
+                        <td>{{ silence.reason }}</td>
+                        <td><form method="post" action="{% url 'devops:silence_delete' silence.id %}">{% csrf_token %}<button class="btn btn-sm btn-outline-danger" type="submit">删除</button></form></td>
+                    </tr>
+                    {% empty %}<tr><td colspan="5" class="text-muted">暂无静默规则</td></tr>{% endfor %}
+                </table>
+            </div></div>
+        </div>
+    </div>
+
+    <div class="card mb-3"><div class="card-body">
+        <form method="get" class="row g-2 align-items-end">
+            <div class="col-md-2">
+                <label class="form-label">指标</label>
+                <select name="metric" class="form-select">
+                    <option value="">全部</option>
+                    <option value="collector" {% if filters.metric == "collector" %}selected{% endif %}>采集失败</option>
+                    <option value="cpu" {% if filters.metric == "cpu" %}selected{% endif %}>CPU</option>
+                    <option value="memory" {% if filters.metric == "memory" %}selected{% endif %}>内存</option>
+                    <option value="disk" {% if filters.metric == "disk" %}selected{% endif %}>磁盘</option>
+                </select>
+            </div>
+            <div class="col-md-2">
+                <label class="form-label">状态</label>
+                <select name="status" class="form-select">
+                    <option value="">全部</option>
+                    <option value="open" {% if filters.status == "open" %}selected{% endif %}>未处理</option>
+                    <option value="processing" {% if filters.status == "processing" %}selected{% endif %}>处理中</option>
+                    <option value="resolved" {% if filters.status == "resolved" %}selected{% endif %}>已恢复</option>
+                    <option value="closed" {% if filters.status == "closed" %}selected{% endif %}>已关闭</option>
+                    <option value="silenced" {% if filters.status == "silenced" %}selected{% endif %}>已静默</option>
+                </select>
+            </div>
+            <div class="col-md-2">
+                <label class="form-label">级别</label>
+                <select name="level" class="form-select">
+                    <option value="">全部</option>
+                    <option value="info" {% if filters.level == "info" %}selected{% endif %}>info</option>
+                    <option value="warning" {% if filters.level == "warning" %}selected{% endif %}>warning</option>
+                    <option value="critical" {% if filters.level == "critical" %}selected{% endif %}>critical</option>
+                </select>
+            </div>
+            <div class="col-md-2">
+                <label class="form-label">主机</label>
+                <select name="host" class="form-select">
+                    <option value="">全部</option>
+                    {% for host in hosts %}
+                    <option value="{{ host.id }}" {% if filters.host == host.id|stringformat:"s" %}selected{% endif %}>{{ host.linux_name|default:host.linux_ip }}</option>
+                    {% endfor %}
+                </select>
+            </div>
+            <div class="col-md-2">
+                <label class="form-label">关键词</label>
+                <input class="form-control" name="q" value="{{ filters.q }}">
+            </div>
+            <div class="col-md-2 d-flex gap-2">
+                <button class="btn btn-primary" type="submit">查询</button>
+                <a class="btn btn-outline-secondary" href="{% url 'devops:alert_events' %}">重置</a>
+            </div>
+            <div class="col-12 text-muted small">共 {{ total }} 条，页面显示最近 100 条。</div>
+        </form>
+    </div></div>
+
+    <div class="card"><div class="card-body table-responsive">
+        <table class="table table-hover">
+            <tr><th>末次出现</th><th>主机</th><th>指标</th><th>级别</th><th>状态</th><th>次数</th><th>内容</th><th>处理</th></tr>
+            {% for alert in alerts %}
+            <tr>
+                <td>{{ alert.last_seen_at|default:alert.created_at|date:"Y-m-d H:i:s" }}</td>
+                <td>{{ alert.host.linux_name|default:"-" }}</td>
+                <td>{{ alert.metric }}</td>
+                <td>{{ alert.level }}</td>
+                <td>{{ alert.status }}</td>
+                <td>{{ alert.repeat_count }}</td>
+                <td>{{ alert.message|truncatechars:80 }}</td>
+                <td>
+                    <form method="post" action="{% url 'devops:alert_update' alert.id %}" class="d-flex gap-1">
+                        {% csrf_token %}
+                        <input type="hidden" name="next" value="{{ request.get_full_path }}">
+                        <select name="status" class="form-select form-select-sm">
+                            <option value="open" {% if alert.status == "open" %}selected{% endif %}>未处理</option>
+                            <option value="processing" {% if alert.status == "processing" %}selected{% endif %}>处理中</option>
+                            <option value="resolved" {% if alert.status == "resolved" %}selected{% endif %}>已恢复</option>
+                            <option value="closed" {% if alert.status == "closed" %}selected{% endif %}>已关闭</option>
+                            <option value="silenced" {% if alert.status == "silenced" %}selected{% endif %}>已静默</option>
+                        </select>
+                        <input name="handler" class="form-control form-control-sm" placeholder="处理人" value="{{ request.session.user_name }}">
+                        <input name="remark" class="form-control form-control-sm" placeholder="备注">
+                        <button class="btn btn-sm btn-primary" type="submit">保存</button>
+                    </form>
+                </td>
+            </tr>
+            {% empty %}<tr><td colspan="8" class="text-muted">暂无告警</td></tr>{% endfor %}
+        </table>
+    </div></div>
+</div>
+{% endblock %}
