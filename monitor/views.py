@@ -2,13 +2,22 @@ from django.shortcuts import get_object_or_404, render, redirect
 from django.http import HttpResponseNotAllowed, JsonResponse
 from django.middleware.csrf import get_token
 from django.urls import reverse
+from django.utils import timezone
 # Create your views here.
 from .models import AlertmanagerConfig, AlertNotificationConfig, Monitor, PrometheusConfig
 from .forms import AlertmanagerConfigForm, AlertNotificationForm, MonitorForm, PrometheusConfigForm
 from .services import (
+	PROMETHEUS_RULES_FAILURE_MESSAGE,
+	PROMETHEUS_RULES_FORMAT_MESSAGE,
+	PROMETHEUS_TARGETS_FAILURE_MESSAGE,
+	PROMETHEUS_TARGETS_FORMAT_MESSAGE,
 	empty_prometheus_table,
+	normalize_prometheus_rules,
 	normalize_prometheus_result,
+	normalize_prometheus_targets,
 	query_prometheus,
+	query_prometheus_rules,
+	query_prometheus_targets,
 	send_alert_notification,
 	test_alertmanager_connection,
 	test_prometheus_connection,
@@ -20,8 +29,51 @@ from PyLinux.vue import form_errors, model_dict, render_vue_page
 from userprofile.decorators import session_login_required
 
 
+PROMETHEUS_SELECTION_ERROR = '选择的 Prometheus 对接不可用'
+
+
+def _available_prometheus_configs():
+	return [
+		config
+		for config in PrometheusConfig.objects.filter(enabled=True).order_by('id')
+		if (config.prometheus_url or '').strip()
+	]
+
+
 def _prometheus_config():
-	return PrometheusConfig.objects.filter(enabled=True).exclude(prometheus_url='').order_by('id').first()
+	configs = _available_prometheus_configs()
+	return configs[0] if configs else None
+
+
+def _resolve_prometheus_config(raw_id, configs=None):
+	configs = list(configs if configs is not None else _available_prometheus_configs())
+	if raw_id is None or not str(raw_id).strip():
+		return (configs[0] if configs else None), ''
+	try:
+		config_id = int(str(raw_id).strip())
+	except (TypeError, ValueError):
+		return None, PROMETHEUS_SELECTION_ERROR
+	for config in configs:
+		if config.id == config_id:
+			return config, ''
+	return None, PROMETHEUS_SELECTION_ERROR
+
+
+def _prometheus_query_options(configs):
+	base_names = [
+		(config.name or '').strip() or 'Prometheus'
+		for config in configs
+	]
+	name_counts = {}
+	for name in base_names:
+		name_counts[name] = name_counts.get(name, 0) + 1
+	return [
+		{
+			'id': config.id,
+			'name': '%s (#%s)' % (name, config.id) if name_counts[name] > 1 else name,
+		}
+		for config, name in zip(configs, base_names)
+	]
 
 
 def _prometheus_payload(config):
@@ -59,6 +111,19 @@ def _integration_items():
 			'delete_url': reverse('monitor:alertmanager_delete', args=[config.id]),
 		})
 	return items
+
+
+def _integration_lists_payload():
+	integrations = _integration_items()
+	return {
+		'integrations': integrations,
+		'prometheus_integrations': [
+			item for item in integrations if item.get('kind') == 'prometheus'
+		],
+		'alertmanager_integrations': [
+			item for item in integrations if item.get('kind') == 'alertmanager'
+		],
+	}
 
 
 def _can_manage_integrations(request):
@@ -107,10 +172,9 @@ def _integration_page_payload(request, active_kind='', instance=None, form=None,
 	alertmanager_instance = instance if active_kind == 'alertmanager' else None
 	prometheus_form = form if active_kind == 'prometheus' else None
 	alertmanager_form = form if active_kind == 'alertmanager' else None
-	return {
+	payload = {
 		'subtitle': '统一管理 Prometheus 和 Alertmanager 对接',
 		'csrf': get_token(request),
-		'integrations': _integration_items(),
 		'can_manage_integrations': _can_manage_integrations(request),
 		'prometheus_form': _integration_form_payload('prometheus', prometheus_instance, prometheus_form),
 		'alertmanager_form': _integration_form_payload('alertmanager', alertmanager_instance, alertmanager_form),
@@ -119,6 +183,8 @@ def _integration_page_payload(request, active_kind='', instance=None, form=None,
 		'message_ok': bool(message_ok),
 		'actions': _monitor_actions(),
 	}
+	payload.update(_integration_lists_payload())
+	return payload
 
 
 def _render_integration_page(request, active_kind='', instance=None, form=None, message='', message_ok=False, status=200):
@@ -143,6 +209,7 @@ def _monitor_actions():
 		{'label': '监控对接', 'url': reverse('monitor:prometheus_config'), 'class': 'btn-outline-primary'},
 		{'label': '指标查询', 'url': reverse('monitor:alert_query'), 'class': 'btn-outline-primary'},
 		{'label': '告警通知', 'url': reverse('monitor:alert_notifications'), 'class': 'btn-outline-primary'},
+		{'label': '告警列表', 'url': reverse('monitor:alert_notification_list'), 'class': 'btn-outline-primary'},
 		{'label': '告警设置', 'url': reverse('monitor:monitor_index'), 'class': 'btn-outline-primary'},
 	]
 
@@ -157,36 +224,74 @@ def _alert_notification_configs():
 	return configs
 
 
-def _masked_webhook(config):
-	if not config or not config.decrypted_webhook_url:
+def _has_stored_webhook(config):
+	return bool(config and (config.webhook_url or '').strip())
+
+
+def _format_notification_updated_at(value):
+	if not value:
 		return ''
-	value = config.decrypted_webhook_url
-	if len(value) <= 18:
-		return '已配置'
-	return '%s...%s' % (value[:12], value[-6:])
+	if timezone.is_aware(value):
+		value = timezone.localtime(value)
+	return value.strftime('%Y-%m-%d %H:%M')
+
+
+def _notification_integration_items(configs=None):
+	configs = _alert_notification_configs() if configs is None else configs
+	configure_url = reverse('monitor:alert_notifications')
+	items = []
+	for provider, provider_label in AlertNotificationConfig.PROVIDER_CHOICES:
+		config = configs.get(provider)
+		if not _has_stored_webhook(config):
+			continue
+		items.append({
+			'provider': provider,
+			'provider_label': provider_label,
+			'name': (config.name or '').strip() or '%s告警' % provider_label,
+			'enabled': bool(config.enabled),
+			'configured': True,
+			'updated_at': _format_notification_updated_at(config.updated_at),
+			'configure_url': configure_url,
+		})
+	return items
 
 
 def _alert_notification_payload(request, configs=None, form=None, test_message=''):
 	configs = configs or _alert_notification_configs()
 	def item(provider, default_name):
 		config = configs.get(provider)
+		configured = _has_stored_webhook(config)
 		return {
 			'enabled': bool(config and config.enabled),
 			'name': config.name if config and config.name else default_name,
-			'has_webhook': bool(config and config.decrypted_webhook_url),
-			'webhook_display': _masked_webhook(config),
+			'has_webhook': configured,
+			'configured': configured,
+			'webhook_display': '已配置' if configured else '',
 		}
 	return {
 		'subtitle': '配置飞书和企业微信 Webhook，用于告警通知对接',
 		'csrf': get_token(request),
 		'action': reverse('monitor:alert_notifications'),
 		'test_action': reverse('monitor:alert_notifications_test'),
+		'list_url': reverse('monitor:alert_notification_list'),
+		'can_manage_notifications': _can_manage_integrations(request),
 		'notifications': {
 			'feishu': item(AlertNotificationConfig.PROVIDER_FEISHU, '飞书告警'),
 			'wecom': item(AlertNotificationConfig.PROVIDER_WECOM, '企业微信告警'),
 		},
 		'errors': form_errors(form),
 		'test_message': test_message,
+		'actions': _monitor_actions(),
+	}
+
+
+def _alert_notification_list_payload(request, configs=None):
+	configure_url = reverse('monitor:alert_notifications')
+	return {
+		'subtitle': '查看已配置的告警通知对接',
+		'notification_integrations': _notification_integration_items(configs),
+		'configure_url': configure_url,
+		'can_manage_notifications': _can_manage_integrations(request),
 		'actions': _monitor_actions(),
 	}
 
@@ -235,17 +340,20 @@ def _monitor_payload(request, monitor_obj=None, form=None, action=''):
 	}
 
 
-def _alert_query_payload(request, query='', table=None, error=''):
-	config = _prometheus_config()
+def _alert_query_payload(request, query, table, error, configs, selected_config):
 	return {
 		'subtitle': '使用已对接的 Prometheus 执行即时 PromQL 查询',
 		'csrf': get_token(request),
 		'action': reverse('monitor:alert_query'),
 		'execute_url': reverse('monitor:metric_query_execute'),
+		'targets_url': reverse('monitor:metric_query_targets'),
+		'rules_url': reverse('monitor:metric_query_rules'),
 		'query': query,
 		'table': table if table is not None else empty_prometheus_table(),
 		'error': error,
-		'prometheus_configured': bool(config and config.prometheus_url and config.enabled),
+		'prometheus_configured': bool(configs),
+		'prometheus_configs': _prometheus_query_options(configs),
+		'selected_prometheus_id': selected_config.id if selected_config else None,
 		'actions': _monitor_actions(),
 	}
 
@@ -256,6 +364,7 @@ def monitor_home(request):
 	first_config = PrometheusConfig.objects.order_by('id').first()
 	monitor = Monitor.objects.order_by('id').first()
 	open_alert_count = AlertEvent.objects.filter(status=AlertEvent.STATUS_OPEN).count()
+	integration_lists = _integration_lists_payload()
 	payload = {
 		'subtitle': '统一管理 Prometheus 对接、指标查询和阈值告警配置',
 		'cards': [
@@ -277,14 +386,15 @@ def monitor_home(request):
 		],
 		'actions': _monitor_actions(),
 		'prometheus': _prometheus_payload(config),
-		'integrations': _integration_items(),
 		'can_manage_integrations': _can_manage_integrations(request),
 		'csrf': get_token(request),
 		'alert_settings_url': reverse('monitor:monitor_index'),
 		'integration_url': reverse('monitor:prometheus_config'),
 		'query_url': reverse('monitor:alert_query'),
-		'notification_url': reverse('monitor:alert_notifications'),
+		'notification_url': reverse('monitor:alert_notification_list'),
+		'notification_configure_url': reverse('monitor:alert_notifications'),
 	}
+	payload.update(integration_lists)
 	content = {'open_alert_count': open_alert_count}
 	content.update(security_context(request))
 	return render_vue_page(request, 'monitor-home', '监控管理', payload, content)
@@ -433,31 +543,37 @@ def alertmanager_delete(request, id):
 @session_login_required
 def alert_query(request):
 	query = (request.GET.get('query') or '').strip()
+	configs = list(_available_prometheus_configs())
+	config, selection_error = _resolve_prometheus_config(request.GET.get('prometheus_id'), configs)
 	table = empty_prometheus_table()
-	error = ''
-	status = 200
-	if query:
+	error = selection_error
+	status = 400 if selection_error else 200
+	if query and not selection_error:
 		if len(query) > 2000:
 			error = 'PromQL 查询语句不能超过 2000 个字符'
 			status = 400
 		else:
-			config = _prometheus_config()
 			if not config:
 				error = '请先配置并启用 Prometheus 对接'
 				status = 400
 			else:
 				query_result = query_prometheus(config, query)
-				if query_result.get('ok'):
+				if isinstance(query_result, dict) and query_result.get('ok'):
 					table = normalize_prometheus_result(query_result.get('body') or {})
 				else:
-					error = query_result.get('message') or 'Prometheus 查询失败'
-					status = 502
+					error = query_result.get('message') if isinstance(query_result, dict) else ''
+					error = error or 'Prometheus 查询失败'
+					invalid_query = (
+						isinstance(query_result, dict)
+						and query_result.get('error_kind') == 'invalid_query'
+					)
+					status = 400 if invalid_query else 502
 	content = security_context(request)
 	return render_vue_page(
 		request,
 		'alert-query',
 		'指标查询',
-		_alert_query_payload(request, query, table, error),
+		_alert_query_payload(request, query, table, error, configs, config),
 		content,
 		status=status,
 	)
@@ -472,20 +588,89 @@ def metric_query_execute(request):
 		return JsonResponse({'ok': False, 'message': '请输入 PromQL 查询语句'}, status=400)
 	if len(query) > 2000:
 		return JsonResponse({'ok': False, 'message': 'PromQL 查询语句不能超过 2000 个字符'}, status=400)
-	config = _prometheus_config()
+	config, selection_error = _resolve_prometheus_config(request.POST.get('prometheus_id'))
+	if selection_error:
+		return JsonResponse({'ok': False, 'message': selection_error}, status=400)
 	if not config:
 		return JsonResponse({'ok': False, 'message': '请先配置并启用 Prometheus 对接'}, status=400)
 	query_result = query_prometheus(config, query)
-	if not query_result.get('ok'):
+	if not isinstance(query_result, dict) or not query_result.get('ok'):
+		message = query_result.get('message') if isinstance(query_result, dict) else ''
+		status = 400 if isinstance(query_result, dict) and query_result.get('error_kind') == 'invalid_query' else 502
 		return JsonResponse({
 			'ok': False,
-			'message': query_result.get('message') or 'Prometheus 查询失败',
-		}, status=502)
+			'message': message or 'Prometheus 查询失败',
+		}, status=status)
 	return JsonResponse({
 		'ok': True,
 		'query': query,
+		'prometheus_id': config.id,
 		'table': normalize_prometheus_result(query_result.get('body') or {}),
 	})
+
+
+def _metric_metadata_response(
+		request, query_function, normalize_function, response_key,
+		failure_message, format_message):
+	config, selection_error = _resolve_prometheus_config(request.POST.get('prometheus_id'))
+	if selection_error:
+		return JsonResponse({'ok': False, 'message': selection_error}, status=400)
+	if not config:
+		return JsonResponse({'ok': False, 'message': '请先配置并启用 Prometheus 对接'}, status=400)
+	query_result = query_function(config)
+	if not isinstance(query_result, dict) or not query_result.get('ok'):
+		message = query_result.get('message') if isinstance(query_result, dict) else ''
+		if message not in (failure_message, format_message):
+			message = failure_message
+		return JsonResponse({'ok': False, 'message': message}, status=502)
+	return JsonResponse({
+		'ok': True,
+		'prometheus_id': config.id,
+		response_key: normalize_function(query_result.get('body') or {}),
+	})
+
+
+@session_login_required
+def metric_query_targets(request):
+	if request.method != 'POST':
+		return HttpResponseNotAllowed(['POST'])
+	return _metric_metadata_response(
+		request,
+		query_prometheus_targets,
+		normalize_prometheus_targets,
+		'targets',
+		PROMETHEUS_TARGETS_FAILURE_MESSAGE,
+		PROMETHEUS_TARGETS_FORMAT_MESSAGE,
+	)
+
+
+@session_login_required
+def metric_query_rules(request):
+	if request.method != 'POST':
+		return HttpResponseNotAllowed(['POST'])
+	return _metric_metadata_response(
+		request,
+		query_prometheus_rules,
+		normalize_prometheus_rules,
+		'rules',
+		PROMETHEUS_RULES_FAILURE_MESSAGE,
+		PROMETHEUS_RULES_FORMAT_MESSAGE,
+	)
+
+
+@session_login_required
+def alert_notification_list(request):
+	if request.method != 'GET':
+		return HttpResponseNotAllowed(['GET'])
+	configs = _alert_notification_configs()
+	content = security_context(request)
+	return render_vue_page(
+		request,
+		'alert-notification-list',
+		'告警列表',
+		_alert_notification_list_payload(request, configs),
+		content,
+	)
 
 
 @session_login_required
@@ -502,7 +687,7 @@ def alert_notifications(request):
 		if form.is_valid():
 			_save_alert_notification_configs(form, configs, provider if provider in dict(AlertNotificationConfig.PROVIDER_CHOICES) else None)
 			audit(request, '保存告警通知', 'AlertNotificationConfig', '', dict(AlertNotificationConfig.PROVIDER_CHOICES).get(provider, '飞书/企业微信'))
-			return redirect('monitor:alert_notifications')
+			return redirect('monitor:alert_notification_list')
 		content = {}
 		content.update(security_context(request))
 		return render_vue_page(request, 'alert-notifications', '告警通知', _alert_notification_payload(request, configs, form), content, status=400)
@@ -531,8 +716,9 @@ def alert_notifications_test(request):
 		if webhook:
 			config.webhook_url = webhook
 		result = send_alert_notification(config)
-		test_message = result.get('message') or ('测试通知发送成功' if result.get('ok') else '测试通知发送失败')
-		status = 200 if result.get('ok') else 400
+		message_ok = bool(result.get('ok'))
+		test_message = '测试通知发送成功' if message_ok else '测试通知发送失败，请检查通知配置和网络'
+		status = 200 if message_ok else 400
 	content = {}
 	content.update(security_context(request))
 	return render_vue_page(request, 'alert-notifications', '告警通知', _alert_notification_payload(request, configs, form, test_message), content, status=status)

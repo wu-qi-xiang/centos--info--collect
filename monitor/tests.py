@@ -1,4 +1,5 @@
 import json
+import io
 import socket
 
 from django.test import TestCase
@@ -281,6 +282,8 @@ class MonitorSecurityTests(TestCase):
 		self.assertTrue(data['can_manage_integrations'])
 		self.assertTrue(data['csrf'])
 		self.assertEqual(len(data['integrations']), 2)
+		self.assertEqual(data['prometheus_integrations'], [data['integrations'][0]])
+		self.assertEqual(data['alertmanager_integrations'], [data['integrations'][1]])
 		self.assertEqual(set(data['integrations'][0]), {
 			'id', 'kind', 'kind_label', 'name', 'url', 'enabled', 'updated_at', 'edit_url', 'delete_url',
 		})
@@ -470,6 +473,8 @@ class MonitorSecurityTests(TestCase):
 		self.assertTrue(data['csrf'])
 		self.assertEqual([item['kind'] for item in data['integrations']], ['prometheus', 'alertmanager'])
 		self.assertEqual([item['name'] for item in data['integrations']], ['Dashboard Prometheus', 'Dashboard Alertmanager'])
+		self.assertEqual([item['kind'] for item in data['prometheus_integrations']], ['prometheus'])
+		self.assertEqual([item['kind'] for item in data['alertmanager_integrations']], ['alertmanager'])
 
 	def test_alert_query_requires_enabled_prometheus_config(self):
 		response = self.client.get(reverse('monitor:alert_query'), {'query': 'up'})
@@ -479,10 +484,135 @@ class MonitorSecurityTests(TestCase):
 		self.assertEqual(data['query'], 'up')
 		self.assertEqual(data['table'], services.empty_prometheus_table())
 		self.assertEqual(data['error'], '请先配置并启用 Prometheus 对接')
+		self.assertFalse(data['prometheus_configured'])
+		self.assertEqual(data['prometheus_configs'], [])
+		self.assertIsNone(data['selected_prometheus_id'])
+
+	def test_metric_query_page_lists_only_safe_available_prometheus_options(self):
+		PrometheusConfig.objects.create(
+			name='Disabled',
+			prometheus_url='http://disabled.local:9090',
+			enabled=False,
+		)
+		PrometheusConfig.objects.create(
+			name='Blank URL',
+			prometheus_url='',
+			enabled=True,
+		)
+		first_enabled = PrometheusConfig.objects.create(
+			name='  Primary Metrics  ',
+			prometheus_url='http://primary.local:9090',
+			enabled=True,
+		)
+		second_enabled = PrometheusConfig.objects.create(
+			name='   ',
+			prometheus_url='http://backup.local:9090',
+			enabled=True,
+		)
+
+		response = self.client.get(reverse('monitor:alert_query'))
+		data = self.vue_data(response)
+
+		self.assertEqual(response.status_code, 200)
+		self.assertTrue(data['prometheus_configured'])
+		self.assertEqual(data['prometheus_configs'], [
+			{'id': first_enabled.id, 'name': 'Primary Metrics'},
+			{'id': second_enabled.id, 'name': 'Prometheus'},
+		])
+		self.assertEqual([set(item) for item in data['prometheus_configs']], [
+			{'id', 'name'},
+			{'id', 'name'},
+		])
+		self.assertEqual(data['selected_prometheus_id'], first_enabled.id)
+
+	def test_metric_query_page_disambiguates_duplicate_and_fallback_names(self):
+		duplicate_a = PrometheusConfig.objects.create(
+			name='Shared Metrics',
+			prometheus_url='http://shared-a.local:9090',
+			enabled=True,
+		)
+		duplicate_b = PrometheusConfig.objects.create(
+			name='  Shared Metrics  ',
+			prometheus_url='http://shared-b.local:9090',
+			enabled=True,
+		)
+		fallback = PrometheusConfig.objects.create(
+			name='',
+			prometheus_url='http://fallback.local:9090',
+			enabled=True,
+		)
+		actual_default = PrometheusConfig.objects.create(
+			name=' Prometheus ',
+			prometheus_url='http://named-default.local:9090',
+			enabled=True,
+		)
+
+		response = self.client.get(reverse('monitor:alert_query'))
+		data = self.vue_data(response)
+
+		self.assertEqual(response.status_code, 200)
+		self.assertEqual(data['prometheus_configs'], [
+			{'id': duplicate_a.id, 'name': 'Shared Metrics (#%s)' % duplicate_a.id},
+			{'id': duplicate_b.id, 'name': 'Shared Metrics (#%s)' % duplicate_b.id},
+			{'id': fallback.id, 'name': 'Prometheus (#%s)' % fallback.id},
+			{'id': actual_default.id, 'name': 'Prometheus (#%s)' % actual_default.id},
+		])
+
+	@mock.patch('monitor.views.query_prometheus')
+	def test_metric_query_excludes_whitespace_only_prometheus_url(self, query_prometheus_mock):
+		whitespace_url = PrometheusConfig.objects.create(
+			name='Legacy Whitespace URL',
+			prometheus_url=' \t ',
+			enabled=True,
+		)
+		available = PrometheusConfig.objects.create(
+			name='Available',
+			prometheus_url='http://available.local:9090',
+			enabled=True,
+		)
+		query_prometheus_mock.return_value = {
+			'ok': True,
+			'body': {
+				'status': 'success',
+				'data': {'resultType': 'scalar', 'result': [1, '2']},
+			},
+		}
+
+		page_response = self.client.get(reverse('monitor:alert_query'))
+		page_data = self.vue_data(page_response)
+		default_response = self.client.post(reverse('monitor:metric_query_execute'), {'query': 'up'})
+
+		self.assertEqual(page_response.status_code, 200)
+		self.assertEqual(page_data['prometheus_configs'], [
+			{'id': available.id, 'name': 'Available'},
+		])
+		self.assertEqual(page_data['selected_prometheus_id'], available.id)
+		self.assertEqual(default_response.status_code, 200)
+		self.assertEqual(default_response.json()['prometheus_id'], available.id)
+		self.assertEqual(query_prometheus_mock.call_args[0][0].id, available.id)
+
+		query_prometheus_mock.reset_mock()
+		get_response = self.client.get(reverse('monitor:alert_query'), {
+			'query': 'up',
+			'prometheus_id': whitespace_url.id,
+		})
+		post_response = self.client.post(reverse('monitor:metric_query_execute'), {
+			'query': 'up',
+			'prometheus_id': whitespace_url.id,
+		})
+
+		self.assertEqual(get_response.status_code, 400)
+		self.assertEqual(self.vue_data(get_response)['error'], '选择的 Prometheus 对接不可用')
+		self.assertEqual(post_response.status_code, 400)
+		self.assertEqual(post_response.json(), {
+			'ok': False,
+			'message': '选择的 Prometheus 对接不可用',
+		})
+		query_prometheus_mock.assert_not_called()
 
 	@mock.patch('monitor.views.query_prometheus')
 	def test_alert_query_preserves_bookmarked_query_as_normalized_table(self, query_prometheus_mock):
-		PrometheusConfig.objects.create(prometheus_url='http://prometheus.local:9090', enabled=True)
+		config = PrometheusConfig.objects.create(prometheus_url='http://prometheus.local:9090', enabled=True)
 		query_prometheus_mock.return_value = {
 			'ok': True,
 			'body': {
@@ -503,9 +633,42 @@ class MonitorSecurityTests(TestCase):
 		self.assertEqual(data['execute_url'], reverse('monitor:metric_query_execute'))
 		self.assertTrue(data['csrf'])
 		self.assertEqual(data['error'], '')
+		self.assertEqual(data['selected_prometheus_id'], config.id)
 		self.assertEqual(data['table']['label_columns'], ['job'])
 		self.assertEqual(data['table']['rows'][0]['labels'], {'job': 'node'})
 		query_prometheus_mock.assert_called_once()
+
+	@mock.patch('monitor.views.query_prometheus')
+	def test_alert_query_bookmark_uses_selected_prometheus_config(self, query_prometheus_mock):
+		PrometheusConfig.objects.create(
+			name='Primary Metrics',
+			prometheus_url='http://primary.local:9090',
+			enabled=True,
+		)
+		selected = PrometheusConfig.objects.create(
+			name='Backup Metrics',
+			prometheus_url='http://backup.local:9090',
+			enabled=True,
+		)
+		query_prometheus_mock.return_value = {
+			'ok': True,
+			'body': {
+				'status': 'success',
+				'data': {'resultType': 'scalar', 'result': [1, '2']},
+			},
+		}
+
+		response = self.client.get(reverse('monitor:alert_query'), {
+			'query': 'up',
+			'prometheus_id': selected.id,
+		})
+		data = self.vue_data(response)
+
+		self.assertEqual(response.status_code, 200)
+		self.assertEqual(data['selected_prometheus_id'], selected.id)
+		self.assertEqual(data['table']['rows'][0]['value'], '2')
+		self.assertEqual(query_prometheus_mock.call_args[0][0].id, selected.id)
+		self.assertEqual(query_prometheus_mock.call_args[0][1], 'up')
 
 	@mock.patch('monitor.views.query_prometheus')
 	def test_metric_query_execute_uses_first_enabled_prometheus_deterministically(self, query_prometheus_mock):
@@ -536,9 +699,110 @@ class MonitorSecurityTests(TestCase):
 
 		self.assertEqual(response.status_code, 200)
 		self.assertEqual(response.json()['query'], 'up')
+		self.assertEqual(response.json()['prometheus_id'], first_enabled.id)
 		self.assertEqual(response.json()['table']['rows'][0]['value'], '2')
 		self.assertEqual(query_prometheus_mock.call_args[0][0].id, first_enabled.id)
 		self.assertEqual(query_prometheus_mock.call_args[0][1], 'up')
+
+	@mock.patch('monitor.views.query_prometheus')
+	def test_metric_query_execute_uses_selected_prometheus_config(self, query_prometheus_mock):
+		PrometheusConfig.objects.create(
+			name='Primary Metrics',
+			prometheus_url='http://primary.local:9090',
+			enabled=True,
+		)
+		selected = PrometheusConfig.objects.create(
+			name='Backup Metrics',
+			prometheus_url='http://backup.local:9090',
+			enabled=True,
+		)
+		query_prometheus_mock.return_value = {
+			'ok': True,
+			'body': {
+				'status': 'success',
+				'data': {'resultType': 'scalar', 'result': [1, '2']},
+			},
+		}
+
+		response = self.client.post(reverse('monitor:metric_query_execute'), {
+			'query': 'up',
+			'prometheus_id': selected.id,
+		})
+
+		self.assertEqual(response.status_code, 200)
+		self.assertEqual(response.json()['prometheus_id'], selected.id)
+		self.assertEqual(query_prometheus_mock.call_args[0][0].id, selected.id)
+		self.assertEqual(query_prometheus_mock.call_args[0][1], 'up')
+
+	@mock.patch('monitor.views.query_prometheus')
+	def test_metric_query_execute_blank_prometheus_id_uses_default(self, query_prometheus_mock):
+		default = PrometheusConfig.objects.create(
+			name='Primary Metrics',
+			prometheus_url='http://primary.local:9090',
+			enabled=True,
+		)
+		query_prometheus_mock.return_value = {
+			'ok': True,
+			'body': {
+				'status': 'success',
+				'data': {'resultType': 'scalar', 'result': [1, '2']},
+			},
+		}
+
+		response = self.client.post(reverse('monitor:metric_query_execute'), {
+			'query': 'up',
+			'prometheus_id': '',
+		})
+
+		self.assertEqual(response.status_code, 200)
+		self.assertEqual(response.json()['prometheus_id'], default.id)
+		self.assertEqual(query_prometheus_mock.call_args[0][0].id, default.id)
+
+	@mock.patch('monitor.views.query_prometheus')
+	def test_metric_query_rejects_unavailable_explicit_prometheus_ids(self, query_prometheus_mock):
+		disabled = PrometheusConfig.objects.create(
+			name='Disabled',
+			prometheus_url='http://disabled.local:9090',
+			enabled=False,
+		)
+		blank_url = PrometheusConfig.objects.create(
+			name='Blank URL',
+			prometheus_url='',
+			enabled=True,
+		)
+		available = PrometheusConfig.objects.create(
+			name='Available',
+			prometheus_url='http://available.local:9090',
+			enabled=True,
+		)
+		invalid_ids = (
+			'not-a-number',
+			disabled.id,
+			blank_url.id,
+			available.id + 1000,
+		)
+
+		for prometheus_id in invalid_ids:
+			with self.subTest(prometheus_id=prometheus_id):
+				get_response = self.client.get(reverse('monitor:alert_query'), {
+					'query': 'up',
+					'prometheus_id': prometheus_id,
+				})
+				post_response = self.client.post(reverse('monitor:metric_query_execute'), {
+					'query': 'up',
+					'prometheus_id': prometheus_id,
+				})
+				get_data = self.vue_data(get_response)
+
+				self.assertEqual(get_response.status_code, 400)
+				self.assertEqual(get_data['error'], '选择的 Prometheus 对接不可用')
+				self.assertIsNone(get_data['selected_prometheus_id'])
+				self.assertEqual(post_response.status_code, 400)
+				self.assertEqual(post_response.json(), {
+					'ok': False,
+					'message': '选择的 Prometheus 对接不可用',
+				})
+				query_prometheus_mock.assert_not_called()
 
 	def test_metric_query_page_payload_and_dashboard_use_renamed_text(self):
 		query_response = self.client.get(reverse('monitor:alert_query'))
@@ -551,6 +815,10 @@ class MonitorSecurityTests(TestCase):
 		self.assertEqual(query_data['query'], '')
 		self.assertEqual(query_data['table'], services.empty_prometheus_table())
 		self.assertEqual(query_data['execute_url'], reverse('monitor:metric_query_execute'))
+		self.assertEqual(query_data['targets_url'], reverse('monitor:metric_query_targets'))
+		self.assertEqual(query_data['rules_url'], reverse('monitor:metric_query_rules'))
+		self.assertEqual(query_data['prometheus_configs'], [])
+		self.assertIsNone(query_data['selected_prometheus_id'])
 		self.assertIn('指标查询', [item['label'] for item in query_data['actions']])
 		self.assertIn('指标查询', home_data['subtitle'])
 
@@ -605,6 +873,182 @@ class MonitorSecurityTests(TestCase):
 		self.assertEqual(response.json(), {'ok': False, 'message': 'Prometheus 查询失败'})
 		query_prometheus_mock.assert_called_once()
 
+	@mock.patch('monitor.views.query_prometheus')
+	def test_metric_query_invalid_promql_returns_400_without_internal_classification(self, query_prometheus_mock):
+		PrometheusConfig.objects.create(
+			prometheus_url='http://prometheus.local:9090',
+			enabled=True,
+		)
+		query_prometheus_mock.return_value = {
+			'ok': False,
+			'message': services.PROMETHEUS_INVALID_QUERY_MESSAGE,
+			'error_kind': 'invalid_query',
+		}
+
+		post_response = self.client.post(reverse('monitor:metric_query_execute'), {'query': '('})
+		get_response = self.client.get(reverse('monitor:alert_query'), {'query': '('})
+		get_data = self.vue_data(get_response)
+
+		self.assertEqual(post_response.status_code, 400)
+		self.assertEqual(post_response.json(), {
+			'ok': False,
+			'message': services.PROMETHEUS_INVALID_QUERY_MESSAGE,
+		})
+		self.assertNotIn('error_kind', post_response.json())
+		self.assertEqual(get_response.status_code, 400)
+		self.assertEqual(get_data['error'], services.PROMETHEUS_INVALID_QUERY_MESSAGE)
+		self.assertNotIn('error_kind', get_data)
+
+	def test_metric_metadata_endpoints_require_post_and_login(self):
+		endpoint_names = ('monitor:metric_query_targets', 'monitor:metric_query_rules')
+		for endpoint_name in endpoint_names:
+			with self.subTest(endpoint_name=endpoint_name, method='GET'):
+				self.assertEqual(self.client.get(reverse(endpoint_name)).status_code, 405)
+
+		session = self.client.session
+		session.clear()
+		session.save()
+		for endpoint_name in endpoint_names:
+			with self.subTest(endpoint_name=endpoint_name, authenticated=False):
+				response = self.client.post(reverse(endpoint_name))
+				self.assertEqual(response.status_code, 302)
+				self.assertEqual(response.url, reverse('userprofile:login'))
+
+	@mock.patch('monitor.views.query_prometheus_rules')
+	@mock.patch('monitor.views.query_prometheus_targets')
+	def test_metric_metadata_endpoints_use_selected_config_and_return_id(
+			self, targets_mock, rules_mock):
+		PrometheusConfig.objects.create(
+			name='Primary Metrics',
+			prometheus_url='http://primary.local:9090',
+			enabled=True,
+		)
+		selected = PrometheusConfig.objects.create(
+			name='Secondary Metrics',
+			prometheus_url='http://secondary.local:9090',
+			enabled=True,
+		)
+		targets_mock.return_value = {
+			'ok': True,
+			'body': {
+				'status': 'success',
+				'data': {'activeTargets': [{
+					'labels': {'instance': 'host-a', 'job': 'node'},
+					'scrapePool': 'node',
+					'health': 'up',
+					'lastScrapeDuration': 0.2,
+				}]},
+			},
+		}
+		rules_mock.return_value = {
+			'ok': True,
+			'body': {
+				'status': 'success',
+				'data': {'groups': [{
+					'name': 'system',
+					'rules': [{
+						'name': 'HostDown',
+						'type': 'alerting',
+						'health': 'ok',
+						'state': 'inactive',
+						'query': 'up == 0',
+					}],
+				}]},
+			},
+		}
+
+		targets_response = self.client.post(reverse('monitor:metric_query_targets'), {
+			'prometheus_id': selected.id,
+		})
+		rules_response = self.client.post(reverse('monitor:metric_query_rules'), {
+			'prometheus_id': selected.id,
+		})
+
+		self.assertEqual(targets_response.status_code, 200)
+		self.assertEqual(targets_response.json()['prometheus_id'], selected.id)
+		self.assertEqual(targets_response.json()['targets']['summary']['up'], 1)
+		self.assertEqual(rules_response.status_code, 200)
+		self.assertEqual(rules_response.json()['prometheus_id'], selected.id)
+		self.assertEqual(rules_response.json()['rules']['summary']['alerting'], 1)
+		self.assertEqual(targets_mock.call_args[0][0].id, selected.id)
+		self.assertEqual(rules_mock.call_args[0][0].id, selected.id)
+
+	@mock.patch('monitor.views.query_prometheus_rules')
+	@mock.patch('monitor.views.query_prometheus_targets')
+	def test_metric_metadata_endpoints_reject_missing_or_invalid_config(
+			self, targets_mock, rules_mock):
+		for endpoint_name in ('monitor:metric_query_targets', 'monitor:metric_query_rules'):
+			with self.subTest(endpoint_name=endpoint_name, configured=False):
+				response = self.client.post(reverse(endpoint_name))
+				self.assertEqual(response.status_code, 400)
+				self.assertEqual(response.json(), {
+					'ok': False,
+					'message': '请先配置并启用 Prometheus 对接',
+				})
+
+		PrometheusConfig.objects.create(
+			name='Available',
+			prometheus_url='http://available.local:9090',
+			enabled=True,
+		)
+		for endpoint_name in ('monitor:metric_query_targets', 'monitor:metric_query_rules'):
+			with self.subTest(endpoint_name=endpoint_name, invalid_id=True):
+				response = self.client.post(reverse(endpoint_name), {'prometheus_id': 'invalid'})
+				self.assertEqual(response.status_code, 400)
+				self.assertEqual(response.json(), {
+					'ok': False,
+					'message': '选择的 Prometheus 对接不可用',
+				})
+		targets_mock.assert_not_called()
+		rules_mock.assert_not_called()
+
+	@mock.patch('monitor.views.query_prometheus_rules')
+	@mock.patch('monitor.views.query_prometheus_targets')
+	def test_metric_metadata_endpoints_return_safe_502_failures(
+			self, targets_mock, rules_mock):
+		config = PrometheusConfig.objects.create(
+			prometheus_url='http://prometheus.local:9090',
+			enabled=True,
+		)
+		targets_mock.return_value = {
+			'ok': False,
+			'message': 'raw upstream target detail',
+		}
+		rules_mock.return_value = {
+			'ok': False,
+			'message': services.PROMETHEUS_RULES_FORMAT_MESSAGE,
+		}
+
+		targets_response = self.client.post(reverse('monitor:metric_query_targets'), {
+			'prometheus_id': config.id,
+		})
+		rules_response = self.client.post(reverse('monitor:metric_query_rules'), {
+			'prometheus_id': config.id,
+		})
+
+		self.assertEqual(targets_response.status_code, 502)
+		self.assertEqual(targets_response.json(), {
+			'ok': False,
+			'message': services.PROMETHEUS_TARGETS_FAILURE_MESSAGE,
+		})
+		self.assertNotIn('raw upstream', targets_response.content.decode('utf-8'))
+		self.assertEqual(rules_response.status_code, 502)
+		self.assertEqual(rules_response.json(), {
+			'ok': False,
+			'message': services.PROMETHEUS_RULES_FORMAT_MESSAGE,
+		})
+
+	def test_metric_resource_frontend_keeps_security_query_context_and_keyboard_tabs(self):
+		with open('static/js/ops-vue-pages.js', 'r') as handle:
+			vue_source = handle.read()
+
+		self.assertIn('sensitiveParts.some((sensitive) => compact.endsWith(sensitive))', vue_source)
+		self.assertIn('isSensitiveMetricLabelValue(labels[key])', vue_source)
+		self.assertIn("this.fetchMetricJson(this.data.execute_url, form, 'query')", vue_source)
+		self.assertIn("this.fetchMetricJson(endpoint, form, 'resource')", vue_source)
+		self.assertEqual(vue_source.count('@keydown="handleMetricTabKeydown'), 3)
+		self.assertEqual(vue_source.count(':tabindex="metricView ==='), 3)
+
 	def test_alert_notifications_page_renders(self):
 		response = self.client.get(reverse('monitor:alert_notifications'))
 
@@ -612,6 +1056,77 @@ class MonitorSecurityTests(TestCase):
 		self.assertContains(response, '告警通知')
 		self.assertContains(response, '飞书')
 		self.assertContains(response, '企业微信')
+
+	def test_notification_integration_list_is_viewable_and_never_exposes_webhook_fragments(self):
+		self.set_role(DevOpsRole.ROLE_VIEWER)
+		AlertNotificationConfig.objects.create(
+			provider=AlertNotificationConfig.PROVIDER_FEISHU,
+			name='Not Configured',
+			enabled=True,
+			webhook_url='',
+		)
+		AlertNotificationConfig.objects.create(
+			provider=AlertNotificationConfig.PROVIDER_WECOM,
+			name='Configured Channel',
+			enabled=False,
+			webhook_url='https://notify.example.test/path/recognizable-fragment',
+		)
+
+		list_response = self.client.get(reverse('monitor:alert_notification_list'))
+		list_data = self.vue_data(list_response)
+		config_response = self.client.get(reverse('monitor:alert_notifications'))
+		config_data = self.vue_data(config_response)
+
+		self.assertEqual(list_response.status_code, 200)
+		self.assertEqual(json.loads(list_response.context['vue_page_payload'])['kind'], 'alert-notification-list')
+		self.assertFalse(list_data['can_manage_notifications'])
+		self.assertEqual(list_data['configure_url'], reverse('monitor:alert_notifications'))
+		self.assertEqual(len(list_data['notification_integrations']), 1)
+		item = list_data['notification_integrations'][0]
+		self.assertEqual(set(item), {
+			'provider', 'provider_label', 'name', 'enabled', 'configured', 'updated_at', 'configure_url',
+		})
+		self.assertEqual(item['provider'], AlertNotificationConfig.PROVIDER_WECOM)
+		self.assertFalse(item['enabled'])
+		self.assertTrue(item['configured'])
+		self.assertRegex(item['updated_at'], r'^\d{4}-\d{2}-\d{2} \d{2}:\d{2}$')
+		self.assertEqual(item['configure_url'], reverse('monitor:alert_notifications'))
+
+		self.assertEqual(config_response.status_code, 200)
+		self.assertFalse(config_data['can_manage_notifications'])
+		self.assertEqual(config_data['list_url'], reverse('monitor:alert_notification_list'))
+		self.assertTrue(config_data['notifications']['wecom']['has_webhook'])
+		self.assertTrue(config_data['notifications']['wecom']['configured'])
+		self.assertEqual(config_data['notifications']['wecom']['webhook_display'], '已配置')
+		self.assertNotIn('notify.example.test', list_response.context['vue_page_payload'])
+		self.assertNotIn('recognizable-fragment', list_response.context['vue_page_payload'])
+		self.assertNotIn('notify.example.test', config_response.context['vue_page_payload'])
+		self.assertNotIn('recognizable-fragment', config_response.context['vue_page_payload'])
+		self.assertNotContains(list_response, 'notify.example.test')
+		self.assertNotContains(config_response, 'recognizable-fragment')
+
+		list_actions = {item['label']: item['url'] for item in list_data['actions']}
+		config_actions = {item['label']: item['url'] for item in config_data['actions']}
+		self.assertEqual(list_actions['告警通知'], reverse('monitor:alert_notifications'))
+		self.assertEqual(config_actions['告警列表'], reverse('monitor:alert_notification_list'))
+		self.assertEqual(self.client.post(reverse('monitor:alert_notification_list')).status_code, 405)
+
+	def test_alert_notification_config_uses_read_only_vue_state_for_viewer(self):
+		self.set_role(DevOpsRole.ROLE_VIEWER)
+
+		viewer_response = self.client.get(reverse('monitor:alert_notifications'))
+		viewer_data = self.vue_data(viewer_response)
+		with open('static/js/ops-vue-pages.js', 'r') as handle:
+			vue_source = handle.read()
+
+		self.assertEqual(viewer_response.status_code, 200)
+		self.assertFalse(viewer_data['can_manage_notifications'])
+		self.assertIn('<form v-if="canConfigureNotifications" class="ops-form compact"', vue_source)
+		self.assertIn('<div v-else class="ops-notification-readonly">', vue_source)
+
+		self.set_role(DevOpsRole.ROLE_OPERATOR)
+		operator_response = self.client.get(reverse('monitor:alert_notifications'))
+		self.assertTrue(self.vue_data(operator_response)['can_manage_notifications'])
 
 	def test_viewer_cannot_save_alert_notifications_when_roles_are_configured(self):
 		self.set_role(DevOpsRole.ROLE_VIEWER)
@@ -638,6 +1153,7 @@ class MonitorSecurityTests(TestCase):
 		})
 
 		self.assertEqual(response.status_code, 302)
+		self.assertEqual(response.url, reverse('monitor:alert_notification_list'))
 		feishu = AlertNotificationConfig.objects.get(provider=AlertNotificationConfig.PROVIDER_FEISHU)
 		wecom = AlertNotificationConfig.objects.get(provider=AlertNotificationConfig.PROVIDER_WECOM)
 		self.assertTrue(feishu.enabled)
@@ -663,6 +1179,7 @@ class MonitorSecurityTests(TestCase):
 		})
 
 		self.assertEqual(response.status_code, 302)
+		self.assertEqual(response.url, reverse('monitor:alert_notification_list'))
 		config.refresh_from_db()
 		self.assertEqual(config.webhook_url, encrypted)
 		self.assertEqual(config.decrypted_webhook_url, 'https://open.feishu.cn/open-apis/bot/v2/hook/original')
@@ -696,8 +1213,438 @@ class MonitorSecurityTests(TestCase):
 		self.assertEqual(AlertNotificationConfig.objects.count(), 0)
 		self.assertEqual(send_mock.call_args[0][0].provider, AlertNotificationConfig.PROVIDER_WECOM)
 
+	@mock.patch('monitor.views.send_alert_notification')
+	def test_alert_notification_test_masks_untrusted_provider_failure_details(self, send_mock):
+		self.set_role(DevOpsRole.ROLE_OPERATOR)
+		send_mock.return_value = {
+			'ok': False,
+			'message': 'untrusted response with recognizable-fragment',
+		}
+
+		response = self.client.post(reverse('monitor:alert_notifications_test'), {
+			'provider': AlertNotificationConfig.PROVIDER_WECOM,
+			'wecom_enabled': 'on',
+			'wecom_name': 'wecom',
+			'wecom_webhook_url': 'https://notify.example.test/path/secret-fragment',
+		})
+		data = self.vue_data(response)
+
+		self.assertEqual(response.status_code, 400)
+		self.assertEqual(data['test_message'], '测试通知发送失败，请检查通知配置和网络')
+		self.assertNotIn('recognizable-fragment', response.context['vue_page_payload'])
+		self.assertNotIn('secret-fragment', response.context['vue_page_payload'])
+		self.assertNotContains(response, 'recognizable-fragment', status_code=400)
+		self.assertNotContains(response, 'secret-fragment', status_code=400)
+
 
 class PrometheusServiceTests(TestCase):
+	def prometheus_config(self):
+		return PrometheusConfig(
+			prometheus_url='http://prometheus.local:9090',
+			enabled=True,
+		)
+
+	@mock.patch('monitor.services.prometheus_get_json')
+	def test_targets_and_rules_queries_use_expected_paths_and_allow_empty_results(self, prometheus_get_json):
+		config = self.prometheus_config()
+		prometheus_get_json.side_effect = [
+			{'ok': True, 'body': {'status': 'success', 'data': {'activeTargets': []}}},
+			{'ok': True, 'body': {'status': 'success', 'data': {'groups': []}}},
+		]
+
+		targets_result = services.query_prometheus_targets(config)
+		rules_result = services.query_prometheus_rules(config)
+
+		self.assertTrue(targets_result['ok'])
+		self.assertTrue(rules_result['ok'])
+		self.assertEqual(services.normalize_prometheus_targets(targets_result['body']), services.empty_prometheus_targets())
+		self.assertEqual(services.normalize_prometheus_rules(rules_result['body']), services.empty_prometheus_rules())
+		self.assertEqual(prometheus_get_json.call_args_list, [
+			mock.call(config, '/api/v1/targets', {'state': 'active'}),
+			mock.call(config, '/api/v1/rules', None),
+		])
+
+	@mock.patch('monitor.services.prometheus_get_json')
+	def test_targets_and_rules_queries_reject_formats_and_mask_upstream_details(self, prometheus_get_json):
+		config = self.prometheus_config()
+		cases = (
+			(
+				services.query_prometheus_targets,
+				services.PROMETHEUS_TARGETS_FORMAT_MESSAGE,
+				services.PROMETHEUS_TARGETS_FAILURE_MESSAGE,
+			),
+			(
+				services.query_prometheus_rules,
+				services.PROMETHEUS_RULES_FORMAT_MESSAGE,
+				services.PROMETHEUS_RULES_FAILURE_MESSAGE,
+			),
+		)
+		for query_function, format_message, failure_message in cases:
+			with self.subTest(query_function=query_function.__name__, failure='format'):
+				prometheus_get_json.return_value = {
+					'ok': True,
+					'body': {'status': 'success', 'data': {}},
+				}
+				self.assertEqual(query_function(config), {
+					'ok': False,
+					'message': format_message,
+				})
+			with self.subTest(query_function=query_function.__name__, failure='transport'):
+				prometheus_get_json.return_value = {
+					'ok': False,
+					'message': 'raw upstream internal detail',
+				}
+				result = query_function(config)
+				self.assertEqual(result, {'ok': False, 'message': failure_message})
+				self.assertNotIn('raw upstream', result['message'])
+			with self.subTest(query_function=query_function.__name__, failure='status'):
+				prometheus_get_json.return_value = {
+					'ok': True,
+					'body': {'status': 'error', 'error': 'private upstream detail'},
+				}
+				result = query_function(config)
+				self.assertEqual(result, {'ok': False, 'message': failure_message})
+				self.assertNotIn('private upstream', result['message'])
+
+	def test_normalize_targets_uses_whitelist_and_filters_sensitive_labels(self):
+		labels = {
+			'instance': 'host-a',
+			'job': 'node',
+			'a_long': 'x' * (services.PROMETHEUS_LABEL_VALUE_MAX_LENGTH + 20),
+			'password': 'label-password-secret',
+			'api_token': 'label-token-secret',
+			'authorization': 'label-auth-secret',
+			'authorizationHeader': 'label-camel-auth-secret',
+			'a_nested': {'private': 'nested-secret'},
+			'a_number': 12,
+			'a_boolean': True,
+			'a_infinite': float('inf'),
+		}
+		for index in range(services.PROMETHEUS_LABEL_MAX_ITEMS + 10):
+			labels['label_%03d' % index] = 'value-%s' % index
+		body = {
+			'data': {
+				'activeTargets': [{
+					'labels': labels,
+					'discoveredLabels': {'password': 'discovered-secret'},
+					'scrapePool': 'node-pool',
+					'scrapeUrl': 'http://private-target.local/metrics',
+					'globalUrl': 'http://private-global.local/metrics',
+					'health': 'up',
+					'lastScrape': '2026-07-12T00:00:00Z',
+					'lastScrapeDuration': -3,
+					'lastError': 'raw target error secret',
+				}],
+			},
+		}
+
+		payload = services.normalize_prometheus_targets(body)
+		row = payload['rows'][0]
+		serialized = json.dumps(payload)
+
+		self.assertEqual(set(row), {
+			'instance', 'job', 'scrape_pool', 'health', 'last_scrape',
+			'last_scrape_duration', 'labels', 'has_error',
+		})
+		self.assertEqual(row['instance'], 'host-a')
+		self.assertEqual(row['job'], 'node')
+		self.assertIsNone(row['last_scrape_duration'])
+		self.assertTrue(row['has_error'])
+		self.assertEqual(payload['summary'], {
+			'total': 1,
+			'up': 1,
+			'down': 0,
+			'unknown': 0,
+			'with_errors': 1,
+		})
+		self.assertEqual(list(row['labels']), sorted(row['labels']))
+		self.assertEqual(len(row['labels']), services.PROMETHEUS_LABEL_MAX_ITEMS)
+		self.assertEqual(len(row['labels']['a_long']), services.PROMETHEUS_LABEL_VALUE_MAX_LENGTH)
+		self.assertEqual(row['labels']['a_number'], '12')
+		self.assertEqual(row['labels']['a_boolean'], 'true')
+		self.assertNotIn('password', row['labels'])
+		self.assertNotIn('api_token', row['labels'])
+		self.assertNotIn('authorization', row['labels'])
+		self.assertNotIn('authorizationHeader', row['labels'])
+		self.assertNotIn('a_nested', row['labels'])
+		self.assertNotIn('a_infinite', row['labels'])
+		for private_value in (
+			'label-password-secret', 'label-token-secret', 'label-auth-secret',
+			'label-camel-auth-secret',
+			'nested-secret', 'discovered-secret', 'private-target.local',
+			'private-global.local', 'raw target error secret',
+		):
+			self.assertNotIn(private_value, serialized)
+
+	def test_normalize_rules_redacts_queries_and_omits_raw_rule_details(self):
+		query = (
+			'metric{token="query-token-secret", password!="query-password-secret", '
+			'api_key=~"query-key-secret", job="node"} '
+			+ ('x' * services.PROMETHEUS_RULE_QUERY_MAX_LENGTH)
+		)
+		body = {
+			'data': {
+				'groups': [{
+					'name': 'system-rules',
+					'file': '/private/rules/internal.yml',
+					'lastEvaluation': '2026-07-12T00:00:00Z',
+					'evaluationTime': 0.4,
+					'rules': [
+						{
+							'name': 'HostDown',
+							'type': 'alerting',
+							'health': 'err',
+							'state': 'firing',
+							'query': query,
+							'duration': 15,
+							'labels': {
+								'severity': 'critical',
+								'webhook': 'label-webhook-secret',
+								'credential_id': 'label-credential-secret',
+								'nested': {'value': 'label-nested-secret'},
+							},
+							'annotations': {'summary': 'annotation-secret'},
+							'alerts': [{'labels': {'token': 'alert-secret'}}],
+							'lastError': 'rule-last-error-secret',
+							'evaluationTime': -2,
+						},
+						{
+							'name': 'HostCount',
+							'type': 'recording',
+							'health': 'ok',
+							'query': 'sum(up)',
+							'duration': -1,
+						},
+					],
+				}],
+			},
+		}
+
+		payload = services.normalize_prometheus_rules(body)
+		row = payload['rows'][0]
+		serialized = json.dumps(payload)
+
+		self.assertEqual(set(row), {
+			'group', 'name', 'type', 'health', 'state', 'query', 'duration',
+			'labels', 'last_evaluation', 'evaluation_time', 'active_alerts', 'has_error',
+		})
+		self.assertEqual(payload['summary'], {
+			'total': 2,
+			'alerting': 1,
+			'recording': 1,
+			'unhealthy': 1,
+			'firing': 1,
+			'pending': 0,
+		})
+		self.assertEqual(row['active_alerts'], 1)
+		self.assertTrue(row['has_error'])
+		self.assertEqual(row['duration'], 15.0)
+		self.assertIsNone(row['evaluation_time'])
+		self.assertLessEqual(len(row['query']), services.PROMETHEUS_RULE_QUERY_MAX_LENGTH)
+		self.assertEqual(row['query'].count('<redacted>'), 3)
+		self.assertIn('job="node"', row['query'])
+		self.assertEqual(row['labels'], {'severity': 'critical'})
+		self.assertIsNone(payload['rows'][1]['duration'])
+		self.assertEqual(payload['rows'][1]['evaluation_time'], 0.4)
+		for private_value in (
+			'query-token-secret', 'query-password-secret', 'query-key-secret',
+			'/private/rules/internal.yml', 'label-webhook-secret',
+			'label-credential-secret', 'label-nested-secret', 'annotation-secret',
+			'alert-secret', 'rule-last-error-secret',
+		):
+				self.assertNotIn(private_value, serialized)
+
+	def test_metadata_filters_compact_sensitive_keys_and_credential_values(self):
+		targets_payload = services.normalize_prometheus_targets({
+			'data': {'activeTargets': [{
+				'labels': {
+					'clientSecret': 'client-secret-value',
+					'apitoken': 'api-token-value',
+					'accesskey': 'access-key-value',
+					'endpoint': 'https://user:pass@private.example.test/metrics',
+					'query_url': 'https://public.example.test/metrics?token=query-secret',
+					'fragment_url': 'https://public.example.test/metrics#private-fragment',
+					'parameter': 'token=parameter-secret',
+					'instance': 'host-a:9090',
+					'plain_url': 'https://public.example.test/metrics',
+				},
+			}]},
+		})
+		rules_payload = services.normalize_prometheus_rules({
+			'data': {'groups': [{
+				'name': 'security',
+				'rules': [{
+					'name': 'SafeRule',
+					'type': 'alerting',
+					'health': 'ok',
+					'query': (
+						'metric{clientsecret="matcher-key-secret", '
+						'endpoint="https://user:pass@private.example.test/metrics", '
+						'callback="https://public.example.test/path?token=matcher-query-secret", '
+						'note="token=matcher-parameter-secret", instance="host-a:9090"}'
+					),
+					'labels': {
+						'callback': 'https://user:pass@private.example.test/callback',
+						'instance': 'host-a:9090',
+					},
+				}],
+			}]},
+		})
+
+		target_labels = targets_payload['rows'][0]['labels']
+		rule_row = rules_payload['rows'][0]
+		serialized = json.dumps({'targets': targets_payload, 'rules': rules_payload})
+
+		self.assertEqual(target_labels, {
+			'instance': 'host-a:9090',
+			'plain_url': 'https://public.example.test/metrics',
+		})
+		self.assertEqual(rule_row['labels'], {'instance': 'host-a:9090'})
+		self.assertEqual(rule_row['query'].count('<redacted>'), 4)
+		self.assertIn('instance="host-a:9090"', rule_row['query'])
+		for private_value in (
+			'client-secret-value', 'api-token-value', 'access-key-value',
+			'query-secret', 'private-fragment', 'parameter-secret',
+			'matcher-key-secret', 'matcher-query-secret', 'matcher-parameter-secret',
+			'user:pass',
+		):
+			self.assertNotIn(private_value, serialized)
+
+	def test_targets_and_rules_normalizers_cap_rows_and_preserve_totals(self):
+		total = services.PROMETHEUS_TABLE_MAX_ROWS + 3
+		targets = [
+			{'labels': {'instance': 'host-%s' % index}, 'health': 'up'}
+			for index in range(total)
+		]
+		rules = [
+			{'name': 'rule-%s' % index, 'type': 'recording', 'health': 'ok'}
+			for index in range(total)
+		]
+
+		targets_payload = services.normalize_prometheus_targets({
+			'data': {'activeTargets': targets},
+		})
+		rules_payload = services.normalize_prometheus_rules({
+			'data': {'groups': [{'name': 'group', 'rules': rules}]},
+		})
+
+		self.assertEqual(len(targets_payload['rows']), services.PROMETHEUS_TABLE_MAX_ROWS)
+		self.assertEqual(targets_payload['total_rows'], total)
+		self.assertEqual(targets_payload['summary']['up'], total)
+		self.assertTrue(targets_payload['truncated'])
+		self.assertEqual(len(rules_payload['rows']), services.PROMETHEUS_TABLE_MAX_ROWS)
+		self.assertEqual(rules_payload['total_rows'], total)
+		self.assertEqual(rules_payload['summary']['recording'], total)
+		self.assertTrue(rules_payload['truncated'])
+
+	def test_metadata_durations_distinguish_missing_values_from_real_zero(self):
+		targets_payload = services.normalize_prometheus_targets({
+			'data': {'activeTargets': [
+				{'labels': {'instance': 'missing'}},
+				{'labels': {'instance': 'zero'}, 'lastScrapeDuration': 0},
+			]},
+		})
+		rules_payload = services.normalize_prometheus_rules({
+			'data': {'groups': [{
+				'name': 'durations',
+				'rules': [
+					{'name': 'missing', 'type': 'recording', 'health': 'ok'},
+					{
+						'name': 'zero',
+						'type': 'recording',
+						'health': 'ok',
+						'duration': 0,
+						'evaluationTime': 0,
+					},
+				],
+			}]},
+		})
+
+		self.assertIsNone(targets_payload['rows'][0]['last_scrape_duration'])
+		self.assertEqual(targets_payload['rows'][1]['last_scrape_duration'], 0.0)
+		self.assertIsNone(rules_payload['rows'][0]['duration'])
+		self.assertIsNone(rules_payload['rows'][0]['evaluation_time'])
+		self.assertEqual(rules_payload['rows'][1]['duration'], 0.0)
+		self.assertEqual(rules_payload['rows'][1]['evaluation_time'], 0.0)
+
+	@mock.patch('monitor.services.urlrequest.urlopen')
+	def test_query_maps_http_error_json_to_safe_invalid_promql_failure(self, urlopen):
+		body = json.dumps({
+			'status': 'error',
+			'errorType': 'bad_data',
+			'error': 'parse failure for internal_expression',
+		}).encode('utf-8')
+		urlopen.side_effect = services.urlerror.HTTPError(
+			'http://prometheus.local:9090/api/v1/query',
+			422,
+			'Unprocessable Entity',
+			{},
+			io.BytesIO(body),
+		)
+
+		result = services.query_prometheus(self.prometheus_config(), 'internal_metric{scope="private"')
+
+		self.assertEqual(result, {
+			'ok': False,
+			'message': services.PROMETHEUS_INVALID_QUERY_MESSAGE,
+			'error_kind': 'invalid_query',
+		})
+		self.assertNotIn('parse failure', result['message'])
+		self.assertNotIn('internal_metric', result['message'])
+
+	@mock.patch('monitor.services.urlrequest.urlopen')
+	def test_query_maps_non_json_http_500_to_safe_service_failure(self, urlopen):
+		urlopen.side_effect = services.urlerror.HTTPError(
+			'http://prometheus.local:9090/api/v1/query',
+			500,
+			'Internal Server Error',
+			{},
+			io.BytesIO(b'internal upstream detail'),
+		)
+
+		result = services.query_prometheus(self.prometheus_config(), 'up')
+
+		self.assertEqual(result, {
+			'ok': False,
+			'message': 'Prometheus 服务暂时不可用，请稍后重试',
+		})
+		self.assertNotIn('internal upstream detail', result['message'])
+
+	@mock.patch('monitor.services.prometheus_get_json')
+	def test_query_rejects_malformed_success_response_shapes(self, prometheus_get_json):
+		malformed_bodies = (
+			None,
+			[],
+			{},
+			{'status': 'success'},
+			{'status': 'success', 'data': []},
+			{'status': 'success', 'data': {'resultType': 'histogram', 'result': []}},
+			{'status': 'success', 'data': {'resultType': 'vector', 'result': {}}},
+			{'status': 'success', 'data': {'resultType': 'scalar', 'result': []}},
+		)
+		for body in malformed_bodies:
+			with self.subTest(body=body):
+				prometheus_get_json.return_value = {'ok': True, 'body': body}
+
+				result = services.query_prometheus(self.prometheus_config(), 'up')
+
+				self.assertEqual(result, {
+					'ok': False,
+					'message': services.PROMETHEUS_QUERY_FORMAT_MESSAGE,
+				})
+
+	@mock.patch('monitor.services.prometheus_get_json')
+	def test_query_masks_untrusted_transport_failure_message(self, prometheus_get_json):
+		prometheus_get_json.return_value = {
+			'ok': False,
+			'message': 'raw upstream error containing internal expression',
+		}
+
+		result = services.query_prometheus(self.prometheus_config(), 'internal_metric')
+
+		self.assertEqual(result, {'ok': False, 'message': 'Prometheus 查询失败'})
+		self.assertNotIn('raw upstream error', result['message'])
+
 	@mock.patch('monitor.services.prometheus_get_json')
 	def test_query_masks_upstream_error_details(self, prometheus_get_json):
 		config = PrometheusConfig(
