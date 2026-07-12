@@ -11,90 +11,94 @@
             <div class="sidebar-label">导航</div>
             <ul class="navbar-nav sidebar-nav">
                 <li class="nav-item sidebar-nav-group">
-                    <a class="nav-link sidebar-parent-link" href="{% url 'asset_management' %}" data-tooltip="统一管理本地与远程资产">
+                    <a class="nav-link sidebar-parent-link" href="{% url 'asset_management' %}"
+                       role="button" aria-expanded="false" aria-controls="sidebar-assets-subnav">
                         <i class="fas fa-boxes-stacked"></i><span>资产管理</span>
                     </a>
-                    <ul class="sidebar-subnav">
+                    <ul class="sidebar-subnav" id="sidebar-assets-subnav">
                         <li>
-                            <a class="nav-link sidebar-subnav-link" href="{% url 'linux' %}" data-tooltip="查看本地资产系统信息">
+                            <a class="nav-link sidebar-subnav-link" href="{% url 'linux' %}">
                                 <i class="fas fa-desktop"></i><span>本地资产</span>
                             </a>
                         </li>
                         <li>
-                            <a class="nav-link sidebar-subnav-link" href="{% url 'linux_detail' %}" data-tooltip="管理所有 Linux 资产">
+                            <a class="nav-link sidebar-subnav-link" href="{% url 'linux_detail' %}">
                                 <i class="fas fa-list"></i><span>资产列表</span>
                             </a>
                         </li>
                     </ul>
                 </li>
                 <li class="nav-item sidebar-nav-group">
-                    <a class="nav-link sidebar-parent-link" href="{% url 'password:credential_management' %}" data-tooltip="统一管理账号凭据">
+                    <a class="nav-link sidebar-parent-link" href="{% url 'password:credential_management' %}"
+                       role="button" aria-expanded="false" aria-controls="sidebar-credentials-subnav">
                         <i class="fas fa-key"></i><span>凭据管理</span>
                     </a>
-                    <ul class="sidebar-subnav">
+                    <ul class="sidebar-subnav" id="sidebar-credentials-subnav">
                         <li>
-                            <a class="nav-link sidebar-subnav-link" href="{% url 'password:password_manage' %}" data-tooltip="查看和维护凭据">
+                            <a class="nav-link sidebar-subnav-link" href="{% url 'password:password_manage' %}">
                                 <i class="fas fa-list"></i><span>凭据列表</span>
                             </a>
                         </li>
                     </ul>
                 </li>
                 <li class="nav-item sidebar-nav-group">
-                    <a class="nav-link sidebar-parent-link" href="/monitor/manage/" data-tooltip="监控管理与告警配置">
+                    <a class="nav-link sidebar-parent-link" href="/monitor/manage/"
+                       role="button" aria-expanded="false" aria-controls="sidebar-monitor-subnav">
                         <i class="fas fa-chart-line"></i><span>监控管理</span>
                     </a>
-                    <ul class="sidebar-subnav">
+                    <ul class="sidebar-subnav" id="sidebar-monitor-subnav">
                         <li>
-                            <a class="nav-link sidebar-subnav-link" href="/monitor/manage/" data-tooltip="查看监控概览">
+                            <a class="nav-link sidebar-subnav-link" href="/monitor/manage/">
                                 <i class="fas fa-tachometer-alt"></i><span>监控管理</span>
                             </a>
                         </li>
                         <li>
-                            <a class="nav-link sidebar-subnav-link" href="/monitor/prometheus/" data-tooltip="配置 Prometheus 对接">
+                            <a class="nav-link sidebar-subnav-link" href="/monitor/prometheus/">
                                 <i class="fas fa-plug"></i><span>监控对接</span>
                             </a>
                         </li>
                         <li>
-                            <a class="nav-link sidebar-subnav-link" href="/monitor/query/" data-tooltip="查询 Prometheus 告警数据">
-                                <i class="fas fa-search"></i><span>告警查询</span>
+                            <a class="nav-link sidebar-subnav-link" href="/monitor/query/">
+                                <i class="fas fa-search"></i><span>指标查询</span>
                             </a>
                         </li>
                         <li>
-                            <a class="nav-link sidebar-subnav-link" href="/monitor/" data-tooltip="配置告警阈值">
+                            <a class="nav-link sidebar-subnav-link" href="/monitor/">
                                 <i class="fas fa-sliders-h"></i><span>告警设置</span>
                             </a>
                         </li>
                         <li>
-                            <a class="nav-link sidebar-subnav-link" href="/monitor/notifications/" data-tooltip="配置告警通知渠道">
+                            <a class="nav-link sidebar-subnav-link" href="/monitor/notifications/">
                                 <i class="fas fa-bell"></i><span>告警通知</span>
                             </a>
                         </li>
                     </ul>
                 </li>
                 <li class="nav-item">
-                    <a class="nav-link" href="{% url 'devops:dashboard' %}" data-tooltip="DevOps自动化平台">
+                    <a class="nav-link" href="{% url 'devops:dashboard' %}">
                         <i class="fas fa-tools"></i><span>DevOps</span>
                     </a>
                 </li>
                 <li class="nav-item sidebar-nav-group">
-                    <a class="nav-link sidebar-parent-link" href="{% url 'devops:clusters' %}" data-tooltip="统一管理 Kubernetes 集群">
+                    <a class="nav-link sidebar-parent-link" href="{% url 'devops:clusters' %}"
+                       role="button" aria-expanded="false" aria-controls="sidebar-k8s-subnav">
                         <i class="fas fa-cubes"></i><span>K8s集群管理</span>
                     </a>
-                    <ul class="sidebar-subnav">
+                    <ul class="sidebar-subnav" id="sidebar-k8s-subnav">
                         <li>
-                            <a class="nav-link sidebar-subnav-link" href="{% url 'devops:cluster_connect' %}" data-tooltip="新增 Kubernetes 集群连接">
+                            <a class="nav-link sidebar-subnav-link" href="{% url 'devops:cluster_connect' %}">
                                 <i class="fas fa-plug"></i><span>K8s集群连接</span>
                             </a>
                         </li>
                         <li>
-                            <a class="nav-link sidebar-subnav-link" href="{% url 'devops:cluster_list' %}" data-tooltip="查看已保存的 Kubernetes 集群">
+                            <a class="nav-link sidebar-subnav-link" href="{% url 'devops:cluster_list' %}">
                                 <i class="fas fa-list"></i><span>K8s集群列表</span>
                             </a>
                         </li>
                     </ul>
                 </li>
                 <li class="nav-item">
-                    <a class="nav-link" href="{% url 'aiops:dashboard' %}" data-tooltip="智能运维分析">
+                    <a class="nav-link" href="{% url 'aiops:dashboard' %}">
                         <i class="fas fa-brain"></i><span>AIOps</span>
                     </a>
                 </li>

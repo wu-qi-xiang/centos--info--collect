@@ -4,7 +4,7 @@ try:
 except ImportError:
     import urllib.parse as urlparse
 
-from .models import AlertNotificationConfig, Monitor, PrometheusConfig
+from .models import AlertmanagerConfig, AlertNotificationConfig, Monitor, PrometheusConfig
 
 
 class MonitorForm(forms.ModelForm):
@@ -37,7 +37,13 @@ class MonitorForm(forms.ModelForm):
 class PrometheusConfigForm(forms.ModelForm):
     class Meta:
         model = PrometheusConfig
-        fields = ('prometheus_url', 'enabled')
+        fields = ('name', 'prometheus_url', 'enabled')
+
+    def clean_name(self):
+        value = (self.cleaned_data.get('name') or '').strip()
+        if not value:
+            raise forms.ValidationError('请输入 Prometheus 名称')
+        return value
 
     def clean_prometheus_url(self):
         value = (self.cleaned_data.get('prometheus_url') or '').strip().rstrip('/')
@@ -48,6 +54,29 @@ class PrometheusConfigForm(forms.ModelForm):
             raise forms.ValidationError('Prometheus 地址必须是 http:// 或 https:// 开头的完整地址')
         if parsed.username or parsed.password or parsed.query or parsed.fragment:
             raise forms.ValidationError('Prometheus 地址只填写基础地址，不要包含用户名、密码、Token 或查询参数')
+        return value
+
+
+class AlertmanagerConfigForm(forms.ModelForm):
+    class Meta:
+        model = AlertmanagerConfig
+        fields = ('name', 'alertmanager_url', 'enabled')
+
+    def clean_name(self):
+        value = (self.cleaned_data.get('name') or '').strip()
+        if not value:
+            raise forms.ValidationError('请输入 Alertmanager 名称')
+        return value
+
+    def clean_alertmanager_url(self):
+        value = (self.cleaned_data.get('alertmanager_url') or '').strip().rstrip('/')
+        if not value:
+            raise forms.ValidationError('请输入 Alertmanager 地址')
+        parsed = urlparse.urlparse(value)
+        if parsed.scheme not in ('http', 'https') or not parsed.netloc:
+            raise forms.ValidationError('Alertmanager 地址必须是 http:// 或 https:// 开头的完整地址')
+        if parsed.username or parsed.password or parsed.query or parsed.fragment:
+            raise forms.ValidationError('Alertmanager 地址只填写基础地址，不要包含用户名、密码、Token 或查询参数')
         return value
 
 

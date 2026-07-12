@@ -55,6 +55,41 @@ When delegating, give each subagent explicit ownership:
 
 Use `.codex/skills/centos-feature-dev/templates/subagent-task.md` as the default delegation prompt. Direct main-agent edits are reserved for non-development housekeeping or tiny, specific corrections with no design choice, permission impact, schema/API/runtime change, cross-module behavior, or substantive implementation work.
 
+## Task TODO Visibility
+
+At the start of every task, publish a user-facing TODO list before investigation, delegation, implementation, or validation begins. This step is mandatory even when the task is small.
+
+- List the concrete investigation, implementation, validation, and completion steps that are currently known.
+- Mark each item as pending, in progress, completed, or blocked, and keep at most one main-agent item in progress at a time.
+- Update the printed TODO whenever an item completes, becomes blocked, changes scope, or creates new follow-up work; do not wait until the final response to mark everything complete.
+- Include planned subagent assignments in the TODO and keep their visible status synchronized with subagent progress.
+- For a tiny direct task, print a one-item or short TODO instead of omitting the list.
+- Include final validation and the completion self-check as explicit TODO items.
+- Never include secrets, credentials, sensitive URLs, or confidential data in the printed TODO.
+- Do not silently execute work that is absent from the current user-facing TODO; update the TODO first.
+
+## Subagent Task Visibility
+
+At the start of every task, publish the subagent delegation decision to the user before spawning or assigning work. This visibility step is mandatory for every task.
+
+- When subagents are used, print each task assignment in a readable block before dispatch. Include the subagent name, objective, owned files or responsibility area, prohibited files or areas, required validation, and relevant security constraints.
+- Print follow-up or reassigned subagent task contents before sending them as well; do not silently expand an agent's ownership or objective.
+- Never include passwords, private keys, tokens, webhook secrets, sensitive URLs, or other confidential values in the printed assignment.
+- When a subagent finishes, report its completion status, files changed, validation result, and important findings before or during integration.
+- When no subagent is used, explicitly state that decision and why direct execution is more efficient or safer for the task.
+- Do not silently spawn, reassign, or omit the task contents from user-facing progress updates.
+
+## Concurrency And Efficiency
+
+At the start of every task, before beginning sequential investigation or implementation, explicitly assess whether the work can be split into independent tracks and executed concurrently. Use concurrency when it shortens the critical path without creating file conflicts or duplicated work.
+
+- Run independent repository searches, file reads, diagnostics, and validation commands in parallel when possible.
+- Delegate bounded investigation, implementation, test, and review tracks to subagents when they have clear, non-overlapping ownership.
+- Keep useful main-agent work moving while subagents run; do not wait on one track when another independent track can proceed.
+- Keep dependent steps and edits to the same files serial unless ownership and merge order are unambiguous.
+- For tiny or tightly coupled tasks, execute directly when coordination overhead would cost more than concurrency saves.
+- Reassess concurrency after new findings change the task scope, and parallelize newly independent follow-up work.
+
 When changing skill files, validate metadata and local references:
 
 ```bash
@@ -146,6 +181,17 @@ Focused examples:
 If the local Python environment cannot run the legacy dependency set, state that clearly and do not claim runtime verification.
 
 For SSH, SMTP, cron, webhooks, deployment, and browser UI flows, prefer unit tests with mocks. Manual verification should state which external systems were or were not exercised.
+
+## Completion Self-Check
+
+After every task, Codex must complete and report a self-check before handing work back to the user:
+
+- Confirm the implemented changes match the user's latest request and do not include unrelated refactors or reversions.
+- Run the narrowest useful validation commands for the change, such as `manage.py check`, focused tests, syntax checks, or browser/UI checks when available.
+- If a validation step cannot run, state the exact reason and do not claim it passed.
+- Summarize the modified files and the important changes in each file.
+- Summarize the user-visible functionality implemented or fixed.
+- Call out any remaining risks, skipped external integrations, or manual checks the user should know about.
 
 ## Documentation
 

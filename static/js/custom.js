@@ -269,8 +269,15 @@ class App {
 
             parentLink.addEventListener('click', event => {
                 event.preventDefault();
-                const isOpen = group.classList.toggle('is-open');
-                parentLink.setAttribute('aria-expanded', isOpen ? 'true' : 'false');
+                const nextOpen = group.classList.toggle('is-open');
+                parentLink.setAttribute('aria-expanded', nextOpen ? 'true' : 'false');
+            });
+
+            parentLink.addEventListener('keydown', event => {
+                if (event.key === ' ' || event.key === 'Spacebar') {
+                    event.preventDefault();
+                    parentLink.click();
+                }
             });
         });
     }
@@ -632,11 +639,6 @@ window.showNotification = (message, type = 'info', duration) => {
         return window.app.notifications.show(message, type, duration);
     }
 };
-
-// DOM加载完成后初始化应用
-document.addEventListener('DOMContentLoaded', () => {
-    window.app = new App();
-});
 
 // 页面加载完成后隐藏加载器
 window.addEventListener('load', () => {
@@ -1816,7 +1818,7 @@ const styleSheet = document.createElement('style');
 styleSheet.textContent = modernAnimations;
 document.head.appendChild(styleSheet);
 
-// 替换原有的App实例
+// DOM加载完成后初始化应用
 document.addEventListener('DOMContentLoaded', () => {
     window.app = new ModernApp();
     

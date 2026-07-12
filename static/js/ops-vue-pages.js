@@ -15,15 +15,50 @@
         return match ? decodeURIComponent(match[1]) : '';
     }
 
+    function emptyMetricTable() {
+        return {
+            result_type: '',
+            label_columns: [],
+            rows: [],
+            total_rows: 0,
+            truncated: false,
+        };
+    }
+
+    function normalizeMetricTable(table) {
+        if (!table || typeof table !== 'object') return emptyMetricTable();
+        return {
+            result_type: table.result_type || '',
+            label_columns: Array.isArray(table.label_columns) ? table.label_columns : [],
+            rows: Array.isArray(table.rows) ? table.rows : [],
+            total_rows: Number.isFinite(Number(table.total_rows)) ? Number(table.total_rows) : 0,
+            truncated: Boolean(table.truncated),
+        };
+    }
+
+    function metricQueryPanel(id, query, table, error) {
+        return {
+            id,
+            query: query || '',
+            table: normalizeMetricTable(table),
+            error: error || '',
+            loading: false,
+            hasExecuted: Boolean(query || error),
+        };
+    }
+
     createApp({
         delimiters: ['[[', ']]'],
         data() {
+            const pageData = payload.data || {};
             return {
                 kind: payload.kind,
                 title: payload.title,
-                data: payload.data || {},
+                data: pageData,
                 reveal: {},
                 revealError: '',
+                queryPanels: [metricQueryPanel(1, pageData.query, pageData.table, pageData.error)],
+                nextQueryPanelId: 2,
             };
         },
         computed: {
@@ -33,6 +68,21 @@
             },
             errors() {
                 return this.data.errors || [];
+            },
+            monitorIntegrations() {
+                return Array.isArray(this.data.integrations) ? this.data.integrations : [];
+            },
+            prometheusForm() {
+                return this.data.prometheus_form || { values: {} };
+            },
+            prometheusValues() {
+                return this.prometheusForm.values || {};
+            },
+            alertmanagerForm() {
+                return this.data.alertmanager_form || { values: {} };
+            },
+            alertmanagerValues() {
+                return this.alertmanagerForm.values || {};
             },
             alertProviders() {
                 const notifications = this.data.notifications || {};
@@ -45,6 +95,12 @@
         methods: {
             submitForm(event) {
                 return true;
+            },
+            confirmDelete(event, integration) {
+                const name = integration && (integration.name || integration.kind_label);
+                if (window.confirm('确定删除“' + (name || '该监控对接') + '”吗？')) return true;
+                if (event) event.preventDefault();
+                return false;
             },
             async revealPassword(item) {
                 this.revealError = '';
@@ -65,51 +121,58 @@
                 if (value === null || value === undefined || value === '') return '-';
                 return value;
             },
-            formatValue(value) {
-                if (value === null || value === undefined || value === '') return '-';
-                if (typeof value === 'boolean') return value ? '是' : '否';
-                if (typeof value === 'object') {
+            addMetricQueryPanel() {
+                const panel = metricQueryPanel(this.nextQueryPanelId, '', null, '');
+                this.nextQueryPanelId += 1;
+                this.queryPanels.push(panel);
+                this.$nextTick(() => {
+                    const input = document.getElementById('metric-query-' + panel.id);
+                    if (input) input.focus();
+                });
+            },
+            removeMetricQueryPanel(panelId) {
+                if (this.queryPanels.length <= 1) return;
+                this.queryPanels = this.queryPanels.filter((panel) => panel.id !== panelId);
+            },
+            async executeMetricQuery(panel) {
+                panel.loading = true;
+                panel.error = '';
+                panel.hasExecuted = true;
+                const form = new URLSearchParams();
+                form.set('query', panel.query || '');
+                try {
+                    const response = await fetch(this.data.execute_url, {
+                        method: 'POST',
+                        credentials: 'same-origin',
+                        headers: {
+                            'Accept': 'application/json',
+                            'Content-Type': 'application/x-www-form-urlencoded;charset=UTF-8',
+                            'X-CSRFToken': this.data.csrf || csrfToken(),
+                        },
+                        body: form.toString(),
+                    });
+                    let body = {};
                     try {
-                        return JSON.stringify(value, null, 2);
+                        body = await response.json();
                     } catch (error) {
-                        return String(value);
+                        throw new Error('指标查询响应格式异常');
                     }
+                    if (!response.ok || !body.ok) throw new Error(body.message || '指标查询失败');
+                    panel.query = body.query || panel.query;
+                    panel.table = normalizeMetricTable(body.table);
+                } catch (error) {
+                    panel.table = emptyMetricTable();
+                    panel.error = error.message || '指标查询失败';
+                } finally {
+                    panel.loading = false;
                 }
-                return String(value);
             },
-            isRecord(value) {
-                return value && typeof value === 'object' && !Array.isArray(value);
-            },
-            objectEntries(value) {
-                if (!this.isRecord(value)) return [];
-                return Object.keys(value).map((key) => ({ key, value: value[key] }));
-            },
-            resultRows(result) {
-                if (!result) return [];
-                if (Array.isArray(result)) return result;
-                if (Array.isArray(result.rows)) return result.rows;
-                if (Array.isArray(result.result)) return result.result;
-                if (Array.isArray(result.data)) return result.data;
-                if (result.data && Array.isArray(result.data.result)) return result.data.result;
-                return [];
-            },
-            resultMetaEntries(result) {
-                if (!this.isRecord(result)) return [];
-                const rowKeys = new Set(['rows', 'result', 'data']);
-                return Object.keys(result)
-                    .filter((key) => {
-                        if (!rowKeys.has(key)) return true;
-                        if (key !== 'data') return !Array.isArray(result[key]);
-                        return !(Array.isArray(result.data) || (result.data && Array.isArray(result.data.result)));
-                    })
-                    .map((key) => ({ key, value: result[key] }));
-            },
-            rowKeys(row) {
-                return this.isRecord(row) ? Object.keys(row) : [];
-            },
-            resultStatus(result) {
-                if (!this.isRecord(result)) return '';
-                return result.status || result.code || result.state || '';
+            formatMetricTimestamp(value) {
+                const timestamp = Number(value);
+                if (!Number.isFinite(timestamp)) return this.metric(value);
+                const date = new Date(timestamp * 1000);
+                if (Number.isNaN(date.getTime())) return this.metric(value);
+                return date.toLocaleString('zh-CN', { hour12: false });
             },
         },
         template: `
@@ -128,7 +191,7 @@
                     <strong>[[ data.error_heading || '提交失败，请检查以下内容' ]]</strong>
                     <ul class="ops-error-list"><li v-for="error in errors" :key="error">[[ error ]]</li></ul>
                 </div>
-                <div v-if="data.message" class="alert alert-info">[[ data.message ]]</div>
+                <div v-if="data.message" class="alert" :class="data.message_ok === true ? 'alert-success' : (data.message_ok === false ? 'alert-danger' : 'alert-info')">[[ data.message ]]</div>
 
                 <section v-if="kind === 'auth-login'" class="ops-panel">
                     <form class="ops-form" method="post" action="/login/" @submit="submitForm">
@@ -229,81 +292,176 @@
                         </div>
                     </div>
                     <div class="ops-panel mt-3">
-                        <div class="ops-section-title">Prometheus 对接</div>
-                        <div class="ops-kv-grid">
-                            <div>
-                                <span class="ops-kv-label">配置状态</span>
-                                <span class="ops-badge" :class="{ 'ops-badge-muted': !(data.prometheus && data.prometheus.configured) }">[[ data.prometheus && data.prometheus.configured ? '已配置' : '未配置' ]]</span>
-                            </div>
-                            <div>
-                                <span class="ops-kv-label">启用状态</span>
-                                <span class="ops-badge" :class="{ 'ops-badge-muted': !(data.prometheus && data.prometheus.enabled) }">[[ data.prometheus && data.prometheus.enabled ? '已启用' : '未启用' ]]</span>
-                            </div>
-                            <div>
-                                <span class="ops-kv-label">地址</span>
-                                <span class="ops-kv-value">[[ data.prometheus && data.prometheus.url_display || '-' ]]</span>
+                        <div class="ops-section-head">
+                            <div class="ops-section-title">监控对接</div>
+                            <div class="ops-actions">
+                                <a v-if="data.integration_url" class="btn btn-sm btn-outline-primary" :href="data.integration_url"><i class="fas fa-plug" aria-hidden="true"></i> 管理对接</a>
+                                <a v-if="data.query_url" class="btn btn-sm btn-outline-secondary" :href="data.query_url">指标查询</a>
+                                <a v-if="data.alert_settings_url" class="btn btn-sm btn-outline-dark" :href="data.alert_settings_url">告警设置</a>
                             </div>
                         </div>
-                        <div class="ops-actions mt-3">
-                            <a v-if="data.integration_url" class="btn btn-sm btn-outline-primary" :href="data.integration_url">监控对接</a>
-                            <a v-if="data.query_url" class="btn btn-sm btn-outline-secondary" :href="data.query_url">告警查询</a>
-                            <a v-if="data.alert_settings_url" class="btn btn-sm btn-outline-dark" :href="data.alert_settings_url">告警设置</a>
+                        <div v-if="!monitorIntegrations.length" class="ops-empty">暂无监控对接</div>
+                        <div v-else class="table-responsive ops-integration-table-wrap">
+                            <table class="table table-sm ops-integration-table mb-0">
+                                <thead><tr><th scope="col">类型</th><th scope="col">名称</th><th scope="col">基础地址</th><th scope="col">状态</th><th v-if="data.can_manage_integrations" scope="col">操作</th></tr></thead>
+                                <tbody>
+                                    <tr v-for="integration in monitorIntegrations" :key="integration.kind + '-' + integration.id">
+                                        <td><span class="ops-kind-label">[[ integration.kind_label || integration.kind ]]</span></td>
+                                        <td><strong>[[ integration.name ]]</strong><span v-if="integration.updated_at" class="ops-cell-meta">更新于 [[ integration.updated_at ]]</span></td>
+                                        <td><span class="ops-integration-url" :title="integration.url">[[ integration.url ]]</span></td>
+                                        <td><span class="ops-badge" :class="{ 'ops-badge-muted': !integration.enabled }">[[ integration.enabled ? '已启用' : '已停用' ]]</span></td>
+                                        <td v-if="data.can_manage_integrations" class="ops-integration-actions">
+                                            <div class="ops-actions">
+                                                <a class="btn btn-sm btn-outline-primary" :href="integration.edit_url"><i class="fas fa-edit" aria-hidden="true"></i> 更新</a>
+                                                <form class="ops-inline-form" method="post" :action="integration.delete_url" @submit="confirmDelete($event, integration)">
+                                                    <input type="hidden" name="csrfmiddlewaretoken" :value="data.csrf">
+                                                    <button class="btn btn-sm btn-outline-danger" type="submit"><i class="fas fa-trash" aria-hidden="true"></i> 删除</button>
+                                                </form>
+                                            </div>
+                                        </td>
+                                    </tr>
+                                </tbody>
+                            </table>
                         </div>
                     </div>
                 </section>
 
-                <section v-else-if="kind === 'prometheus-config'" class="ops-panel">
-                    <div v-if="data.last_test_message" class="alert alert-info">[[ data.last_test_message ]]</div>
-                    <form class="ops-form compact" method="post" :action="data.action" @submit="submitForm">
-                        <input type="hidden" name="csrfmiddlewaretoken" :value="data.csrf">
-                        <div>
-                            <label class="form-label">Prometheus URL</label>
-                            <input class="form-control" name="prometheus_url" type="url" :value="data.config && data.config.prometheus_url || ''" placeholder="http://prometheus.example:9090" autocomplete="off">
-                        </div>
-                        <label class="ops-check-row">
-                            <input type="checkbox" name="enabled" value="1" :checked="data.config && data.config.enabled">
-                            <span>启用监控对接</span>
-                        </label>
-                        <div class="ops-actions">
-                            <button class="btn btn-primary" type="submit">保存</button>
-                            <button class="btn btn-outline-secondary" type="submit" :formaction="data.test_action">测试连接</button>
-                        </div>
-                    </form>
-                </section>
+                <div v-else-if="kind === 'monitor-integrations'" class="ops-integration-page">
+                    <section v-if="data.can_manage_integrations" class="ops-panel">
+                        <div class="ops-section-title"><i class="fas fa-chart-line" aria-hidden="true"></i>[[ prometheusForm.editing ? '更新 Prometheus 对接' : '新增 Prometheus 对接' ]]</div>
+                        <form class="ops-form ops-integration-form" method="post" :action="prometheusForm.action" @submit="submitForm">
+                            <input type="hidden" name="csrfmiddlewaretoken" :value="data.csrf">
+                            <input v-if="prometheusValues.id" type="hidden" name="id" :value="prometheusValues.id">
+                            <div>
+                                <label class="form-label">名称</label>
+                                <input class="form-control" name="name" :value="prometheusValues.name || ''" placeholder="生产 Prometheus" autocomplete="off" required>
+                            </div>
+                            <div>
+                                <label class="form-label">Prometheus URL</label>
+                                <input class="form-control" name="prometheus_url" type="url" :value="prometheusValues.prometheus_url || ''" placeholder="http://prometheus.example:9090" autocomplete="off" required>
+                            </div>
+                            <label class="ops-check-row ops-form-full">
+                                <input type="checkbox" name="enabled" value="1" :checked="prometheusValues.enabled">
+                                <span>启用 Prometheus 对接</span>
+                            </label>
+                            <div class="ops-actions ops-form-full">
+                                <button class="btn btn-primary" type="submit"><i class="fas fa-save" aria-hidden="true"></i> [[ prometheusForm.editing ? '更新' : '保存' ]]</button>
+                                <button class="btn btn-outline-secondary" type="submit" :formaction="prometheusForm.test_action"><i class="fas fa-plug" aria-hidden="true"></i> 测试连接</button>
+                            </div>
+                        </form>
+                    </section>
 
-                <section v-else-if="kind === 'alert-query'" class="ops-panel">
+                    <section v-if="data.can_manage_integrations" class="ops-panel">
+                        <div class="ops-section-title"><i class="fas fa-bell" aria-hidden="true"></i>[[ alertmanagerForm.editing ? '更新 Alertmanager 对接' : '新增 Alertmanager 对接' ]]</div>
+                        <form class="ops-form ops-integration-form" method="post" :action="alertmanagerForm.action" @submit="submitForm">
+                            <input type="hidden" name="csrfmiddlewaretoken" :value="data.csrf">
+                            <input v-if="alertmanagerValues.id" type="hidden" name="id" :value="alertmanagerValues.id">
+                            <div>
+                                <label class="form-label">名称</label>
+                                <input class="form-control" name="name" :value="alertmanagerValues.name || ''" placeholder="生产 Alertmanager" autocomplete="off" required>
+                            </div>
+                            <div>
+                                <label class="form-label">Alertmanager URL</label>
+                                <input class="form-control" name="alertmanager_url" type="url" :value="alertmanagerValues.alertmanager_url || ''" placeholder="http://alertmanager.example:9093" autocomplete="off" required>
+                            </div>
+                            <label class="ops-check-row ops-form-full">
+                                <input type="checkbox" name="enabled" value="1" :checked="alertmanagerValues.enabled">
+                                <span>启用 Alertmanager 对接</span>
+                            </label>
+                            <div class="ops-actions ops-form-full">
+                                <button class="btn btn-primary" type="submit"><i class="fas fa-save" aria-hidden="true"></i> [[ alertmanagerForm.editing ? '更新' : '保存' ]]</button>
+                                <button class="btn btn-outline-secondary" type="submit" :formaction="alertmanagerForm.test_action"><i class="fas fa-plug" aria-hidden="true"></i> 测试连接</button>
+                            </div>
+                        </form>
+                    </section>
+
+                    <section class="ops-panel">
+                        <div class="ops-section-title">当前对接</div>
+                        <div v-if="!monitorIntegrations.length" class="ops-empty">暂无监控对接</div>
+                        <div v-else class="table-responsive ops-integration-table-wrap">
+                            <table class="table table-sm ops-integration-table mb-0">
+                                <thead><tr><th scope="col">类型</th><th scope="col">名称</th><th scope="col">基础地址</th><th scope="col">状态</th><th v-if="data.can_manage_integrations" scope="col">操作</th></tr></thead>
+                                <tbody>
+                                    <tr v-for="integration in monitorIntegrations" :key="integration.kind + '-' + integration.id">
+                                        <td><span class="ops-kind-label">[[ integration.kind_label || integration.kind ]]</span></td>
+                                        <td><strong>[[ integration.name ]]</strong><span v-if="integration.updated_at" class="ops-cell-meta">更新于 [[ integration.updated_at ]]</span></td>
+                                        <td><span class="ops-integration-url" :title="integration.url">[[ integration.url ]]</span></td>
+                                        <td><span class="ops-badge" :class="{ 'ops-badge-muted': !integration.enabled }">[[ integration.enabled ? '已启用' : '已停用' ]]</span></td>
+                                        <td v-if="data.can_manage_integrations" class="ops-integration-actions">
+                                            <div class="ops-actions">
+                                                <a class="btn btn-sm btn-outline-primary" :href="integration.edit_url"><i class="fas fa-edit" aria-hidden="true"></i> 更新</a>
+                                                <form class="ops-inline-form" method="post" :action="integration.delete_url" @submit="confirmDelete($event, integration)">
+                                                    <input type="hidden" name="csrfmiddlewaretoken" :value="data.csrf">
+                                                    <button class="btn btn-sm btn-outline-danger" type="submit"><i class="fas fa-trash" aria-hidden="true"></i> 删除</button>
+                                                </form>
+                                            </div>
+                                        </td>
+                                    </tr>
+                                </tbody>
+                            </table>
+                        </div>
+                    </section>
+                </div>
+
+                <section v-else-if="kind === 'alert-query'" class="ops-query-page">
                     <div v-if="!data.prometheus_configured" class="alert alert-warning">Prometheus 尚未配置或未启用。</div>
-                    <div v-if="data.error" class="alert alert-danger">[[ data.error ]]</div>
-                    <form class="ops-form" method="post" :action="data.action" @submit="submitForm">
-                        <input type="hidden" name="csrfmiddlewaretoken" :value="data.csrf">
-                        <div>
-                            <label class="form-label">PromQL</label>
-                            <textarea class="form-control ops-query-input" name="query" placeholder="up" :value="data.query || ''"></textarea>
-                        </div>
-                        <button class="btn btn-primary" type="submit">查询</button>
-                    </form>
-                    <div v-if="data.result" class="ops-result mt-3">
-                        <div class="ops-section-title">查询结果</div>
-                        <div v-if="resultStatus(data.result)" class="ops-result-status">状态：[[ resultStatus(data.result) ]]</div>
-                        <div v-if="resultMetaEntries(data.result).length" class="ops-kv-grid">
-                            <div v-for="entry in resultMetaEntries(data.result)" :key="entry.key">
-                                <span class="ops-kv-label">[[ entry.key ]]</span>
-                                <pre class="ops-json-value">[[ formatValue(entry.value) ]]</pre>
-                            </div>
-                        </div>
-                        <div v-if="resultRows(data.result).length" class="ops-list mt-3">
-                            <div class="ops-row" v-for="(row, index) in resultRows(data.result)" :key="index">
-                                <div v-if="isRecord(row)">
-                                    <div class="ops-row-title"># [[ index + 1 ]]</div>
-                                    <div class="ops-row-meta">
-                                        <span v-for="key in rowKeys(row)" :key="key">[[ key ]]：[[ formatValue(row[key]) ]]</span>
-                                    </div>
-                                </div>
-                                <pre v-else class="ops-json-value">[[ formatValue(row) ]]</pre>
-                            </div>
-                        </div>
-                        <pre v-else-if="!resultMetaEntries(data.result).length" class="ops-json-value">[[ formatValue(data.result) ]]</pre>
+                    <div class="ops-query-toolbar">
+                        <button class="btn btn-sm btn-outline-primary" type="button" @click="addMetricQueryPanel">
+                            <i class="fas fa-plus" aria-hidden="true"></i> 新增查询
+                        </button>
                     </div>
+                    <article class="ops-panel ops-query-panel" v-for="(panel, panelIndex) in queryPanels" :key="panel.id">
+                        <div class="ops-query-panel-head">
+                            <div class="ops-query-panel-title">查询 [[ panelIndex + 1 ]]</div>
+                            <button class="btn btn-sm btn-outline-danger ops-icon-button" type="button"
+                                    :disabled="queryPanels.length === 1" title="删除此查询" aria-label="删除此查询"
+                                    @click="removeMetricQueryPanel(panel.id)">
+                                <i class="fas fa-trash" aria-hidden="true"></i>
+                            </button>
+                        </div>
+                        <form class="ops-query-form" @submit.prevent="executeMetricQuery(panel)">
+                            <div class="ops-query-field">
+                                <label class="form-label" :for="'metric-query-' + panel.id">PromQL</label>
+                                <textarea class="form-control ops-query-input" :id="'metric-query-' + panel.id"
+                                          v-model="panel.query" name="query" rows="2" maxlength="2000"
+                                          placeholder="up" autocomplete="off"></textarea>
+                            </div>
+                            <button class="btn btn-sm btn-primary ops-query-submit" type="submit" :disabled="panel.loading">
+                                <i class="fas" :class="panel.loading ? 'fa-spinner fa-spin' : 'fa-search'" aria-hidden="true"></i>
+                                [[ panel.loading ? '查询中' : '查询' ]]
+                            </button>
+                        </form>
+                        <div v-if="panel.error" class="alert alert-danger ops-query-error">[[ panel.error ]]</div>
+                        <div v-if="panel.hasExecuted && !panel.error" class="ops-query-result">
+                            <div class="ops-query-result-head">
+                                <div class="ops-section-title">查询结果</div>
+                                <div class="ops-query-summary">
+                                    <span v-if="panel.table.result_type">类型：[[ panel.table.result_type ]]</span>
+                                    <span>[[ panel.table.total_rows ]] 行</span>
+                                    <span v-if="panel.table.truncated" class="ops-query-truncated">仅展示前 [[ panel.table.rows.length ]] 行</span>
+                                </div>
+                            </div>
+                            <div v-if="panel.table.rows.length" class="table-responsive ops-query-table-wrap">
+                                <table class="table table-sm ops-query-table mb-0">
+                                    <thead>
+                                        <tr>
+                                            <th v-for="column in panel.table.label_columns" :key="column" scope="col">[[ column ]]</th>
+                                            <th class="ops-query-time-column" scope="col">时间</th>
+                                            <th class="ops-query-value-column" scope="col">值</th>
+                                        </tr>
+                                    </thead>
+                                    <tbody>
+                                        <tr v-for="(row, rowIndex) in panel.table.rows" :key="rowIndex">
+                                            <td v-for="column in panel.table.label_columns" :key="column"><code>[[ metric(row.labels && row.labels[column]) ]]</code></td>
+                                            <td class="ops-query-time-cell" :title="row.timestamp">[[ formatMetricTimestamp(row.timestamp) ]]</td>
+                                            <td class="ops-query-value-cell"><code>[[ metric(row.value) ]]</code></td>
+                                        </tr>
+                                    </tbody>
+                                </table>
+                            </div>
+                            <div v-else class="ops-empty">查询结果为空</div>
+                        </div>
+                    </article>
                 </section>
 
                 <section v-else-if="kind === 'monitor'" class="ops-panel">

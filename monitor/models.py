@@ -14,12 +14,23 @@ class Monitor(models.Model):
 
 
 class PrometheusConfig(models.Model):
+    name = models.CharField(max_length=100, default='Prometheus')
     prometheus_url = models.URLField(max_length=500, blank=True)
     enabled = models.BooleanField(default=True)
     updated_at = models.DateTimeField(auto_now=True)
 
     class Meta:
         db_table = "monitor-prometheus-config"
+
+
+class AlertmanagerConfig(models.Model):
+    name = models.CharField(max_length=100)
+    alertmanager_url = models.URLField(max_length=500, blank=True)
+    enabled = models.BooleanField(default=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        db_table = "monitor-alertmanager-config"
 
 
 class AlertNotificationConfig(models.Model):

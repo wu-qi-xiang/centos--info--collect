@@ -1665,11 +1665,15 @@ pre {
     }
 
     .sidebar-subnav {
-        display: flex;
+        display: none;
         align-items: stretch;
         gap: 4px;
         margin: 0;
         padding: 0;
+    }
+
+    .sidebar-nav-group.is-open > .sidebar-subnav {
+        display: flex;
     }
 
     .navbar-custom .sidebar-subnav-link {
