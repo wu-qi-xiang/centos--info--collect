@@ -524,6 +524,7 @@ class MonitorSecurityTests(TestCase):
 			{'id', 'name'},
 		])
 		self.assertEqual(data['selected_prometheus_id'], first_enabled.id)
+		self.assertEqual(data['metadata_url'], reverse('monitor:metric_query_metadata'))
 
 	def test_metric_query_page_disambiguates_duplicate_and_fallback_names(self):
 		duplicate_a = PrometheusConfig.objects.create(
@@ -900,7 +901,11 @@ class MonitorSecurityTests(TestCase):
 		self.assertNotIn('error_kind', get_data)
 
 	def test_metric_metadata_endpoints_require_post_and_login(self):
-		endpoint_names = ('monitor:metric_query_targets', 'monitor:metric_query_rules')
+		endpoint_names = (
+			'monitor:metric_query_metadata',
+			'monitor:metric_query_targets',
+			'monitor:metric_query_rules',
+		)
 		for endpoint_name in endpoint_names:
 			with self.subTest(endpoint_name=endpoint_name, method='GET'):
 				self.assertEqual(self.client.get(reverse(endpoint_name)).status_code, 405)
@@ -913,6 +918,75 @@ class MonitorSecurityTests(TestCase):
 				response = self.client.post(reverse(endpoint_name))
 				self.assertEqual(response.status_code, 302)
 				self.assertEqual(response.url, reverse('userprofile:login'))
+
+	@mock.patch('monitor.views.query_prometheus_metadata')
+	def test_metric_query_metadata_uses_selected_config_and_returns_safe_identifiers(
+			self, metadata_mock):
+		PrometheusConfig.objects.create(
+			name='Primary Metrics',
+			prometheus_url='http://primary.local:9090',
+			enabled=True,
+		)
+		selected = PrometheusConfig.objects.create(
+			name='Secondary Metrics',
+			prometheus_url='http://secondary.local:9090',
+			enabled=True,
+		)
+		metadata_mock.return_value = {
+			'ok': True,
+			'metrics': ['http_requests_total', 'up'],
+			'labels': ['instance', 'job'],
+		}
+
+		response = self.client.post(reverse('monitor:metric_query_metadata'), {
+			'prometheus_id': selected.id,
+		})
+
+		self.assertEqual(response.status_code, 200)
+		self.assertEqual(response.json(), {
+			'ok': True,
+			'prometheus_id': selected.id,
+			'metrics': ['http_requests_total', 'up'],
+			'labels': ['instance', 'job'],
+		})
+		self.assertEqual(metadata_mock.call_args[0][0].id, selected.id)
+
+	@mock.patch('monitor.views.query_prometheus_metadata')
+	def test_metric_query_metadata_rejects_config_and_masks_upstream_failure(
+			self, metadata_mock):
+		missing_response = self.client.post(reverse('monitor:metric_query_metadata'))
+		self.assertEqual(missing_response.status_code, 400)
+		self.assertEqual(missing_response.json(), {
+			'ok': False,
+			'message': '请先配置并启用 Prometheus 对接',
+		})
+
+		config = PrometheusConfig.objects.create(
+			prometheus_url='http://prometheus.local:9090',
+			enabled=True,
+		)
+		invalid_response = self.client.post(reverse('monitor:metric_query_metadata'), {
+			'prometheus_id': 'invalid',
+		})
+		self.assertEqual(invalid_response.status_code, 400)
+		self.assertEqual(invalid_response.json(), {
+			'ok': False,
+			'message': '选择的 Prometheus 对接不可用',
+		})
+
+		metadata_mock.return_value = {
+			'ok': False,
+			'message': 'raw upstream token=private-value',
+		}
+		failure_response = self.client.post(reverse('monitor:metric_query_metadata'), {
+			'prometheus_id': config.id,
+		})
+		self.assertEqual(failure_response.status_code, 502)
+		self.assertEqual(failure_response.json(), {
+			'ok': False,
+			'message': services.PROMETHEUS_METADATA_FAILURE_MESSAGE,
+		})
+		self.assertNotIn('private-value', failure_response.content.decode('utf-8'))
 
 	@mock.patch('monitor.views.query_prometheus_rules')
 	@mock.patch('monitor.views.query_prometheus_targets')
@@ -1038,6 +1112,46 @@ class MonitorSecurityTests(TestCase):
 			'message': services.PROMETHEUS_RULES_FORMAT_MESSAGE,
 		})
 
+	@mock.patch('monitor.services.query_prometheus')
+	@mock.patch('monitor.services.prometheus_get_json')
+	def test_metric_targets_endpoint_returns_up_fallback_rows(
+			self, prometheus_get_json, query_prometheus_mock):
+		config = PrometheusConfig.objects.create(
+			prometheus_url='http://prometheus.local:9090',
+			enabled=True,
+		)
+		prometheus_get_json.return_value = {
+			'ok': True,
+			'body': {'status': 'success', 'data': {'activeTargets': []}},
+		}
+		query_prometheus_mock.return_value = {
+			'ok': True,
+			'body': {
+				'status': 'success',
+				'data': {
+					'resultType': 'vector',
+					'result': [{
+						'metric': {'instance': 'host-a:9100', 'job': 'node'},
+						'value': [1710000000, '1'],
+					}],
+				},
+			},
+		}
+
+		response = self.client.post(reverse('monitor:metric_query_targets'), {
+			'prometheus_id': config.id,
+		})
+
+		self.assertEqual(response.status_code, 200)
+		self.assertEqual(response.json()['prometheus_id'], config.id)
+		self.assertEqual(response.json()['targets']['total_rows'], 1)
+		self.assertEqual(response.json()['targets']['rows'][0]['instance'], 'host-a:9100')
+		self.assertEqual(
+			response.json()['targets']['rows'][0]['last_scrape'],
+			'2024-03-09T16:00:00Z',
+		)
+		query_prometheus_mock.assert_called_once_with(config, 'up')
+
 	def test_metric_resource_frontend_keeps_security_query_context_and_keyboard_tabs(self):
 		with open('static/js/ops-vue-pages.js', 'r') as handle:
 			vue_source = handle.read()
@@ -1048,6 +1162,136 @@ class MonitorSecurityTests(TestCase):
 		self.assertIn("this.fetchMetricJson(endpoint, form, 'resource')", vue_source)
 		self.assertEqual(vue_source.count('@keydown="handleMetricTabKeydown'), 3)
 		self.assertEqual(vue_source.count(':tabindex="metricView ==='), 3)
+
+	def test_metric_query_frontend_metadata_suggestions_and_native_scroll_contract(self):
+		with open('static/js/ops-vue-pages.js', 'r') as handle:
+			vue_source = handle.read()
+		with open('static/css/ops-vue-pages.css', 'r') as handle:
+			css_source = handle.read()
+		with open('templates/vue/page.html', 'r') as handle:
+			page_template = handle.read()
+
+		self.assertIn('metricMetadataCache: {}', vue_source)
+		self.assertIn('metricMetadataState(prometheusId)', vue_source)
+		self.assertIn('if (existing && (existing.loading || existing.loaded)) return;', vue_source)
+		self.assertIn("form.set('prometheus_id', id);", vue_source)
+		self.assertIn("this.fetchMetricJson(this.data.metadata_url, form, 'metadata')", vue_source)
+		self.assertIn('state.metrics = uniqueNames(', vue_source)
+		self.assertIn('state.labels = uniqueNames(', vue_source)
+		self.assertIn("kind: 'metric', label: '指标'", vue_source)
+		self.assertIn("kind: 'label', label: '标签'", vue_source)
+		self.assertIn("kind: 'function', label: '函数'", vue_source)
+		self.assertIn('.concat(promqlFunctionSuggestions)', vue_source)
+		for function_name in ('rate', 'sum', 'count', 'avg', 'max', 'min', 'increase', 'irate', 'histogram_quantile'):
+			self.assertIn("'%s'" % function_name, vue_source)
+
+		self.assertIn('updateMetricQuerySuggestions(panel, event)', vue_source)
+		self.assertIn(".toLowerCase().indexOf(token) !== -1", vue_source)
+		self.assertIn('suggestionsVisible: false', vue_source)
+		self.assertIn('suggestionIndex: -1', vue_source)
+		self.assertIn('@focus="updateMetricQuerySuggestions(panel, $event)"', vue_source)
+		self.assertIn('@input="resetMetricQueryResult(panel); updateMetricQuerySuggestions(panel, $event)"', vue_source)
+		self.assertIn('@keydown="handleMetricQueryKeydown($event, panel)"', vue_source)
+		self.assertIn("event.key === 'ArrowDown' || event.key === 'ArrowUp'", vue_source)
+		self.assertIn("event.key === 'Enter'", vue_source)
+		self.assertIn("event.key === 'Escape'", vue_source)
+		self.assertIn("(event.ctrlKey || event.metaKey) && event.key === 'Enter'", vue_source)
+		self.assertIn('@mousedown.prevent="selectMetricQuerySuggestion(panel, suggestion)"', vue_source)
+		self.assertIn('role="listbox"', vue_source)
+		self.assertIn(":class=\"'is-' + suggestion.kind\"", vue_source)
+
+		self.assertIn('changeMetricPrometheus()', vue_source)
+		self.assertIn('panel.suggestions = [];', vue_source)
+		self.assertIn('panel.suggestionsVisible = false;', vue_source)
+		self.assertIn('panel.suggestionIndex = -1;', vue_source)
+		self.assertIn('this.metricMetadataState(this.selectedMetricPrometheusId)', vue_source)
+
+		self.assertIn('class="ops-query-table-wrap"', vue_source)
+		self.assertIn('class="ops-query-sticky-scroll"', vue_source)
+		self.assertIn('measureQueryStickyBars()', vue_source)
+		self.assertIn('syncQueryStickyScroll(panelId)', vue_source)
+		self.assertIn('const wasVisible = panel.stickyScrollbarVisible;', vue_source)
+		self.assertIn('this.$nextTick(() => this.syncQueryStickyScroll(panel.id));', vue_source)
+		self.assertIn('mirrorQueryTableScroll(panelId, event)', vue_source)
+		self.assertIn('mirrorQueryStickyScroll(panelId, event)', vue_source)
+		self.assertIn('tableWrap.scrollWidth > tableWrap.clientWidth + 1', vue_source)
+		self.assertIn('rect.bottom > viewportHeight', vue_source)
+		self.assertIn("window.addEventListener('scroll', this.handleQueryViewportChange, { passive: true });", vue_source)
+		self.assertIn("window.addEventListener('resize', this.handleQueryViewportChange, { passive: true });", vue_source)
+		self.assertIn('.ops-query-table-wrap {', css_source)
+		self.assertIn('.ops-query-panel > * {', css_source)
+		self.assertIn('width: 100%;\n    max-width: 100%;\n    min-width: 0;\n    max-height:', css_source)
+		self.assertIn('.ops-query-sticky-scroll {', css_source)
+		self.assertIn('position: fixed;', css_source)
+		self.assertIn('bottom: 0;', css_source)
+		self.assertIn('overflow-x: auto;', css_source)
+		self.assertIn('overflow-y: auto;', css_source)
+		self.assertIn('width: max-content;', css_source)
+		self.assertIn('.ops-query-table th,\n.ops-query-table td {', css_source)
+		self.assertIn('white-space: nowrap;', css_source)
+		self.assertIn('.ops-query-table code {', css_source)
+		self.assertIn('.ops-query-suggestions {', css_source)
+		self.assertIn('20260714-promql-scroll-width-sync', page_template)
+
+		for obsolete in (
+			'metricQueryPatterns', 'queryPattern', 'type="range"', 'horizontalScroll',
+			'measureMetricQueryScroll', 'measureAllMetricQueryScroll',
+			'syncMetricQueryScroll', 'setMetricQueryScroll', 'ops-query-scroll-control',
+		):
+			self.assertNotIn(obsolete, vue_source)
+		self.assertNotIn('.ops-query-scroll-control', css_source)
+
+	def test_metric_resource_frontend_filters_expandable_rules_and_reset_contract(self):
+		with open('static/js/ops-vue-pages.js', 'r') as handle:
+			vue_source = handle.read()
+		with open('templates/vue/page.html', 'r') as handle:
+			page_template = handle.read()
+
+		self.assertIn("metricResourceFilters: { targets: '', rules: '' }", vue_source)
+		self.assertIn('expandedTargetCells: { name: [], instance: [], job: [], scrapePool: [], labels: [] }', vue_source)
+		self.assertIn('expandedRuleCells: { query: [], labels: [] }', vue_source)
+		self.assertIn('filteredMetricTargets()', vue_source)
+		self.assertIn('filteredMetricRules()', vue_source)
+		self.assertIn('filterMetricResourceRows(kind, rows)', vue_source)
+		self.assertIn('formatMetricLabelsSummary(labels)', vue_source)
+		self.assertIn('v-model="metricResourceFilters.targets"', vue_source)
+		self.assertIn('v-model="metricResourceFilters.rules"', vue_source)
+		self.assertIn('v-for="(row, rowIndex) in filteredMetricTargets"', vue_source)
+		self.assertIn('v-for="(row, rowIndex) in filteredMetricRules"', vue_source)
+
+		self.assertIn('toggleRuleCell(row, cell)', vue_source)
+		self.assertIn("event.key !== 'Enter' && event.key !== ' '", vue_source)
+		self.assertIn('this.toggleRuleCell(row, cell)', vue_source)
+		self.assertEqual(vue_source.count('@dblclick="toggleRuleCell(row,'), 2)
+		self.assertEqual(vue_source.count('@keydown="handleRuleCellKeydown('), 2)
+		self.assertEqual(vue_source.count(':aria-expanded="isRuleCellExpanded('), 2)
+		self.assertIn('toggleTargetCell(row, cell)', vue_source)
+		self.assertIn('this.toggleTargetCell(row, cell)', vue_source)
+		self.assertEqual(vue_source.count('@dblclick="toggleTargetCell(row,'), 5)
+		self.assertEqual(vue_source.count('@keydown="handleTargetCellKeydown('), 5)
+		self.assertEqual(vue_source.count(':aria-expanded="isTargetCellExpanded('), 5)
+		self.assertEqual(vue_source.count('class="ops-metric-label-summary"'), 2)
+		self.assertEqual(vue_source.count("v-if=\"isTargetCellExpanded(row, 'labels') && row.labels.length\""), 1)
+		self.assertEqual(vue_source.count("v-if=\"isRuleCellExpanded(row, 'labels') && row.labels.length\""), 1)
+		self.assertEqual(vue_source.count('class="ops-metric-labels"'), 2)
+		self.assertNotIn('v-if="row.labels.length" class="ops-metric-labels"', vue_source)
+
+		self.assertIn('clearMetricResource(kind)', vue_source)
+		self.assertIn('this.resetMetricResourceUi(kind);', vue_source)
+		self.assertIn('if (force) this.resetMetricResourceUi(kind);', vue_source)
+		self.assertIn("this.metricResourceFilters[kind] = '';", vue_source)
+		self.assertIn('this.expandedTargetCells.name = [];', vue_source)
+		self.assertIn('this.expandedTargetCells.instance = [];', vue_source)
+		self.assertIn('this.expandedTargetCells.job = [];', vue_source)
+		self.assertIn('this.expandedTargetCells.scrapePool = [];', vue_source)
+		self.assertIn('this.expandedTargetCells.labels = [];', vue_source)
+		self.assertIn('this.expandedRuleCells.query = [];', vue_source)
+		self.assertIn('this.expandedRuleCells.labels = [];', vue_source)
+
+		static_version = '20260714-promql-scroll-width-sync'
+		self.assertEqual(page_template.count('?v=%s' % static_version), 2)
+		self.assertIn("static 'css/ops-vue-pages.css'", page_template)
+		self.assertIn("static 'js/ops-vue-pages.js'", page_template)
 
 	def test_alert_notifications_page_renders(self):
 		response = self.client.get(reverse('monitor:alert_notifications'))
@@ -1245,10 +1489,117 @@ class PrometheusServiceTests(TestCase):
 		)
 
 	@mock.patch('monitor.services.prometheus_get_json')
-	def test_targets_and_rules_queries_use_expected_paths_and_allow_empty_results(self, prometheus_get_json):
+	def test_query_metadata_uses_prometheus_paths_and_sanitizes_identifiers(
+			self, prometheus_get_json):
+		config = self.prometheus_config()
+		metrics = ['metric_%04d' % index for index in range(
+			services.PROMETHEUS_METADATA_MAX_METRICS + 5
+		)]
+		metrics.extend(['up', 'up', ':node_metric', 'bad-name', ' value', 123])
+		labels = ['label_%04d' % index for index in range(
+			services.PROMETHEUS_METADATA_MAX_LABELS + 5
+		)]
+		labels.extend([
+			'instance', 'instance', '__name__', 'api_token', 'clientSecret',
+			'bad-label', ':invalid', 'x' * (services.PROMETHEUS_IDENTIFIER_MAX_LENGTH + 1),
+			None,
+		])
+		prometheus_get_json.side_effect = [
+			{'ok': True, 'body': {'status': 'success', 'data': metrics}},
+			{'ok': True, 'body': {'status': 'success', 'data': labels}},
+		]
+
+		result = services.query_prometheus_metadata(config)
+
+		self.assertTrue(result['ok'])
+		self.assertEqual(len(result['metrics']), services.PROMETHEUS_METADATA_MAX_METRICS)
+		self.assertEqual(len(result['labels']), services.PROMETHEUS_METADATA_MAX_LABELS)
+		self.assertEqual(result['metrics'], sorted(set(result['metrics'])))
+		self.assertEqual(result['labels'], sorted(set(result['labels'])))
+		self.assertNotIn('bad-name', result['metrics'])
+		self.assertNotIn('value', result['metrics'])
+		self.assertNotIn('api_token', result['labels'])
+		self.assertNotIn('clientSecret', result['labels'])
+		self.assertNotIn(':invalid', result['labels'])
+		self.assertEqual(prometheus_get_json.call_args_list, [
+			mock.call(config, '/api/v1/label/__name__/values'),
+			mock.call(config, '/api/v1/labels'),
+		])
+
+	@mock.patch('monitor.services.prometheus_get_json')
+	def test_query_metadata_rejects_failed_and_malformed_upstream_without_leaks(
+			self, prometheus_get_json):
+		config = self.prometheus_config()
+		cases = (
+			(
+				{'ok': False, 'message': 'token=transport-secret'},
+				services.PROMETHEUS_METADATA_FAILURE_MESSAGE,
+			),
+			(
+				{'ok': True, 'body': {'status': 'error', 'error': 'upstream-secret'}},
+				services.PROMETHEUS_METADATA_FAILURE_MESSAGE,
+			),
+			(
+				{'ok': True, 'body': {'status': 'success', 'data': {}}},
+				services.PROMETHEUS_METADATA_FORMAT_MESSAGE,
+			),
+			(
+				{'ok': True, 'body': {'status': 'unexpected', 'data': []}},
+				services.PROMETHEUS_METADATA_FORMAT_MESSAGE,
+			),
+		)
+		for upstream_result, expected_message in cases:
+			with self.subTest(expected_message=expected_message, upstream=upstream_result):
+				prometheus_get_json.reset_mock()
+				prometheus_get_json.return_value = upstream_result
+				result = services.query_prometheus_metadata(config)
+				self.assertEqual(result, {'ok': False, 'message': expected_message})
+				self.assertNotIn('secret', json.dumps(result))
+				prometheus_get_json.assert_called_once_with(
+					config, '/api/v1/label/__name__/values',
+				)
+
+	@mock.patch('monitor.services.prometheus_get_json')
+	def test_query_metadata_rejects_malformed_labels_response(self, prometheus_get_json):
 		config = self.prometheus_config()
 		prometheus_get_json.side_effect = [
-			{'ok': True, 'body': {'status': 'success', 'data': {'activeTargets': []}}},
+			{'ok': True, 'body': {'status': 'success', 'data': ['up']}},
+			{'ok': True, 'body': {'status': 'success', 'data': 'private-label-value'}},
+		]
+
+		result = services.query_prometheus_metadata(config)
+
+		self.assertEqual(result, {
+			'ok': False,
+			'message': services.PROMETHEUS_METADATA_FORMAT_MESSAGE,
+		})
+		self.assertNotIn('private-label-value', json.dumps(result))
+
+	def test_target_name_uses_safe_label_priority_and_endpoint_fallback(self):
+		payload = services.normalize_prometheus_targets({
+			'data': {'activeTargets': [
+				{'labels': {
+					'name': 'explicit-name', 'pod': 'pod-name', 'node': 'node-name',
+					'service': 'service-name', 'endpoint': 'endpoint-name',
+					'instance': 'host-a:9100', 'job': 'node',
+				}},
+				{'labels': {'endpoint': 'metrics', 'instance': 'host-b:9100'}},
+				{'labels': {'endpoint': 'token=private-value', 'instance': 'host-c:9100'}},
+			]},
+		})
+
+		self.assertEqual(payload['rows'][0]['name'], 'explicit-name')
+		self.assertEqual(payload['rows'][1]['name'], 'metrics')
+		self.assertEqual(payload['rows'][2]['name'], 'host-c:9100')
+		self.assertNotIn('private-value', json.dumps(payload))
+
+	@mock.patch('monitor.services.prometheus_get_json')
+	def test_targets_nonempty_does_not_fallback_and_rules_allow_empty_results(self, prometheus_get_json):
+		config = self.prometheus_config()
+		prometheus_get_json.side_effect = [
+			{'ok': True, 'body': {'status': 'success', 'data': {'activeTargets': [
+				{'labels': {'instance': 'host-a'}, 'health': 'up'},
+			]}}},
 			{'ok': True, 'body': {'status': 'success', 'data': {'groups': []}}},
 		]
 
@@ -1257,12 +1608,153 @@ class PrometheusServiceTests(TestCase):
 
 		self.assertTrue(targets_result['ok'])
 		self.assertTrue(rules_result['ok'])
-		self.assertEqual(services.normalize_prometheus_targets(targets_result['body']), services.empty_prometheus_targets())
+		self.assertEqual(
+			services.normalize_prometheus_targets(targets_result['body'])['summary']['up'],
+			1,
+		)
 		self.assertEqual(services.normalize_prometheus_rules(rules_result['body']), services.empty_prometheus_rules())
 		self.assertEqual(prometheus_get_json.call_args_list, [
 			mock.call(config, '/api/v1/targets', {'state': 'active'}),
 			mock.call(config, '/api/v1/rules', None),
 		])
+
+	@mock.patch('monitor.services.query_prometheus')
+	@mock.patch('monitor.services.prometheus_get_json')
+	def test_targets_empty_uses_up_fallback_and_sanitizes_labels(
+			self, prometheus_get_json, query_prometheus_mock):
+		config = self.prometheus_config()
+		prometheus_get_json.return_value = {
+			'ok': True,
+			'body': {'status': 'success', 'data': {'activeTargets': []}},
+		}
+		query_prometheus_mock.return_value = {
+			'ok': True,
+			'body': {
+				'status': 'success',
+				'data': {
+					'resultType': 'vector',
+					'result': [
+						{
+							'metric': {
+								'__name__': 'up',
+								'instance': 'host-a:9100',
+								'job': 'node',
+								'pod': 'node-exporter-a',
+								'api_token': 'private-token',
+							},
+							'value': [1710000000, '1'],
+						},
+						{
+							'metric': {'instance': 'host-b:9100', 'job': 'node'},
+							'value': [1710000000, '0'],
+						},
+					],
+				},
+			},
+		}
+
+		result = services.query_prometheus_targets(config)
+		payload = services.normalize_prometheus_targets(result['body'])
+
+		self.assertTrue(result['ok'])
+		self.assertEqual(payload['summary'], {
+			'total': 2,
+			'up': 1,
+			'down': 1,
+			'unknown': 0,
+			'with_errors': 0,
+		})
+		self.assertEqual(payload['rows'][0]['scrape_pool'], 'node')
+		self.assertEqual(payload['rows'][0]['name'], 'node-exporter-a')
+		self.assertEqual(payload['rows'][0]['last_scrape'], '2024-03-09T16:00:00Z')
+		self.assertNotIn('api_token', payload['rows'][0]['labels'])
+		self.assertNotIn('private-token', json.dumps(payload))
+		query_prometheus_mock.assert_called_once_with(config, 'up')
+
+	def test_up_fallback_timestamp_is_safe_and_does_not_change_health_value(self):
+		body = {
+			'data': {
+				'resultType': 'vector',
+				'result': [
+					{'metric': {'instance': 'valid'}, 'value': [1710000000, '1']},
+					{'metric': {'instance': 'text'}, 'value': ['invalid', '0']},
+					{'metric': {'instance': 'infinite'}, 'value': [float('inf'), '1']},
+					{'metric': {'instance': 'negative'}, 'value': [-1, '0']},
+					{'metric': {'instance': 'overflow'}, 'value': [10 ** 100, '1']},
+				],
+			},
+		}
+
+		payload = services.normalize_prometheus_targets(
+			services._prometheus_up_targets_body(body)
+		)
+
+		self.assertEqual(payload['rows'][0]['last_scrape'], '2024-03-09T16:00:00Z')
+		self.assertEqual(
+			[row['last_scrape'] for row in payload['rows'][1:]],
+			['', '', '', ''],
+		)
+		self.assertEqual(
+			[row['health'] for row in payload['rows']],
+			['up', 'down', 'up', 'down', 'up'],
+		)
+
+	@mock.patch('monitor.services.query_prometheus')
+	@mock.patch('monitor.services.prometheus_get_json')
+	def test_targets_empty_returns_safe_failure_when_up_fallback_fails(
+			self, prometheus_get_json, query_prometheus_mock):
+		config = self.prometheus_config()
+		prometheus_get_json.return_value = {
+			'ok': True,
+			'body': {'status': 'success', 'data': {'activeTargets': []}},
+		}
+		query_prometheus_mock.return_value = {
+			'ok': False,
+			'message': 'raw internal fallback error',
+		}
+
+		result = services.query_prometheus_targets(config)
+
+		self.assertEqual(result, {
+			'ok': False,
+			'message': services.PROMETHEUS_TARGETS_FAILURE_MESSAGE,
+		})
+		self.assertNotIn('raw internal', result['message'])
+
+	@mock.patch('monitor.services.query_prometheus')
+	@mock.patch('monitor.services.prometheus_get_json')
+	def test_targets_up_fallback_preserves_total_and_caps_rows(
+			self, prometheus_get_json, query_prometheus_mock):
+		config = self.prometheus_config()
+		prometheus_get_json.return_value = {
+			'ok': True,
+			'body': {'status': 'success', 'data': {'activeTargets': []}},
+		}
+		total = services.PROMETHEUS_TABLE_MAX_ROWS + 3
+		query_prometheus_mock.return_value = {
+			'ok': True,
+			'body': {
+				'status': 'success',
+				'data': {
+					'resultType': 'vector',
+					'result': [
+						{
+							'metric': {'instance': 'host-%s' % index},
+							'value': [1710000000, '1'],
+						}
+						for index in range(total)
+					],
+				},
+			},
+		}
+
+		result = services.query_prometheus_targets(config)
+		payload = services.normalize_prometheus_targets(result['body'])
+
+		self.assertEqual(payload['total_rows'], total)
+		self.assertEqual(payload['summary']['up'], total)
+		self.assertEqual(len(payload['rows']), services.PROMETHEUS_TABLE_MAX_ROWS)
+		self.assertTrue(payload['truncated'])
 
 	@mock.patch('monitor.services.prometheus_get_json')
 	def test_targets_and_rules_queries_reject_formats_and_mask_upstream_details(self, prometheus_get_json):
@@ -1343,10 +1835,11 @@ class PrometheusServiceTests(TestCase):
 		serialized = json.dumps(payload)
 
 		self.assertEqual(set(row), {
-			'instance', 'job', 'scrape_pool', 'health', 'last_scrape',
+			'name', 'instance', 'job', 'scrape_pool', 'health', 'last_scrape',
 			'last_scrape_duration', 'labels', 'has_error',
 		})
 		self.assertEqual(row['instance'], 'host-a')
+		self.assertEqual(row['name'], 'host-a')
 		self.assertEqual(row['job'], 'node')
 		self.assertIsNone(row['last_scrape_duration'])
 		self.assertTrue(row['has_error'])

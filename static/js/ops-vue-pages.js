@@ -10,6 +10,16 @@
     const payload = JSON.parse(payloadNode.textContent || '{}');
     const { createApp } = window.Vue;
 
+    const promqlFunctionNames = [
+        'abs', 'absent', 'avg', 'ceil', 'changes', 'clamp', 'clamp_max', 'clamp_min', 'count',
+        'delta', 'deriv', 'floor', 'histogram_quantile', 'holt_winters', 'idelta', 'increase',
+        'irate', 'label_join', 'label_replace', 'max', 'min', 'predict_linear', 'quantile', 'rate',
+        'resets', 'round', 'scalar', 'sort', 'sort_desc', 'sum', 'time', 'vector',
+    ];
+    const promqlFunctionSuggestions = promqlFunctionNames.map((name) => ({
+        kind: 'function', label: '函数', query: name,
+    }));
+
     function csrfToken() {
         const match = document.cookie.match(/(?:^|; )csrftoken=([^;]+)/);
         return match ? decodeURIComponent(match[1]) : '';
@@ -47,11 +57,26 @@
         return {
             id,
             query: typeof query === 'string' ? query : '',
+            suggestions: [],
+            suggestionsVisible: false,
+            suggestionIndex: -1,
+            metricSuggestionKeyword: '',
+            metricSuggestionLoading: false,
+            metricSuggestionError: '',
+            metricSuggestionTotal: 0,
+            metricSuggestionShown: 0,
+            metricSuggestionTruncated: false,
+            metricSuggestionRequestVersion: 0,
+            metricSuggestionTimer: null,
             table: normalizedTable,
             error: typeof error === 'string' ? error : '',
             loading: false,
             hasExecuted: Boolean(query || error || normalizedTable.result_type || normalizedTable.rows.length),
             durationMs: null,
+            stickyScrollbarVisible: false,
+            stickyScrollbarWidth: 0,
+            stickyScrollbarLeft: 0,
+            stickyScrollbarViewportWidth: 0,
         };
     }
 
@@ -151,6 +176,7 @@
         const rows = rawRows.filter((row) => (
             row && typeof row === 'object' && !Array.isArray(row)
         )).slice(0, 500).map((row) => ({
+            name: safeMetricResourceText(row.name, 240),
             instance: safeMetricResourceText(row.instance, 240),
             job: safeMetricResourceText(row.job, 160),
             scrapePool: safeMetricResourceText(row.scrape_pool, 160),
@@ -328,12 +354,18 @@
                 reveal: {},
                 revealError: '',
                 queryPanels: [metricQueryPanel(1, pageData.query, pageData.table, pageData.error)],
+                metricMetadataCache: {},
+                metricMetadataRequests: {},
+                metricSearchCache: {},
                 nextQueryPanelId: 2,
                 metricView: 'promql',
                 metricResources: {
                     targets: metricResourceState('targets'),
                     rules: metricResourceState('rules'),
                 },
+                metricResourceFilters: { targets: '', rules: '' },
+                expandedTargetCells: { name: [], instance: [], job: [], scrapePool: [], labels: [] },
+                expandedRuleCells: { query: [], labels: [] },
                 metricPrometheusConfigs,
                 selectedMetricPrometheusId,
                 monitorPrometheusIntegrations,
@@ -422,6 +454,12 @@
             canExecuteMetricQuery() {
                 return Boolean(this.data.prometheus_configured && this.selectedMetricPrometheus);
             },
+            filteredMetricTargets() {
+                return this.filterMetricResourceRows('targets', this.metricResources.targets.rows);
+            },
+            filteredMetricRules() {
+                return this.filterMetricResourceRows('rules', this.metricResources.rules.rows);
+            },
         },
         methods: {
             submitForm(event) {
@@ -467,27 +505,304 @@
                 this.nextQueryPanelId += 1;
                 this.queryPanels.push(panel);
                 this.$nextTick(() => {
+                    this.measureQueryStickyBars();
                     const input = document.getElementById('metric-query-' + panel.id);
                     if (input) input.focus();
                 });
             },
             removeMetricQueryPanel(panelId) {
                 if (this.queryPanels.length <= 1) return;
+                const panel = this.queryPanels.find((item) => item.id === panelId);
+                if (panel && panel.metricSuggestionTimer) window.clearTimeout(panel.metricSuggestionTimer);
                 this.queryPanels = this.queryPanels.filter((panel) => panel.id !== panelId);
+                this.$nextTick(this.measureQueryStickyBars);
             },
             clearMetricQueryResult(panel) {
                 panel.table = emptyMetricTable();
                 panel.error = '';
                 panel.durationMs = null;
                 panel.hasExecuted = false;
+                panel.stickyScrollbarVisible = false;
+                panel.stickyScrollbarWidth = 0;
+                panel.stickyScrollbarLeft = 0;
+                panel.stickyScrollbarViewportWidth = 0;
+            },
+            queryTableWrap(panelId) {
+                return document.getElementById('metric-query-table-' + panelId);
+            },
+            queryStickyBar(panelId) {
+                return document.getElementById('metric-query-sticky-scroll-' + panelId);
+            },
+            syncQueryStickyScroll(panelId) {
+                const tableWrap = this.queryTableWrap(panelId);
+                const stickyBar = this.queryStickyBar(panelId);
+                if (tableWrap && stickyBar && stickyBar.scrollLeft !== tableWrap.scrollLeft) {
+                    stickyBar.scrollLeft = tableWrap.scrollLeft;
+                }
+            },
+            measureQueryStickyBars() {
+                if (this.kind !== 'alert-query') return;
+                const viewportHeight = window.innerHeight || document.documentElement.clientHeight;
+                this.queryPanels.forEach((panel) => {
+                    const tableWrap = this.queryTableWrap(panel.id);
+                    if (!tableWrap || !panel.hasExecuted || panel.error || !panel.table.rows.length) {
+                        panel.stickyScrollbarVisible = false;
+                        panel.stickyScrollbarWidth = 0;
+                        panel.stickyScrollbarViewportWidth = 0;
+                        return;
+                    }
+                    const rect = tableWrap.getBoundingClientRect();
+                    const hasHorizontalOverflow = tableWrap.scrollWidth > tableWrap.clientWidth + 1;
+                    panel.stickyScrollbarWidth = hasHorizontalOverflow ? tableWrap.scrollWidth : 0;
+                    panel.stickyScrollbarLeft = rect.left;
+                    panel.stickyScrollbarViewportWidth = rect.width;
+                    const wasVisible = panel.stickyScrollbarVisible;
+                    panel.stickyScrollbarVisible = Boolean(
+                        hasHorizontalOverflow && rect.top < viewportHeight && rect.bottom > viewportHeight
+                    );
+                    if (panel.stickyScrollbarVisible && !wasVisible) {
+                        this.$nextTick(() => this.syncQueryStickyScroll(panel.id));
+                    } else {
+                        this.syncQueryStickyScroll(panel.id);
+                    }
+                });
+            },
+            mirrorQueryTableScroll(panelId, event) {
+                const stickyBar = this.queryStickyBar(panelId);
+                const tableWrap = event && event.currentTarget;
+                if (stickyBar && tableWrap && stickyBar.scrollLeft !== tableWrap.scrollLeft) {
+                    stickyBar.scrollLeft = tableWrap.scrollLeft;
+                }
+            },
+            mirrorQueryStickyScroll(panelId, event) {
+                const tableWrap = this.queryTableWrap(panelId);
+                const stickyBar = event && event.currentTarget;
+                if (tableWrap && stickyBar && tableWrap.scrollLeft !== stickyBar.scrollLeft) {
+                    tableWrap.scrollLeft = stickyBar.scrollLeft;
+                }
             },
             resetMetricQueryResult(panel) {
                 if (panel.loading) return;
                 this.clearMetricQueryResult(panel);
             },
+            metricQueryToken(input) {
+                const cursor = Number.isInteger(input.selectionStart) ? input.selectionStart : input.value.length;
+                const beforeCursor = input.value.slice(0, cursor);
+                const match = beforeCursor.match(/[a-zA-Z_:][a-zA-Z0-9_:]*$/);
+                return { value: match ? match[0] : beforeCursor.trim(), start: match ? cursor - match[0].length : 0, end: cursor };
+            },
+            metricMetadataState(prometheusId) {
+                const id = normalizeMetricPrometheusId(prometheusId);
+                return id ? this.metricMetadataCache[id] : null;
+            },
+            metricSuggestionCatalog(metrics, token) {
+                const state = this.metricMetadataState(this.selectedMetricPrometheusId);
+                const labels = state && Array.isArray(state.labels) ? state.labels : [];
+                const normalizedToken = typeof token === 'string' ? token.toLowerCase() : '';
+                const matches = (item) => !normalizedToken
+                    || item.query.toLowerCase().indexOf(normalizedToken) !== -1;
+                const metricSuggestions = (Array.isArray(metrics) ? metrics : [])
+                    .map((name) => ({ kind: 'metric', label: '指标', query: name }));
+                const supportingSuggestions = labels
+                    .map((name) => ({ kind: 'label', label: '标签', query: name }))
+                    .concat(promqlFunctionSuggestions)
+                    .filter(matches);
+                return metricSuggestions.slice(0, 50).concat(supportingSuggestions);
+            },
+            async loadMetricMetadata() {
+                const selectedPrometheus = this.selectedMetricPrometheus;
+                if (!selectedPrometheus) return;
+                const id = selectedPrometheus.id;
+                const existing = this.metricMetadataState(id);
+                if (existing && existing.loaded) return;
+                if (existing && existing.loading) return this.metricMetadataRequests[id];
+                const state = { loading: true, loaded: false, metrics: [], labels: [], error: '' };
+                this.metricMetadataCache[id] = state;
+                const form = new URLSearchParams();
+                form.set('prometheus_id', id);
+                const request = (async () => {
+                    try {
+                        const body = await this.fetchMetricJson(this.data.metadata_url, form, 'metadata');
+                        if (!this.metricResponseSourceIsCurrent(body, id)) return;
+                        const uniqueNames = (values) => Array.from(new Set(
+                            (Array.isArray(values) ? values : [])
+                                .filter((value) => typeof value === 'string' && /^[a-zA-Z_:][a-zA-Z0-9_:]*$/.test(value))
+                        )).sort();
+                        const metadata = body.metadata && typeof body.metadata === 'object' ? body.metadata : {};
+                        state.metrics = uniqueNames(body.metrics || body.metric_names || metadata.metrics || metadata.metric_names);
+                        state.labels = uniqueNames(body.labels || body.label_names || metadata.labels || metadata.label_names);
+                        state.loaded = true;
+                    } catch (error) {
+                        state.error = error instanceof TypeError
+                            ? '无法加载当前 Prometheus 的提示数据'
+                            : (safeMetricResourceText(error.message, 200) || '提示数据加载失败');
+                    } finally {
+                        state.loading = false;
+                        delete this.metricMetadataRequests[id];
+                    }
+                })();
+                this.metricMetadataRequests[id] = request;
+                return request;
+            },
+            applyMetricQuerySuggestions(panel, token, metrics) {
+                panel.suggestions = this.metricSuggestionCatalog(metrics, token);
+                panel.suggestionsVisible = panel.suggestions.length > 0
+                    || panel.metricSuggestionLoading
+                    || Boolean(panel.metricSuggestionError);
+                panel.suggestionIndex = panel.suggestions.length ? 0 : -1;
+            },
+            metricSearchCacheKey(prometheusId, keyword) {
+                return normalizeMetricPrometheusId(prometheusId) + ':' + keyword.toLowerCase();
+            },
+            async searchMetricNames(panel, prometheusId, keyword, requestVersion) {
+                const cacheKey = this.metricSearchCacheKey(prometheusId, keyword);
+                let result = this.metricSearchCache[cacheKey];
+                try {
+                    if (!result) {
+                        const form = new URLSearchParams();
+                        form.set('prometheus_id', prometheusId);
+                        form.set('keyword', keyword);
+                        const body = await this.fetchMetricJson(this.data.metadata_url, form, 'metadata');
+                        if (!this.metricResponseSourceIsCurrent(body, prometheusId)) return;
+                        const metadata = body.metadata && typeof body.metadata === 'object' ? body.metadata : {};
+                        const values = body.metrics || body.metric_names || metadata.metrics || metadata.metric_names;
+                        const metrics = Array.from(new Set(
+                            (Array.isArray(values) ? values : []).filter(
+                                (value) => typeof value === 'string' && /^[a-zA-Z_:][a-zA-Z0-9_:]*$/.test(value)
+                            )
+                        )).slice(0, 50);
+                        const rawTotal = body.metric_total !== undefined ? body.metric_total : metadata.metric_total;
+                        const parsedTotal = Number(rawTotal);
+                        result = {
+                            metrics,
+                            total: Number.isFinite(parsedTotal) && parsedTotal >= metrics.length
+                                ? parsedTotal : metrics.length,
+                            truncated: Boolean(
+                                body.metric_truncated !== undefined
+                                    ? body.metric_truncated : metadata.metric_truncated
+                            ),
+                        };
+                        this.metricSearchCache[cacheKey] = result;
+                    }
+                    if (panel.metricSuggestionRequestVersion !== requestVersion
+                            || this.selectedMetricPrometheusId !== prometheusId
+                            || panel.metricSuggestionKeyword !== keyword) return;
+                    panel.metricSuggestionTotal = result.total;
+                    panel.metricSuggestionShown = result.metrics.length;
+                    panel.metricSuggestionTruncated = result.truncated || result.total > result.metrics.length;
+                    this.applyMetricQuerySuggestions(panel, keyword, result.metrics);
+                } catch (error) {
+                    if (panel.metricSuggestionRequestVersion !== requestVersion
+                            || this.selectedMetricPrometheusId !== prometheusId
+                            || panel.metricSuggestionKeyword !== keyword) return;
+                    panel.metricSuggestionError = error instanceof TypeError
+                        ? '无法搜索当前 Prometheus 的指标'
+                        : (safeMetricResourceText(error.message, 200) || '指标搜索失败');
+                    this.applyMetricQuerySuggestions(panel, keyword, []);
+                } finally {
+                    if (panel.metricSuggestionRequestVersion === requestVersion
+                            && this.selectedMetricPrometheusId === prometheusId
+                            && panel.metricSuggestionKeyword === keyword) {
+                        panel.metricSuggestionLoading = false;
+                        this.applyMetricQuerySuggestions(
+                            panel, keyword, result && Array.isArray(result.metrics) ? result.metrics : []
+                        );
+                    }
+                }
+            },
+            updateMetricQuerySuggestions(panel, event) {
+                if (panel.loading) return;
+                const input = event && event.target ? event.target : document.getElementById('metric-query-' + panel.id);
+                if (!input) return;
+                const token = this.metricQueryToken(input).value.toLowerCase();
+                const prometheusId = normalizeMetricPrometheusId(this.selectedMetricPrometheusId);
+                if (panel.metricSuggestionTimer) window.clearTimeout(panel.metricSuggestionTimer);
+                panel.metricSuggestionRequestVersion += 1;
+                panel.metricSuggestionKeyword = token;
+                panel.metricSuggestionLoading = false;
+                panel.metricSuggestionError = '';
+                panel.metricSuggestionTotal = 0;
+                panel.metricSuggestionShown = 0;
+                panel.metricSuggestionTruncated = false;
+                this.applyMetricQuerySuggestions(panel, token, []);
+                this.loadMetricMetadata().then(() => {
+                    if (panel.metricSuggestionKeyword === token
+                            && this.selectedMetricPrometheusId === prometheusId) {
+                        const cachedResult = token
+                            ? this.metricSearchCache[this.metricSearchCacheKey(prometheusId, token)]
+                            : null;
+                        this.applyMetricQuerySuggestions(
+                            panel, token, cachedResult && Array.isArray(cachedResult.metrics)
+                                ? cachedResult.metrics : []
+                        );
+                    }
+                });
+                if (!token || !prometheusId) return;
+                const cacheKey = this.metricSearchCacheKey(prometheusId, token);
+                const cached = this.metricSearchCache[cacheKey];
+                if (cached) {
+                    panel.metricSuggestionTotal = cached.total;
+                    panel.metricSuggestionShown = cached.metrics.length;
+                    panel.metricSuggestionTruncated = cached.truncated || cached.total > cached.metrics.length;
+                    this.applyMetricQuerySuggestions(panel, token, cached.metrics);
+                    return;
+                }
+                const requestVersion = panel.metricSuggestionRequestVersion;
+                panel.metricSuggestionLoading = true;
+                this.applyMetricQuerySuggestions(panel, token, []);
+                panel.metricSuggestionTimer = window.setTimeout(() => {
+                    panel.metricSuggestionTimer = null;
+                    this.searchMetricNames(panel, prometheusId, token, requestVersion);
+                }, 200);
+            },
+            hideMetricQuerySuggestions(panel) {
+                window.setTimeout(() => {
+                    panel.suggestionsVisible = false;
+                    panel.suggestionIndex = -1;
+                }, 120);
+            },
+            selectMetricQuerySuggestion(panel, suggestion) {
+                if (!suggestion || panel.loading) return;
+                const input = document.getElementById('metric-query-' + panel.id);
+                if (!input) return;
+                const token = this.metricQueryToken(input);
+                const functionSuggestion = suggestion.kind === 'function';
+                const replacement = suggestion.query + (functionSuggestion ? '()' : '');
+                panel.query = input.value.slice(0, token.start) + replacement + input.value.slice(token.end);
+                this.resetMetricQueryResult(panel);
+                panel.suggestionsVisible = false;
+                panel.suggestionIndex = -1;
+                this.$nextTick(() => {
+                    const cursor = token.start + replacement.length - (functionSuggestion ? 1 : 0);
+                    input.focus();
+                    input.setSelectionRange(cursor, cursor);
+                });
+            },
+            handleMetricQueryKeydown(event, panel) {
+                if ((event.ctrlKey || event.metaKey) && event.key === 'Enter') {
+                    event.preventDefault();
+                    panel.suggestionsVisible = false;
+                    this.executeMetricQuery(panel);
+                    return;
+                }
+                if (!panel.suggestionsVisible || !panel.suggestions.length) return;
+                if (event.key === 'ArrowDown' || event.key === 'ArrowUp') {
+                    event.preventDefault();
+                    const direction = event.key === 'ArrowDown' ? 1 : -1;
+                    panel.suggestionIndex = (panel.suggestionIndex + direction + panel.suggestions.length) % panel.suggestions.length;
+                } else if (event.key === 'Enter') {
+                    event.preventDefault();
+                    this.selectMetricQuerySuggestion(panel, panel.suggestions[panel.suggestionIndex]);
+                } else if (event.key === 'Escape') {
+                    event.preventDefault();
+                    panel.suggestionsVisible = false;
+                    panel.suggestionIndex = -1;
+                }
+            },
             clearMetricResource(kind) {
                 const state = this.metricResources[kind];
                 if (!state) return;
+                this.resetMetricResourceUi(kind);
                 const requestVersion = state.requestVersion + 1;
                 Object.assign(state, emptyMetricResourceData(kind), {
                     loading: false,
@@ -529,7 +844,22 @@
                 this.selectedMetricPrometheusId = this.metricPrometheusConfigs.some(
                     (config) => config.id === selectedId
                 ) ? selectedId : '';
-                this.queryPanels.forEach((panel) => this.clearMetricQueryResult(panel));
+                this.metricSearchCache = {};
+                this.queryPanels.forEach((panel) => {
+                    if (panel.metricSuggestionTimer) window.clearTimeout(panel.metricSuggestionTimer);
+                    panel.metricSuggestionTimer = null;
+                    panel.metricSuggestionRequestVersion += 1;
+                    this.clearMetricQueryResult(panel);
+                    panel.suggestions = [];
+                    panel.suggestionsVisible = false;
+                    panel.suggestionIndex = -1;
+                    panel.metricSuggestionKeyword = '';
+                    panel.metricSuggestionLoading = false;
+                    panel.metricSuggestionError = '';
+                    panel.metricSuggestionTotal = 0;
+                    panel.metricSuggestionShown = 0;
+                    panel.metricSuggestionTruncated = false;
+                });
                 this.clearMetricResource('targets');
                 this.clearMetricResource('rules');
                 if (this.metricView !== 'promql' && this.selectedMetricPrometheus) {
@@ -538,12 +868,19 @@
             },
             async fetchMetricJson(url, form, context) {
                 const queryContext = context === 'query';
+                const metadataContext = context === 'metadata';
                 const messages = queryContext ? {
                     missing: '指标查询接口不可用，请刷新页面后重试',
                     forbidden: '当前账号无权执行指标查询',
                     format: '指标查询响应格式异常，请稍后重试',
                     unavailable: '指标查询服务暂时不可用，请稍后重试',
                     failed: '指标查询失败',
+                } : metadataContext ? {
+                    missing: '指标提示接口不可用，仍可手工输入查询',
+                    forbidden: '当前账号无权加载指标提示',
+                    format: '指标提示响应格式异常',
+                    unavailable: '指标提示服务暂时不可用',
+                    failed: '指标提示加载失败',
                 } : {
                     missing: '指标资源接口不可用，请刷新页面后重试',
                     forbidden: '当前账号无权查看指标资源',
@@ -606,6 +943,7 @@
                 if (kind !== 'targets' && kind !== 'rules') return;
                 const state = this.metricResources[kind];
                 if (state.loading || (state.loaded && !force)) return;
+                if (force) this.resetMetricResourceUi(kind);
                 const selectedPrometheus = this.selectedMetricPrometheus;
                 const empty = emptyMetricResourceData(kind);
                 if (!this.data.prometheus_configured || !this.metricPrometheusConfigs.length) {
@@ -708,6 +1046,7 @@
                 } finally {
                     panel.durationMs = Date.now() - startedAt;
                     panel.loading = false;
+                    this.$nextTick(this.measureQueryStickyBars);
                 }
             },
             metricQueryStatus(panel) {
@@ -738,6 +1077,70 @@
                 if (['down', 'error', 'err', 'unhealthy', 'firing'].indexOf(status) !== -1) return 'is-danger';
                 if (['pending', 'unknown'].indexOf(status) !== -1) return 'is-warning';
                 return 'is-muted';
+            },
+            resetMetricResourceUi(kind) {
+                if (this.metricResourceFilters[kind] !== undefined) this.metricResourceFilters[kind] = '';
+                if (kind === 'targets') {
+                    this.expandedTargetCells.name = [];
+                    this.expandedTargetCells.instance = [];
+                    this.expandedTargetCells.job = [];
+                    this.expandedTargetCells.scrapePool = [];
+                    this.expandedTargetCells.labels = [];
+                }
+                if (kind === 'rules') {
+                    this.expandedRuleCells.query = [];
+                    this.expandedRuleCells.labels = [];
+                }
+            },
+            metricResourceSearchText(kind, row) {
+                const labels = Array.isArray(row.labels)
+                    ? row.labels.map((label) => label.name + '=' + label.value).join(' ')
+                    : '';
+                const fields = kind === 'targets'
+                    ? [row.name, row.instance, row.job, row.scrapePool, row.health, labels]
+                    : [row.group, row.name, row.type, row.state, row.health, row.query, labels];
+                return fields.map((value) => value || '').join(' ').toLocaleLowerCase();
+            },
+            filterMetricResourceRows(kind, rows) {
+                const query = (this.metricResourceFilters[kind] || '').trim().toLocaleLowerCase();
+                if (!query) return rows;
+                return rows.filter((row) => this.metricResourceSearchText(kind, row).indexOf(query) !== -1);
+            },
+            formatMetricLabelsSummary(labels) {
+                if (!Array.isArray(labels) || !labels.length) return '-';
+                return labels.map((label) => label.name + '=' + label.value).join('  ');
+            },
+            isRuleCellExpanded(row, cell) {
+                const expanded = this.expandedRuleCells[cell];
+                return Array.isArray(expanded) && expanded.indexOf(row) !== -1;
+            },
+            toggleRuleCell(row, cell) {
+                const expanded = this.expandedRuleCells[cell];
+                if (!Array.isArray(expanded)) return;
+                const index = expanded.indexOf(row);
+                if (index === -1) expanded.push(row);
+                else expanded.splice(index, 1);
+            },
+            handleRuleCellKeydown(event, row, cell) {
+                if (!event || (event.key !== 'Enter' && event.key !== ' ')) return;
+                event.preventDefault();
+                this.toggleRuleCell(row, cell);
+            },
+            isTargetCellExpanded(row, cell) {
+                const expanded = this.expandedTargetCells[cell];
+                return Array.isArray(expanded) && expanded.indexOf(row) !== -1;
+            },
+            toggleTargetCell(row, cell) {
+                const expanded = this.expandedTargetCells[cell];
+                if (!Array.isArray(expanded)) return;
+                const index = expanded.indexOf(row);
+                if (index === -1) expanded.push(row);
+                else expanded.splice(index, 1);
+            },
+            handleTargetCellKeydown(event, row, cell) {
+                if (!event || (event.key !== 'Enter' && event.key !== ' ')) return;
+                event.preventDefault();
+                this.toggleTargetCell(row, cell);
             },
             formatMetricTimestamp(value) {
                 const timestamp = Number(value);
@@ -1104,13 +1507,45 @@
                                         <label class="form-label" :for="'metric-query-' + panel.id">PromQL</label>
                                         <span class="ops-query-counter" :class="{ 'is-near-limit': panel.query.length >= 1800 }">[[ panel.query.length ]]/2000</span>
                                     </div>
-                                    <textarea class="form-control ops-query-input" :id="'metric-query-' + panel.id"
-                                              v-model="panel.query" name="query" rows="2" maxlength="2000"
-                                              placeholder="up" autocomplete="off" spellcheck="false" :disabled="panel.loading"
-                                              :aria-invalid="panel.error ? 'true' : 'false'"
-                                              @input="resetMetricQueryResult(panel)"
-                                              @keydown.ctrl.enter.prevent="executeMetricQuery(panel)"
-                                              @keydown.meta.enter.prevent="executeMetricQuery(panel)"></textarea>
+                                    <div class="ops-query-input-shell">
+                                        <textarea class="form-control ops-query-input" :id="'metric-query-' + panel.id"
+                                                  v-model="panel.query" name="query" rows="2" maxlength="2000"
+                                                  placeholder="输入指标名或函数，例如 rate" autocomplete="off" spellcheck="false" :disabled="panel.loading"
+                                                  :aria-invalid="panel.error ? 'true' : 'false'"
+                                                  :aria-expanded="panel.suggestionsVisible ? 'true' : 'false'"
+                                                  :aria-controls="'metric-query-suggestions-' + panel.id"
+                                                  aria-autocomplete="list"
+                                                  @focus="updateMetricQuerySuggestions(panel, $event)"
+                                                  @input="resetMetricQueryResult(panel); updateMetricQuerySuggestions(panel, $event)"
+                                                  @blur="hideMetricQuerySuggestions(panel)"
+                                                  @keydown="handleMetricQueryKeydown($event, panel)"></textarea>
+                                        <div v-if="panel.suggestionsVisible" class="ops-query-suggestions"
+                                             :id="'metric-query-suggestions-' + panel.id" role="listbox" aria-label="PromQL 指标、标签和函数提示">
+                                            <button v-for="(suggestion, suggestionIndex) in panel.suggestions"
+                                                    :key="suggestion.label + suggestion.query" type="button" role="option"
+                                                    :aria-selected="panel.suggestionIndex === suggestionIndex ? 'true' : 'false'"
+                                                    :class="{ 'is-active': panel.suggestionIndex === suggestionIndex }"
+                                                    @mousedown.prevent="selectMetricQuerySuggestion(panel, suggestion)">
+                                                <span class="ops-query-suggestion-kind" :class="'is-' + suggestion.kind">[[ suggestion.label ]]</span>
+                                                <code>[[ suggestion.query ]][[ suggestion.kind === 'function' ? '()' : '' ]]</code>
+                                            </button>
+                                            <div v-if="panel.metricSuggestionLoading" class="ops-query-suggestion-status" role="status">
+                                                正在搜索当前 Prometheus 的真实指标...
+                                            </div>
+                                            <div v-else-if="panel.metricSuggestionError" class="ops-query-suggestion-status is-error" role="status">
+                                                [[ panel.metricSuggestionError ]]，仍可手工输入。
+                                            </div>
+                                            <div v-else-if="panel.metricSuggestionTruncated" class="ops-query-suggestion-status is-warning" role="status">
+                                                共匹配 [[ panel.metricSuggestionTotal ]] 个指标，当前展示 [[ panel.metricSuggestionShown ]] 个，请继续缩小关键词。
+                                            </div>
+                                        </div>
+                                    </div>
+                                    <div v-if="metricMetadataState(selectedMetricPrometheusId) && metricMetadataState(selectedMetricPrometheusId).loading"
+                                         class="ops-query-hint" role="status">正在加载当前 Prometheus 的指标和标签...</div>
+                                    <div v-else-if="metricMetadataState(selectedMetricPrometheusId) && metricMetadataState(selectedMetricPrometheusId).error"
+                                         class="ops-query-hint is-error" role="status">
+                                        [[ metricMetadataState(selectedMetricPrometheusId).error ]]，仍可手工输入 PromQL。
+                                    </div>
                                 </div>
                                 <button class="btn btn-sm btn-primary ops-query-submit" type="submit"
                                         :disabled="panel.loading || !canExecuteMetricQuery"
@@ -1139,7 +1574,8 @@
                                         </span>
                                     </div>
                                 </div>
-                                <div class="table-responsive ops-query-table-wrap">
+                                <div class="ops-query-table-wrap" :id="'metric-query-table-' + panel.id"
+                                     @scroll="mirrorQueryTableScroll(panel.id, $event)">
                                     <table class="table table-sm ops-query-table mb-0">
                                         <caption class="sr-only">PromQL 查询结果</caption>
                                         <thead>
@@ -1159,6 +1595,13 @@
                                             </tr>
                                         </tbody>
                                     </table>
+                                </div>
+                                <div v-show="panel.stickyScrollbarVisible" class="ops-query-sticky-scroll"
+                                     :id="'metric-query-sticky-scroll-' + panel.id" aria-hidden="true"
+                                     :style="{ left: panel.stickyScrollbarLeft + 'px', width: panel.stickyScrollbarViewportWidth + 'px' }"
+                                     @scroll="mirrorQueryStickyScroll(panel.id, $event)">
+                                    <div class="ops-query-sticky-scroll-width"
+                                         :style="{ width: panel.stickyScrollbarWidth + 'px' }"></div>
                                 </div>
                             </div>
                             <div v-else-if="panel.hasExecuted" class="ops-query-message is-empty" role="status">
@@ -1188,35 +1631,58 @@
                                 <i class="fas" :class="metricResources.targets.loading ? 'fa-spinner fa-spin' : 'fa-sync-alt'" aria-hidden="true"></i>
                             </button>
                         </div>
+                        <div class="ops-metric-resource-filter">
+                            <label class="sr-only" for="metric-targets-filter">查询 Targets</label>
+                            <i class="fas fa-search" aria-hidden="true"></i>
+                            <input id="metric-targets-filter" v-model="metricResourceFilters.targets" class="form-control form-control-sm"
+                                   type="search" placeholder="查询名称、Instance、Job、Scrape Pool、状态或 Labels" autocomplete="off">
+                            <span class="ops-metric-resource-filter-count">匹配 [[ filteredMetricTargets.length ]] / 已加载 [[ metricResources.targets.rows.length ]]</span>
+                        </div>
                         <div v-if="metricResources.targets.loading" class="ops-metric-resource-state" role="status" aria-live="polite">
                             <i class="fas fa-spinner fa-spin" aria-hidden="true"></i><span>正在加载 Targets</span>
                         </div>
                         <div v-else-if="metricResources.targets.error" class="ops-metric-resource-state is-error" role="alert">
                             <i class="fas fa-exclamation-circle" aria-hidden="true"></i><span>[[ metricResources.targets.error ]]</span>
                         </div>
-                        <div v-else-if="metricResources.targets.rows.length" class="table-responsive ops-metric-resource-table-wrap">
+                        <div v-else-if="filteredMetricTargets.length" class="table-responsive ops-metric-resource-table-wrap">
                             <table class="table table-sm ops-metric-resource-table ops-targets-table mb-0">
                                 <caption class="sr-only">Prometheus Targets</caption>
-                                <thead><tr><th scope="col">#</th><th scope="col">健康状态</th><th scope="col">Instance</th><th scope="col">Job</th><th scope="col">Scrape Pool</th><th scope="col">最后抓取</th><th scope="col">耗时</th><th scope="col">Labels</th></tr></thead>
+                                <thead><tr><th scope="col">#</th><th scope="col">健康状态</th><th scope="col">名称</th><th scope="col">Instance</th><th scope="col">Job</th><th scope="col">Scrape Pool</th><th scope="col">最后抓取</th><th scope="col">耗时</th><th scope="col">Labels</th></tr></thead>
                                 <tbody>
-                                    <tr v-for="(row, rowIndex) in metricResources.targets.rows" :key="rowIndex">
+                                    <tr v-for="(row, rowIndex) in filteredMetricTargets" :key="rowIndex">
                                         <th scope="row">[[ rowIndex + 1 ]]</th>
                                         <td>
                                             <span class="ops-metric-resource-status" :class="metricResourceStatusClass(row.health)">[[ row.health || 'unknown' ]]</span>
                                             <i v-if="row.hasError" class="fas fa-exclamation-circle ops-metric-row-error" title="目标存在抓取错误" aria-label="目标存在抓取错误"></i>
                                         </td>
-                                        <td><code>[[ row.instance || '-' ]]</code></td>
-                                        <td>[[ row.job || '-' ]]</td>
-                                        <td>[[ row.scrapePool || '-' ]]</td>
+                                        <td class="ops-metric-target-text-cell ops-metric-expandable-cell" tabindex="0" role="button"
+                                            :class="{ 'is-expanded': isTargetCellExpanded(row, 'name') }"
+                                            :aria-expanded="isTargetCellExpanded(row, 'name') ? 'true' : 'false'"
+                                            @dblclick="toggleTargetCell(row, 'name')" @keydown="handleTargetCellKeydown($event, row, 'name')"><span>[[ row.name || '-' ]]</span></td>
+                                        <td class="ops-metric-target-text-cell ops-metric-expandable-cell" tabindex="0" role="button"
+                                            :class="{ 'is-expanded': isTargetCellExpanded(row, 'instance') }"
+                                            :aria-expanded="isTargetCellExpanded(row, 'instance') ? 'true' : 'false'"
+                                            @dblclick="toggleTargetCell(row, 'instance')" @keydown="handleTargetCellKeydown($event, row, 'instance')"><code>[[ row.instance || '-' ]]</code></td>
+                                        <td class="ops-metric-target-text-cell ops-metric-expandable-cell" tabindex="0" role="button"
+                                            :class="{ 'is-expanded': isTargetCellExpanded(row, 'job') }"
+                                            :aria-expanded="isTargetCellExpanded(row, 'job') ? 'true' : 'false'"
+                                            @dblclick="toggleTargetCell(row, 'job')" @keydown="handleTargetCellKeydown($event, row, 'job')"><span>[[ row.job || '-' ]]</span></td>
+                                        <td class="ops-metric-target-text-cell ops-metric-expandable-cell" tabindex="0" role="button"
+                                            :class="{ 'is-expanded': isTargetCellExpanded(row, 'scrapePool') }"
+                                            :aria-expanded="isTargetCellExpanded(row, 'scrapePool') ? 'true' : 'false'"
+                                            @dblclick="toggleTargetCell(row, 'scrapePool')" @keydown="handleTargetCellKeydown($event, row, 'scrapePool')"><span>[[ row.scrapePool || '-' ]]</span></td>
                                         <td class="ops-metric-resource-time">[[ row.lastScrape ? formatDisplayDate(row.lastScrape) : '-' ]]</td>
                                         <td class="ops-metric-resource-duration">[[ formatMetricSeconds(row.lastScrapeDuration) ]]</td>
-                                        <td><div v-if="row.labels.length" class="ops-metric-labels"><span v-for="label in row.labels" :key="label.name"><b>[[ label.name ]]</b>=<code>[[ label.value ]]</code></span></div><span v-else>-</span></td>
+                                        <td class="ops-metric-target-label-cell ops-metric-expandable-cell" tabindex="0" role="button"
+                                            :class="{ 'is-expanded': isTargetCellExpanded(row, 'labels') }"
+                                            :aria-expanded="isTargetCellExpanded(row, 'labels') ? 'true' : 'false'"
+                                            @dblclick="toggleTargetCell(row, 'labels')" @keydown="handleTargetCellKeydown($event, row, 'labels')"><div v-if="isTargetCellExpanded(row, 'labels') && row.labels.length" class="ops-metric-labels"><span v-for="label in row.labels" :key="label.name"><b>[[ label.name ]]</b>=<code>[[ label.value ]]</code></span></div><span v-else class="ops-metric-label-summary">[[ formatMetricLabelsSummary(row.labels) ]]</span></td>
                                     </tr>
                                 </tbody>
                             </table>
                         </div>
                         <div v-else class="ops-metric-resource-state is-empty" role="status">
-                            <i class="fas fa-info-circle" aria-hidden="true"></i><span>当前连接没有可展示的 Targets</span>
+                            <i class="fas fa-info-circle" aria-hidden="true"></i><span>[[ metricResources.targets.rows.length ? '没有匹配的 Targets' : '当前连接没有可展示的 Targets' ]]</span>
                         </div>
                     </div>
 
@@ -1240,18 +1706,25 @@
                                 <i class="fas" :class="metricResources.rules.loading ? 'fa-spinner fa-spin' : 'fa-sync-alt'" aria-hidden="true"></i>
                             </button>
                         </div>
+                        <div class="ops-metric-resource-filter">
+                            <label class="sr-only" for="metric-rules-filter">查询 Rules</label>
+                            <i class="fas fa-search" aria-hidden="true"></i>
+                            <input id="metric-rules-filter" v-model="metricResourceFilters.rules" class="form-control form-control-sm"
+                                   type="search" placeholder="查询规则、类型、状态、表达式或 Labels" autocomplete="off">
+                            <span class="ops-metric-resource-filter-count">匹配 [[ filteredMetricRules.length ]] / 已加载 [[ metricResources.rules.rows.length ]]</span>
+                        </div>
                         <div v-if="metricResources.rules.loading" class="ops-metric-resource-state" role="status" aria-live="polite">
                             <i class="fas fa-spinner fa-spin" aria-hidden="true"></i><span>正在加载 Rules</span>
                         </div>
                         <div v-else-if="metricResources.rules.error" class="ops-metric-resource-state is-error" role="alert">
                             <i class="fas fa-exclamation-circle" aria-hidden="true"></i><span>[[ metricResources.rules.error ]]</span>
                         </div>
-                        <div v-else-if="metricResources.rules.rows.length" class="table-responsive ops-metric-resource-table-wrap">
+                        <div v-else-if="filteredMetricRules.length" class="table-responsive ops-metric-resource-table-wrap">
                             <table class="table table-sm ops-metric-resource-table ops-rules-table mb-0">
                                 <caption class="sr-only">Prometheus Rules</caption>
                                 <thead><tr><th scope="col">#</th><th scope="col">规则</th><th scope="col">类型 / 状态</th><th scope="col">健康状态</th><th scope="col">表达式</th><th scope="col">持续时间</th><th scope="col">最近评估</th><th scope="col">活动告警</th><th scope="col">Labels</th></tr></thead>
                                 <tbody>
-                                    <tr v-for="(row, rowIndex) in metricResources.rules.rows" :key="rowIndex">
+                                    <tr v-for="(row, rowIndex) in filteredMetricRules" :key="rowIndex">
                                         <th scope="row">[[ rowIndex + 1 ]]</th>
                                         <td><strong>[[ row.name || '-' ]]</strong><span class="ops-cell-meta">[[ row.group || '-' ]]</span></td>
                                         <td><span>[[ row.type || '-' ]]</span><span v-if="row.state" class="ops-metric-resource-status" :class="metricResourceStatusClass(row.state)">[[ row.state ]]</span></td>
@@ -1259,17 +1732,23 @@
                                             <span class="ops-metric-resource-status" :class="metricResourceStatusClass(row.health)">[[ row.health || 'unknown' ]]</span>
                                             <i v-if="row.hasError" class="fas fa-exclamation-circle ops-metric-row-error" title="规则存在评估错误" aria-label="规则存在评估错误"></i>
                                         </td>
-                                        <td class="ops-metric-rule-query"><code>[[ row.query || '-' ]]</code></td>
+                                        <td class="ops-metric-rule-query ops-metric-expandable-cell" tabindex="0" role="button"
+                                            :class="{ 'is-expanded': isRuleCellExpanded(row, 'query') }"
+                                            :aria-expanded="isRuleCellExpanded(row, 'query') ? 'true' : 'false'"
+                                            @dblclick="toggleRuleCell(row, 'query')" @keydown="handleRuleCellKeydown($event, row, 'query')"><code>[[ row.query || '-' ]]</code></td>
                                         <td class="ops-metric-resource-duration">[[ formatMetricSeconds(row.duration) ]]</td>
                                         <td class="ops-metric-resource-time"><span>[[ row.lastEvaluation ? formatDisplayDate(row.lastEvaluation) : '-' ]]</span><span class="ops-cell-meta">耗时 [[ formatMetricSeconds(row.evaluationTime) ]]</span></td>
                                         <td class="ops-metric-active-alerts">[[ row.activeAlerts ]]</td>
-                                        <td><div v-if="row.labels.length" class="ops-metric-labels"><span v-for="label in row.labels" :key="label.name"><b>[[ label.name ]]</b>=<code>[[ label.value ]]</code></span></div><span v-else>-</span></td>
+                                        <td class="ops-metric-rule-label-cell ops-metric-expandable-cell" tabindex="0" role="button"
+                                            :class="{ 'is-expanded': isRuleCellExpanded(row, 'labels') }"
+                                            :aria-expanded="isRuleCellExpanded(row, 'labels') ? 'true' : 'false'"
+                                            @dblclick="toggleRuleCell(row, 'labels')" @keydown="handleRuleCellKeydown($event, row, 'labels')"><div v-if="isRuleCellExpanded(row, 'labels') && row.labels.length" class="ops-metric-labels"><span v-for="label in row.labels" :key="label.name"><b>[[ label.name ]]</b>=<code>[[ label.value ]]</code></span></div><span v-else class="ops-metric-label-summary">[[ formatMetricLabelsSummary(row.labels) ]]</span></td>
                                     </tr>
                                 </tbody>
                             </table>
                         </div>
                         <div v-else class="ops-metric-resource-state is-empty" role="status">
-                            <i class="fas fa-info-circle" aria-hidden="true"></i><span>当前连接没有可展示的 Rules</span>
+                            <i class="fas fa-info-circle" aria-hidden="true"></i><span>[[ metricResources.rules.rows.length ? '没有匹配的 Rules' : '当前连接没有可展示的 Rules' ]]</span>
                         </div>
                     </div>
                 </section>
@@ -1425,6 +1904,10 @@
             </div>
         `,
         mounted() {
+            this.handleQueryViewportChange = () => this.measureQueryStickyBars();
+            window.addEventListener('scroll', this.handleQueryViewportChange, { passive: true });
+            window.addEventListener('resize', this.handleQueryViewportChange, { passive: true });
+            this.$nextTick(this.measureQueryStickyBars);
             if (this.kind === 'webssh' && window.Terminal) {
                 const terminal = new window.Terminal({ convertEol: true, cursorBlink: true, fontSize: 18, theme: { foreground: 'yellow', background: '#060101' } });
                 terminal.open(document.getElementById('terminal'));
@@ -1434,6 +1917,13 @@
                 sock.addEventListener('message', (event) => terminal.write(event.data));
                 terminal.on('data', (value) => sock.send(value));
             }
+        },
+        beforeUnmount() {
+            this.queryPanels.forEach((panel) => {
+                if (panel.metricSuggestionTimer) window.clearTimeout(panel.metricSuggestionTimer);
+            });
+            window.removeEventListener('scroll', this.handleQueryViewportChange);
+            window.removeEventListener('resize', this.handleQueryViewportChange);
         },
     }).mount(root);
 })();

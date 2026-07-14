@@ -36,6 +36,16 @@ Before focused work, read the matching project skill under `.codex/skills/`:
 
 Use the smallest relevant skill set. Do not treat this file as a replacement for feature-specific instructions.
 
+## Requirement Confirmation
+
+After analyzing a request, separate confirmed requirements from assumptions and unresolved questions before planning implementation or modifying files.
+
+- If any uncertainty could materially affect functionality, user interaction, API behavior, data handling, permissions, scope, or acceptance criteria, ask the user a focused clarification question and wait for confirmation before editing code or delegating implementation.
+- Do not substitute an inferred interpretation when the user can reasonably confirm the intended behavior. Present concrete options or examples when they make the decision easier to answer.
+- Begin implementation only when the required behavior and acceptance criteria are sufficiently clear. Treat the user's confirmed answer as the authoritative requirement and update the TODO and implementation plan accordingly.
+- Reasonable assumptions are allowed only for minor, reversible details that do not change the requested outcome. State any such assumption explicitly before relying on it.
+- If new uncertainty appears during investigation or implementation, pause the affected work, report what was learned, and obtain confirmation before continuing with a materially different solution.
+
 ## Subagent Workflow
 
 Use subagents for complex project work after the main agent has read the relevant skill instructions and produced a clear plan. Complex work includes new features, optimizations, requirement changes, cross-module fixes, schema/API/runtime changes, security-sensitive changes, frontend flows that require coordinated Python/template/static edits, and any task that needs multiple investigation or implementation tracks.

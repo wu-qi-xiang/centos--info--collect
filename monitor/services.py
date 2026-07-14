@@ -1,6 +1,7 @@
 import json
 import math
 import re
+from datetime import datetime
 
 try:
     from urllib import error as urlerror
@@ -22,6 +23,11 @@ PROMETHEUS_TARGETS_FAILURE_MESSAGE = 'Prometheus Targets 查询失败'
 PROMETHEUS_TARGETS_FORMAT_MESSAGE = 'Prometheus 返回的 Targets 数据格式异常'
 PROMETHEUS_RULES_FAILURE_MESSAGE = 'Prometheus Rules 查询失败'
 PROMETHEUS_RULES_FORMAT_MESSAGE = 'Prometheus 返回的 Rules 数据格式异常'
+PROMETHEUS_METADATA_FAILURE_MESSAGE = 'Prometheus 查询提示数据获取失败'
+PROMETHEUS_METADATA_FORMAT_MESSAGE = 'Prometheus 返回的查询提示数据格式异常'
+PROMETHEUS_METADATA_MAX_METRICS = 1000
+PROMETHEUS_METADATA_MAX_LABELS = 200
+PROMETHEUS_IDENTIFIER_MAX_LENGTH = 256
 PROMETHEUS_LABEL_MAX_ITEMS = 50
 PROMETHEUS_LABEL_KEY_MAX_LENGTH = 128
 PROMETHEUS_LABEL_VALUE_MAX_LENGTH = 256
@@ -56,6 +62,8 @@ _SENSITIVE_VALUE_PARAMETER_RE = re.compile(
     r'authorization|auth|webhook|access[_-]?key|client[_-]?secret)\s*=',
     re.IGNORECASE,
 )
+_PROMETHEUS_METRIC_IDENTIFIER_RE = re.compile(r'^[A-Za-z_:][A-Za-z0-9_:]*$')
+_PROMETHEUS_LABEL_IDENTIFIER_RE = re.compile(r'^[A-Za-z_][A-Za-z0-9_]*$')
 
 
 def _json_object(payload):
@@ -155,6 +163,14 @@ def _safe_prometheus_labels(labels):
     return dict(candidates[:PROMETHEUS_LABEL_MAX_ITEMS])
 
 
+def _prometheus_target_name(labels):
+    for key in ('name', 'pod', 'node', 'service', 'endpoint', 'instance', 'job'):
+        value = labels.get(key)
+        if value:
+            return value
+    return ''
+
+
 def _safe_nonnegative_seconds(value):
     if isinstance(value, bool):
         return None
@@ -167,6 +183,16 @@ def _safe_nonnegative_seconds(value):
     if not math.isfinite(number) or number < 0:
         return None
     return number
+
+
+def _safe_prometheus_sample_timestamp(value):
+    timestamp = _safe_nonnegative_seconds(value)
+    if timestamp is None:
+        return ''
+    try:
+        return datetime.utcfromtimestamp(timestamp).isoformat() + 'Z'
+    except (OverflowError, OSError, ValueError):
+        return ''
 
 
 def _safe_rule_query(value):
@@ -399,7 +425,7 @@ def _query_prometheus_collection(
 
 
 def query_prometheus_targets(config):
-    return _query_prometheus_collection(
+    result = _query_prometheus_collection(
         config,
         '/api/v1/targets',
         {'state': 'active'},
@@ -407,6 +433,57 @@ def query_prometheus_targets(config):
         PROMETHEUS_TARGETS_FAILURE_MESSAGE,
         PROMETHEUS_TARGETS_FORMAT_MESSAGE,
     )
+    if not result.get('ok'):
+        return result
+    body = result.get('body') or {}
+    data = body.get('data') if isinstance(body, dict) else None
+    if data.get('activeTargets'):
+        return result
+
+    fallback = query_prometheus(config, 'up')
+    if not fallback.get('ok'):
+        return {'ok': False, 'message': PROMETHEUS_TARGETS_FAILURE_MESSAGE}
+    fallback_body = _prometheus_up_targets_body(fallback.get('body'))
+    if fallback_body is None:
+        return {'ok': False, 'message': PROMETHEUS_TARGETS_FORMAT_MESSAGE}
+    return {'ok': True, 'body': fallback_body}
+
+
+def _prometheus_up_targets_body(body):
+    data = body.get('data') if isinstance(body, dict) else None
+    if not isinstance(data, dict) or data.get('resultType') != 'vector':
+        return None
+    query_rows = data.get('result')
+    if not isinstance(query_rows, list):
+        return None
+
+    targets = []
+    for item in query_rows:
+        if not isinstance(item, dict):
+            continue
+        labels = _safe_prometheus_labels(item.get('metric'))
+        sample = item.get('value')
+        sample = sample if isinstance(sample, (list, tuple)) else []
+        last_scrape = _safe_prometheus_sample_timestamp(
+            sample[0] if sample else None
+        )
+        value = _safe_nonnegative_seconds(sample[1] if len(sample) > 1 else None)
+        if value == 1:
+            health = 'up'
+        elif value is None:
+            health = 'unknown'
+        else:
+            health = 'down'
+        targets.append({
+            'labels': labels,
+            'scrapePool': labels.get('job', ''),
+            'health': health,
+            'lastScrape': last_scrape,
+        })
+    return {
+        'status': 'success',
+        'data': {'activeTargets': targets},
+    }
 
 
 def query_prometheus_rules(config):
@@ -418,6 +495,69 @@ def query_prometheus_rules(config):
         PROMETHEUS_RULES_FAILURE_MESSAGE,
         PROMETHEUS_RULES_FORMAT_MESSAGE,
     )
+
+
+def _normalize_prometheus_identifiers(values, pattern, limit, filter_sensitive=False):
+    if not isinstance(values, list):
+        return None
+    identifiers = set()
+    for value in values:
+        if not isinstance(value, str):
+            continue
+        if value != value.strip():
+            continue
+        if (
+                not value
+                or len(value) > PROMETHEUS_IDENTIFIER_MAX_LENGTH
+                or not pattern.match(value)
+                or (filter_sensitive and _is_sensitive_label_key(value))):
+            continue
+        identifiers.add(value)
+    return sorted(identifiers)[:limit]
+
+
+def _query_prometheus_identifier_values(config, path, pattern, limit, filter_sensitive=False):
+    result = prometheus_get_json(config, path)
+    if not isinstance(result, dict) or not result.get('ok'):
+        return {'ok': False, 'message': PROMETHEUS_METADATA_FAILURE_MESSAGE}
+    body = result.get('body')
+    if not isinstance(body, dict):
+        return {'ok': False, 'message': PROMETHEUS_METADATA_FORMAT_MESSAGE}
+    if body.get('status') == 'error':
+        return {'ok': False, 'message': PROMETHEUS_METADATA_FAILURE_MESSAGE}
+    if body.get('status') != 'success':
+        return {'ok': False, 'message': PROMETHEUS_METADATA_FORMAT_MESSAGE}
+    identifiers = _normalize_prometheus_identifiers(
+        body.get('data'), pattern, limit, filter_sensitive=filter_sensitive,
+    )
+    if identifiers is None:
+        return {'ok': False, 'message': PROMETHEUS_METADATA_FORMAT_MESSAGE}
+    return {'ok': True, 'values': identifiers}
+
+
+def query_prometheus_metadata(config):
+    metrics_result = _query_prometheus_identifier_values(
+        config,
+        '/api/v1/label/__name__/values',
+        _PROMETHEUS_METRIC_IDENTIFIER_RE,
+        PROMETHEUS_METADATA_MAX_METRICS,
+    )
+    if not metrics_result.get('ok'):
+        return metrics_result
+    labels_result = _query_prometheus_identifier_values(
+        config,
+        '/api/v1/labels',
+        _PROMETHEUS_LABEL_IDENTIFIER_RE,
+        PROMETHEUS_METADATA_MAX_LABELS,
+        filter_sensitive=True,
+    )
+    if not labels_result.get('ok'):
+        return labels_result
+    return {
+        'ok': True,
+        'metrics': metrics_result['values'],
+        'labels': labels_result['values'],
+    }
 
 
 def empty_prometheus_targets():
@@ -459,6 +599,7 @@ def normalize_prometheus_targets(body):
         if len(rows) >= PROMETHEUS_TABLE_MAX_ROWS:
             continue
         rows.append({
+            'name': _prometheus_target_name(labels),
             'instance': labels.get('instance', ''),
             'job': labels.get('job', ''),
             'scrape_pool': _safe_text(target.get('scrapePool')),

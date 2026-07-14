@@ -4,7 +4,7 @@
 {% block title %}{{ vue_page_title }}{% endblock %}
 
 {% block extra_css %}
-<link rel="stylesheet" href="{% static 'css/ops-vue-pages.css' %}?v=20260712-metric-resource-tabs">
+<link rel="stylesheet" href="{% static 'css/ops-vue-pages.css' %}?v=20260714-promql-metric-search">
 {% if vue_page_kind == "webssh" %}
 <link rel="stylesheet" href="{% static 'xterm/css/xterm.css' %}">
 {% endif %}
@@ -28,5 +28,5 @@
 <script src="{% static 'xterm/js/xterm.js' %}"></script>
 {% endif %}
 <script src="{% static 'vendor/vue.global.prod.js' %}?v=3"></script>
-<script src="{% static 'js/ops-vue-pages.js' %}?v=20260712-metric-resource-tabs"></script>
+<script src="{% static 'js/ops-vue-pages.js' %}?v=20260714-promql-metric-search"></script>
 {% endblock %}

@@ -9,6 +9,8 @@ from .forms import AlertmanagerConfigForm, AlertNotificationForm, MonitorForm, P
 from .services import (
 	PROMETHEUS_RULES_FAILURE_MESSAGE,
 	PROMETHEUS_RULES_FORMAT_MESSAGE,
+	PROMETHEUS_METADATA_FAILURE_MESSAGE,
+	PROMETHEUS_METADATA_FORMAT_MESSAGE,
 	PROMETHEUS_TARGETS_FAILURE_MESSAGE,
 	PROMETHEUS_TARGETS_FORMAT_MESSAGE,
 	empty_prometheus_table,
@@ -16,6 +18,7 @@ from .services import (
 	normalize_prometheus_result,
 	normalize_prometheus_targets,
 	query_prometheus,
+	query_prometheus_metadata,
 	query_prometheus_rules,
 	query_prometheus_targets,
 	send_alert_notification,
@@ -346,6 +349,7 @@ def _alert_query_payload(request, query, table, error, configs, selected_config)
 		'csrf': get_token(request),
 		'action': reverse('monitor:alert_query'),
 		'execute_url': reverse('monitor:metric_query_execute'),
+		'metadata_url': reverse('monitor:metric_query_metadata'),
 		'targets_url': reverse('monitor:metric_query_targets'),
 		'rules_url': reverse('monitor:metric_query_rules'),
 		'query': query,
@@ -606,6 +610,29 @@ def metric_query_execute(request):
 		'query': query,
 		'prometheus_id': config.id,
 		'table': normalize_prometheus_result(query_result.get('body') or {}),
+	})
+
+
+@session_login_required
+def metric_query_metadata(request):
+	if request.method != 'POST':
+		return HttpResponseNotAllowed(['POST'])
+	config, selection_error = _resolve_prometheus_config(request.POST.get('prometheus_id'))
+	if selection_error:
+		return JsonResponse({'ok': False, 'message': selection_error}, status=400)
+	if not config:
+		return JsonResponse({'ok': False, 'message': '请先配置并启用 Prometheus 对接'}, status=400)
+	result = query_prometheus_metadata(config)
+	if not isinstance(result, dict) or not result.get('ok'):
+		message = result.get('message') if isinstance(result, dict) else ''
+		if message not in (PROMETHEUS_METADATA_FAILURE_MESSAGE, PROMETHEUS_METADATA_FORMAT_MESSAGE):
+			message = PROMETHEUS_METADATA_FAILURE_MESSAGE
+		return JsonResponse({'ok': False, 'message': message}, status=502)
+	return JsonResponse({
+		'ok': True,
+		'prometheus_id': config.id,
+		'metrics': result.get('metrics') or [],
+		'labels': result.get('labels') or [],
 	})
 
 

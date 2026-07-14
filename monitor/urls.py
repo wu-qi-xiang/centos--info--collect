@@ -15,6 +15,7 @@ urlpatterns = [
 	path('alertmanager/<int:id>/update/', views.alertmanager_update, name='alertmanager_update'),
 	path('alertmanager/<int:id>/delete/', views.alertmanager_delete, name='alertmanager_delete'),
 	path('query/execute/', views.metric_query_execute, name='metric_query_execute'),
+	path('query/metadata/', views.metric_query_metadata, name='metric_query_metadata'),
 	path('query/targets/', views.metric_query_targets, name='metric_query_targets'),
 	path('query/rules/', views.metric_query_rules, name='metric_query_rules'),
 	path('query/', views.alert_query, name='alert_query'),
