@@ -41,10 +41,20 @@ class AlertNotificationConfig(models.Model):
         (PROVIDER_WECOM, '企业微信'),
     )
 
-    provider = models.CharField(max_length=20, choices=PROVIDER_CHOICES, unique=True)
+    provider = models.CharField(max_length=20, choices=PROVIDER_CHOICES)
+    alertmanager = models.ForeignKey(
+        AlertmanagerConfig,
+        null=True,
+        blank=True,
+        on_delete=models.SET_NULL,
+        related_name='notification_configs',
+    )
     name = models.CharField(max_length=100, blank=True)
+    alert_name = models.CharField(max_length=100, blank=True, default='')
     webhook_url = models.TextField(blank=True)
     enabled = models.BooleanField(default=False)
+    created_at = models.DateTimeField(null=True, blank=True)
+    created_by = models.CharField(max_length=100, blank=True, default='')
     updated_at = models.DateTimeField(auto_now=True)
 
     class Meta:

@@ -1,8 +1,11 @@
+import json
+
 from django.shortcuts import get_object_or_404, render, redirect
 from django.http import HttpResponseNotAllowed, JsonResponse
 from django.middleware.csrf import get_token
 from django.urls import reverse
 from django.utils import timezone
+from django.views.decorators.csrf import csrf_exempt
 # Create your views here.
 from .models import AlertmanagerConfig, AlertNotificationConfig, Monitor, PrometheusConfig
 from .forms import AlertmanagerConfigForm, AlertNotificationForm, MonitorForm, PrometheusConfigForm
@@ -218,13 +221,19 @@ def _monitor_actions():
 
 
 def _alert_notification_configs():
-	configs = {
-		item.provider: item
-		for item in AlertNotificationConfig.objects.filter(
+	configs = {}
+	for item in AlertNotificationConfig.objects.filter(
 			provider__in=[AlertNotificationConfig.PROVIDER_FEISHU, AlertNotificationConfig.PROVIDER_WECOM]
-		)
-	}
+	).order_by('-created_at', '-updated_at', '-id'):
+		if item.provider not in configs:
+			configs[item.provider] = item
 	return configs
+
+
+def _alert_notification_config_rows():
+	return AlertNotificationConfig.objects.filter(
+		provider__in=[AlertNotificationConfig.PROVIDER_FEISHU, AlertNotificationConfig.PROVIDER_WECOM]
+	).order_by('-created_at', '-updated_at', '-id')
 
 
 def _has_stored_webhook(config):
@@ -239,37 +248,82 @@ def _format_notification_updated_at(value):
 	return value.strftime('%Y-%m-%d %H:%M')
 
 
+def _alertmanager_options():
+	return [
+		{'id': config.id, 'name': config.name}
+		for config in AlertmanagerConfig.objects.order_by('name', 'id')
+	]
+
+
 def _notification_integration_items(configs=None):
-	configs = _alert_notification_configs() if configs is None else configs
+	configs = list(_alert_notification_config_rows()) if configs is None else configs
+	if isinstance(configs, dict):
+		configs = list(configs.values())
 	configure_url = reverse('monitor:alert_notifications')
 	items = []
-	for provider, provider_label in AlertNotificationConfig.PROVIDER_CHOICES:
-		config = configs.get(provider)
+	provider_labels = dict(AlertNotificationConfig.PROVIDER_CHOICES)
+	for config in configs:
 		if not _has_stored_webhook(config):
 			continue
+		provider = config.provider
+		provider_label = provider_labels.get(provider, provider)
+		alert_type = '飞书' if provider == AlertNotificationConfig.PROVIDER_FEISHU else '企业微信'
 		items.append({
+			'id': config.id,
 			'provider': provider,
 			'provider_label': provider_label,
 			'name': (config.name or '').strip() or '%s告警' % provider_label,
+			'alert_name': (config.alert_name or '').strip(),
+			'alertmanager_id': config.alertmanager_id,
+			'alertmanager_name': config.alertmanager.name if config.alertmanager_id and config.alertmanager else '',
+			'alert_type': alert_type,
+			'created_at': _format_notification_updated_at(config.created_at),
+			'created_by': (config.created_by or '').strip(),
 			'enabled': bool(config.enabled),
 			'configured': True,
 			'updated_at': _format_notification_updated_at(config.updated_at),
 			'configure_url': configure_url,
+			'edit_url': '%s?edit=%s' % (configure_url, config.id),
+			'delete_url': reverse('monitor:alert_notification_delete', args=[config.id]),
 		})
 	return items
 
 
-def _alert_notification_payload(request, configs=None, form=None, test_message=''):
+def _alert_notification_payload(
+		request, configs=None, form=None, test_message='', save_message='', save_ok=False,
+		clear_webhook_inputs=False, preserve_form_values=False, editing_config=None):
 	configs = configs or _alert_notification_configs()
+	can_manage_notifications = _can_manage_integrations(request)
 	def item(provider, default_name):
-		config = configs.get(provider)
+		config = editing_config if editing_config and editing_config.provider == provider else configs.get(provider)
 		configured = _has_stored_webhook(config)
+		prefix = '%s_' % provider
+		if preserve_form_values and form and form.is_bound and not save_ok:
+			is_editing = bool(editing_config and editing_config.provider == provider)
+			return {
+				'enabled': bool(form.data.get(prefix + 'enabled')),
+				'name': (form.data.get(prefix + 'name') or '').strip() or default_name,
+				'alert_name': (form.data.get(prefix + 'alert_name') or '').strip(),
+				'alertmanager_id': (form.data.get(prefix + 'alertmanager_id') or '').strip(),
+				'editing': is_editing,
+				'action': reverse('monitor:alert_notification_update', args=[editing_config.id]) if is_editing else reverse('monitor:alert_notifications'),
+				'has_webhook': configured,
+				'configured': configured,
+				'webhook_display': '已配置' if configured else '',
+				'webhook_url': (form.data.get(prefix + 'webhook_url') or '').strip(),
+			}
+		is_editing = bool(editing_config and editing_config.provider == provider)
 		return {
 			'enabled': bool(config and config.enabled),
 			'name': config.name if config and config.name else default_name,
+			'alert_name': config.alert_name if is_editing and config else '',
+			'alertmanager_id': str(config.alertmanager_id) if config and config.alertmanager_id else '',
+			'editing': is_editing,
+			'action': reverse('monitor:alert_notification_update', args=[editing_config.id]) if is_editing else reverse('monitor:alert_notifications'),
 			'has_webhook': configured,
 			'configured': configured,
 			'webhook_display': '已配置' if configured else '',
+			'webhook_url': '',
 		}
 	return {
 		'subtitle': '配置飞书和企业微信 Webhook，用于告警通知对接',
@@ -277,13 +331,18 @@ def _alert_notification_payload(request, configs=None, form=None, test_message='
 		'action': reverse('monitor:alert_notifications'),
 		'test_action': reverse('monitor:alert_notifications_test'),
 		'list_url': reverse('monitor:alert_notification_list'),
-		'can_manage_notifications': _can_manage_integrations(request),
+		'can_manage_notifications': can_manage_notifications,
+		'editing_notification_id': editing_config.id if editing_config else None,
+		'editing_provider': editing_config.provider if editing_config else '',
+		'alertmanager_options': _alertmanager_options(),
 		'notifications': {
 			'feishu': item(AlertNotificationConfig.PROVIDER_FEISHU, '飞书告警'),
 			'wecom': item(AlertNotificationConfig.PROVIDER_WECOM, '企业微信告警'),
 		},
 		'errors': form_errors(form),
 		'test_message': test_message,
+		'save_message': save_message,
+		'save_ok': bool(save_ok),
 		'actions': _monitor_actions(),
 	}
 
@@ -292,28 +351,142 @@ def _alert_notification_list_payload(request, configs=None):
 	configure_url = reverse('monitor:alert_notifications')
 	return {
 		'subtitle': '查看已配置的告警通知对接',
-		'notification_integrations': _notification_integration_items(configs),
+		'csrf': get_token(request),
+		'notification_integrations': _notification_integration_items(configs if configs is not None else list(_alert_notification_config_rows())),
 		'configure_url': configure_url,
 		'can_manage_notifications': _can_manage_integrations(request),
 		'actions': _monitor_actions(),
 	}
 
 
-def _save_alert_notification_configs(form, configs, only_provider=None):
+def _save_alert_notification_configs(request, form, configs, only_provider=None):
 	provider_rows = (
 		(AlertNotificationConfig.PROVIDER_FEISHU, '飞书告警'),
 		(AlertNotificationConfig.PROVIDER_WECOM, '企业微信告警'),
 	)
+	created_by = (request.session.get('user_name') or '').strip()
 	for provider, default_name in provider_rows:
 		if only_provider and provider != only_provider:
 			continue
-		config = configs.get(provider) or AlertNotificationConfig(provider=provider)
+		config = AlertNotificationConfig(provider=provider)
 		config.enabled = bool(form.cleaned_data.get('%s_enabled' % provider))
 		config.name = form.cleaned_data.get('%s_name' % provider) or default_name
+		config.alert_name = form.cleaned_data.get('%s_alert_name' % provider) or ''
+		config.alertmanager_id = form.cleaned_data.get('%s_alertmanager_id' % provider)
+		config.created_at = timezone.now()
+		config.created_by = created_by
 		webhook = form.cleaned_data.get('%s_webhook_url' % provider)
-		if webhook:
-			config.webhook_url = webhook
+		if not webhook:
+			continue
+		config.webhook_url = webhook
 		config.save()
+
+
+def _update_alert_notification_config(request, config, form):
+	provider = config.provider
+	default_name = dict(AlertNotificationConfig.PROVIDER_CHOICES).get(provider, '告警通知')
+	config.enabled = bool(form.cleaned_data.get('%s_enabled' % provider))
+	config.name = form.cleaned_data.get('%s_name' % provider) or default_name
+	config.alert_name = form.cleaned_data.get('%s_alert_name' % provider) or ''
+	config.alertmanager_id = form.cleaned_data.get('%s_alertmanager_id' % provider)
+	webhook = form.cleaned_data.get('%s_webhook_url' % provider)
+	if webhook:
+		config.webhook_url = webhook
+	config.save()
+
+
+def _alertmanager_alert_status(payload, alert):
+	status = ''
+	if isinstance(alert, dict):
+		status = (alert.get('status') or '').strip().lower()
+	if not status and isinstance(payload, dict):
+		status = (payload.get('status') or '').strip().lower()
+	return status
+
+
+def _alertmanager_alert_text(alert, key):
+	value = alert.get(key) if isinstance(alert, dict) else ''
+	return value if isinstance(value, str) else ''
+
+
+def _alertmanager_alert_dict(alert, status):
+	labels = alert.get('labels') if isinstance(alert, dict) and isinstance(alert.get('labels'), dict) else {}
+	annotations = alert.get('annotations') if isinstance(alert, dict) and isinstance(alert.get('annotations'), dict) else {}
+	alert_name = labels.get('alertname') or annotations.get('summary') or 'Alertmanager 告警'
+	instance = labels.get('instance') or labels.get('pod') or labels.get('node') or labels.get('job') or ''
+	message = annotations.get('description') or annotations.get('summary') or alert_name
+	return {
+		'status': status,
+		'metric': alert_name,
+		'message': message,
+		'host_name': instance,
+		'instance': instance,
+		'startsAt': _alertmanager_alert_text(alert, 'startsAt'),
+		'timestamp': _alertmanager_alert_text(alert, 'startsAt') or _alertmanager_alert_text(alert, 'updatedAt'),
+		'labels': labels,
+		'annotations': annotations,
+	}
+
+
+def _push_alertmanager_firing_alerts(alertmanager, payload):
+	alerts = payload.get('alerts') if isinstance(payload, dict) else None
+	if not isinstance(alerts, list):
+		alerts = [payload] if isinstance(payload, dict) else []
+	firing_alerts = [
+		_alertmanager_alert_dict(alert, _alertmanager_alert_status(payload, alert))
+		for alert in alerts
+		if isinstance(alert, dict) and _alertmanager_alert_status(payload, alert) == 'firing'
+	]
+	configs = AlertNotificationConfig.objects.filter(
+		alertmanager=alertmanager,
+		provider=AlertNotificationConfig.PROVIDER_WECOM,
+		enabled=True,
+		webhook_url__gt='',
+	)
+	results = []
+	for alert in firing_alerts:
+		for config in configs:
+			title = '告警通知：%s' % (
+				config.alert_name or alert.get('metric') or config.name or 'Alertmanager 告警'
+			)
+			content_lines = [
+				('告警名称', config.alert_name or alert.get('metric')),
+				('通知渠道', config.name or '企业微信'),
+				('Alertmanager', alertmanager.name),
+				('主机', alert.get('host_name') or alert.get('instance')),
+				('状态', 'firing'),
+				('时间', alert.get('timestamp')),
+				('内容', alert.get('message')),
+			]
+			content = '\n'.join('%s：%s' % (label, value) for label, value in content_lines if value)
+			result = send_alert_notification(config, title, content)
+			results.append({
+				'notification_id': config.id,
+				'ok': bool(result.get('ok')),
+				'message': result.get('message') or '',
+			})
+	return {
+		'received': len(alerts),
+		'firing': len(firing_alerts),
+		'matched_notifications': configs.count(),
+		'pushed': len(results),
+		'results': results,
+	}
+
+
+def _safe_alert_notification_test_message(result):
+	if result.get('ok'):
+		return '测试通知发送成功'
+	message = result.get('message') or ''
+	safe_messages = (
+		'Webhook 地址为空或解密失败',
+		'HTTPS 证书校验失败，请检查运行环境 CA 证书配置',
+		'测试通知发送失败，请检查 Webhook 地址和网络',
+		'通知平台返回失败，请检查通知配置',
+	)
+	if message in safe_messages:
+		return message
+	return '测试通知发送失败，请检查通知配置和网络'
 
 
 def _monitor_context(request, monitor=None, form=None):
@@ -544,6 +717,22 @@ def alertmanager_delete(request, id):
 	return redirect('monitor:monitor_home')
 
 
+@csrf_exempt
+def alertmanager_webhook(request, id):
+	if request.method != 'POST':
+		return HttpResponseNotAllowed(['POST'])
+	alertmanager = get_object_or_404(AlertmanagerConfig, id=id)
+	try:
+		payload = json.loads(request.body.decode('utf-8') or '{}')
+	except (TypeError, ValueError):
+		return JsonResponse({'ok': False, 'message': 'JSON 解析失败'}, status=400)
+	if not isinstance(payload, dict):
+		return JsonResponse({'ok': False, 'message': 'Alertmanager payload 格式异常'}, status=400)
+	result = _push_alertmanager_firing_alerts(alertmanager, payload)
+	result['ok'] = True
+	return JsonResponse(result)
+
+
 @session_login_required
 def alert_query(request):
 	query = (request.GET.get('query') or '').strip()
@@ -689,7 +878,7 @@ def metric_query_rules(request):
 def alert_notification_list(request):
 	if request.method != 'GET':
 		return HttpResponseNotAllowed(['GET'])
-	configs = _alert_notification_configs()
+	configs = list(_alert_notification_config_rows())
 	content = security_context(request)
 	return render_vue_page(
 		request,
@@ -703,6 +892,13 @@ def alert_notification_list(request):
 @session_login_required
 def alert_notifications(request):
 	configs = _alert_notification_configs()
+	editing_config = None
+	edit_id = request.GET.get('edit')
+	if edit_id:
+		try:
+			editing_config = AlertNotificationConfig.objects.get(id=int(edit_id))
+		except (TypeError, ValueError, AlertNotificationConfig.DoesNotExist):
+			editing_config = None
 	denied = None
 	if request.method == "POST":
 		denied = require_monitor_operator(request)
@@ -712,15 +908,105 @@ def alert_notifications(request):
 		provider = (request.POST.get('provider') or '').strip()
 		form = AlertNotificationForm(request.POST, existing=configs)
 		if form.is_valid():
-			_save_alert_notification_configs(form, configs, provider if provider in dict(AlertNotificationConfig.PROVIDER_CHOICES) else None)
+			_save_alert_notification_configs(request, form, configs, provider if provider in dict(AlertNotificationConfig.PROVIDER_CHOICES) else None)
 			audit(request, '保存告警通知', 'AlertNotificationConfig', '', dict(AlertNotificationConfig.PROVIDER_CHOICES).get(provider, '飞书/企业微信'))
-			return redirect('monitor:alert_notification_list')
+			configs = _alert_notification_configs()
+			content = {}
+			content.update(security_context(request))
+			return render_vue_page(
+				request,
+				'alert-notifications',
+				'告警通知',
+				_alert_notification_payload(
+					request,
+					configs,
+					save_message='告警通知保存成功',
+					save_ok=True,
+					clear_webhook_inputs=True,
+				),
+				content,
+			)
 		content = {}
 		content.update(security_context(request))
-		return render_vue_page(request, 'alert-notifications', '告警通知', _alert_notification_payload(request, configs, form), content, status=400)
+		return render_vue_page(
+			request,
+			'alert-notifications',
+			'告警通知',
+				_alert_notification_payload(
+					request,
+					configs,
+					form,
+					save_message='告警通知保存失败，请检查表单信息',
+					save_ok=False,
+					preserve_form_values=True,
+				),
+			content,
+			status=400,
+		)
 	content = {}
 	content.update(security_context(request))
-	return render_vue_page(request, 'alert-notifications', '告警通知', _alert_notification_payload(request, configs), content)
+	return render_vue_page(request, 'alert-notifications', '告警通知', _alert_notification_payload(request, configs, editing_config=editing_config), content)
+
+
+@session_login_required
+def alert_notification_update(request, id):
+	if request.method != 'POST':
+		return HttpResponseNotAllowed(['POST'])
+	denied = require_monitor_operator(request)
+	if denied:
+		return denied
+	config = get_object_or_404(AlertNotificationConfig, id=id)
+	configs = _alert_notification_configs()
+	form = AlertNotificationForm(request.POST, existing={config.provider: config}, require_webhook=False)
+	content = {}
+	content.update(security_context(request))
+	if form.is_valid():
+		_update_alert_notification_config(request, config, form)
+		audit(request, '更新告警通知', 'AlertNotificationConfig', config.id, config.name)
+		config.refresh_from_db()
+		return render_vue_page(
+			request,
+			'alert-notifications',
+			'告警通知',
+			_alert_notification_payload(
+				request,
+				_alert_notification_configs(),
+				save_message='告警通知更新成功',
+				save_ok=True,
+				clear_webhook_inputs=True,
+			),
+			content,
+		)
+	return render_vue_page(
+		request,
+		'alert-notifications',
+		'告警通知',
+		_alert_notification_payload(
+			request,
+			configs,
+			form,
+			save_message='告警通知更新失败，请检查表单信息',
+			save_ok=False,
+			preserve_form_values=True,
+			editing_config=config,
+		),
+		content,
+		status=400,
+	)
+
+
+@session_login_required
+def alert_notification_delete(request, id):
+	if request.method != 'POST':
+		return HttpResponseNotAllowed(['POST'])
+	denied = require_monitor_operator(request)
+	if denied:
+		return denied
+	config = get_object_or_404(AlertNotificationConfig, id=id)
+	name = config.name
+	config.delete()
+	audit(request, '删除告警通知', 'AlertNotificationConfig', id, name)
+	return redirect('monitor:alert_notification_list')
 
 
 @session_login_required
@@ -739,12 +1025,13 @@ def alert_notifications_test(request):
 		config = configs.get(provider) or AlertNotificationConfig(provider=provider)
 		config.enabled = bool(form.cleaned_data.get('%s_enabled' % provider))
 		config.name = form.cleaned_data.get('%s_name' % provider) or dict(AlertNotificationConfig.PROVIDER_CHOICES).get(provider)
+		config.alert_name = form.cleaned_data.get('%s_alert_name' % provider) or ''
 		webhook = form.cleaned_data.get('%s_webhook_url' % provider)
 		if webhook:
 			config.webhook_url = webhook
 		result = send_alert_notification(config)
 		message_ok = bool(result.get('ok'))
-		test_message = '测试通知发送成功' if message_ok else '测试通知发送失败，请检查通知配置和网络'
+		test_message = _safe_alert_notification_test_message(result)
 		status = 200 if message_ok else 400
 	content = {}
 	content.update(security_context(request))

@@ -28,6 +28,7 @@ from .forms import (
     CommandApprovalForm,
     CommandExecutionForm,
     CommandPolicyForm,
+    ComplianceBaselineForm,
     DevOpsHostScopeForm,
     DevOpsModulePermissionForm,
     DevOpsSettingForm,
@@ -65,6 +66,8 @@ from .models import (
     NotificationChannel,
     NotificationLog,
     ServiceOperation,
+    ComplianceBaseline,
+    ComplianceResult,
 )
 from .services import (
     COMMAND_ALLOWED,
@@ -75,6 +78,7 @@ from .services import (
     create_command_approval,
     create_deployment_approval,
     create_rollback_approval,
+    deployment_risk_preview,
     execute_approval_request,
     enqueue_background_job,
     execute_batch_task,
@@ -95,6 +99,8 @@ from .services import (
     notify_approval,
     send_notification_channel,
     test_k8s_cluster_connection,
+    scan_compliance_baseline,
+    resolve_alert,
 )
 
 
@@ -319,6 +325,40 @@ def legacy_dashboard(request):
         'current_role': user_role(request),
     }
     return render(request, 'devops/dashboard.html', content)
+
+
+ALERT_METRIC_LABELS = {
+    'collector': '采集失败',
+    'cpu': 'CPU',
+    'memory': '内存',
+    'disk': '磁盘',
+}
+ALERT_LEVEL_LABELS = {
+    AlertEvent.LEVEL_INFO: '信息',
+    AlertEvent.LEVEL_WARNING: '警告',
+    AlertEvent.LEVEL_CRITICAL: '严重',
+}
+ALERT_STATUS_LABELS = {
+    AlertEvent.STATUS_OPEN: '未处理',
+    AlertEvent.STATUS_PROCESSING: '处理中',
+    AlertEvent.STATUS_RESOLVED: '已恢复',
+    AlertEvent.STATUS_CLOSED: '已关闭',
+    AlertEvent.STATUS_SILENCED: '已静默',
+}
+
+
+def alert_metric_label(metric):
+    return ALERT_METRIC_LABELS.get(metric or '', metric or '未知')
+
+
+def decorate_alert_event(alert):
+    metric_label = alert_metric_label(alert.metric)
+    alert.display_name = '%s告警' % metric_label
+    alert.display_type = metric_label
+    alert.display_level = ALERT_LEVEL_LABELS.get(alert.level, alert.level)
+    alert.display_status = ALERT_STATUS_LABELS.get(alert.status, alert.status)
+    alert.display_creator = '系统采集'
+    return alert
 
 
 @session_login_required
@@ -712,6 +752,7 @@ def deployments(request):
     app_form = DeploymentAppForm()
     hosts = visible_hosts_for_request(request)
     release_form = apply_host_queryset(DeploymentReleaseForm(), hosts)
+    preview = None
     if request.method == 'POST':
         denied = require_devops_role(request, DevOpsRole.ROLE_OPERATOR, MODULE_DEPLOYMENT)
         if denied:
@@ -727,33 +768,37 @@ def deployments(request):
         else:
             release_form = apply_host_queryset(DeploymentReleaseForm(request.POST), hosts)
             if release_form.is_valid():
-                settings_obj = DevOpsSetting.current()
-                submit_for_approval = request.POST.get('submit_mode') == 'approval' or settings_obj.force_deploy_approval
-                release = release_form.save(commit=False)
-                release.created_by = request.session.get('user_name')
-                release.status = (
-                    DeploymentRelease.STATUS_PENDING
-                    if submit_for_approval
-                    else DeploymentRelease.STATUS_RUNNING
-                )
-                release.save()
-                release_form.save_m2m()
-                if submit_for_approval:
-                    approval = create_deployment_approval(
-                        release,
-                        request.session.get('user_name'),
-                        release.description,
-                    )
-                    audit(request, '提交发布审批', 'ApprovalRequest', approval.id, approval.title)
+                if request.POST.get('submit_mode') == 'preview':
+                    preview = deployment_risk_preview(release_form.cleaned_data['hosts'])
                 else:
-                    enqueue_background_job(execute_deployment_release, release, user_role(request))
-                    audit(request, '提交发布', 'DeploymentRelease', release.id, release.version)
-                return redirect('devops:deployments')
+                    settings_obj = DevOpsSetting.current()
+                    submit_for_approval = request.POST.get('submit_mode') == 'approval' or settings_obj.force_deploy_approval
+                    release = release_form.save(commit=False)
+                    release.created_by = request.session.get('user_name')
+                    release.status = (
+                        DeploymentRelease.STATUS_PENDING
+                        if submit_for_approval
+                        else DeploymentRelease.STATUS_RUNNING
+                    )
+                    release.save()
+                    release_form.save_m2m()
+                    if submit_for_approval:
+                        approval = create_deployment_approval(
+                            release,
+                            request.session.get('user_name'),
+                            release.description,
+                        )
+                        audit(request, '提交发布审批', 'ApprovalRequest', approval.id, approval.title)
+                    else:
+                        enqueue_background_job(execute_deployment_release, release, user_role(request))
+                        audit(request, '提交发布', 'DeploymentRelease', release.id, release.version)
+                    return redirect('devops:deployments')
     return render(request, 'devops/deployments.html', {
         'app_form': app_form,
         'release_form': release_form,
         'apps': DeploymentApp.objects.all(),
         'releases': DeploymentRelease.objects.select_related('app').filter(hosts__in=hosts).distinct()[:30],
+        'preview': preview,
     })
 
 
@@ -864,14 +909,39 @@ def alert_events(request):
     if host:
         alerts = alerts.filter(host_id=host)
     if keyword:
+        metric_matches = [
+            key for key, value in ALERT_METRIC_LABELS.items()
+            if (
+                keyword.lower() in value.lower()
+                or keyword.lower() in ('%s告警' % value).lower()
+                or keyword.lower() in key.lower()
+            )
+        ]
+        level_matches = [
+            key for key, value in ALERT_LEVEL_LABELS.items()
+            if keyword.lower() in value.lower() or keyword.lower() in key.lower()
+        ]
+        status_matches = [
+            key for key, value in ALERT_STATUS_LABELS.items()
+            if keyword.lower() in value.lower() or keyword.lower() in key.lower()
+        ]
+        creator_query = models.Q()
+        if keyword.lower() in '系统采集':
+            creator_query = models.Q(id__isnull=False)
         alerts = alerts.filter(
             models.Q(message__icontains=keyword)
             | models.Q(metric__icontains=keyword)
+            | models.Q(metric__in=metric_matches)
+            | models.Q(level__in=level_matches)
+            | models.Q(status__in=status_matches)
+            | models.Q(handler__icontains=keyword)
             | models.Q(host__linux_name__icontains=keyword)
             | models.Q(host__linux_ip__icontains=keyword)
+            | creator_query
         )
+    alert_items = [decorate_alert_event(alert) for alert in alerts[:100]]
     return render(request, 'devops/alerts.html', {
-        'alerts': alerts[:100],
+        'alerts': alert_items,
         'silences': AlertSilence.objects.all()[:20],
         'silence_form': AlertSilenceForm(),
         'hosts': NewLinux.objects.all().order_by('linux_name', 'linux_ip'),
@@ -883,6 +953,9 @@ def alert_events(request):
             'q': keyword,
         },
         'total': alerts.count(),
+        'open_count': AlertEvent.objects.filter(status=AlertEvent.STATUS_OPEN).count(),
+        'processing_count': AlertEvent.objects.filter(status=AlertEvent.STATUS_PROCESSING).count(),
+        'resolved_count': AlertEvent.objects.filter(status=AlertEvent.STATUS_RESOLVED).count(),
         'collector_open_count': AlertEvent.objects.filter(
             metric='collector',
             status__in=[AlertEvent.STATUS_OPEN, AlertEvent.STATUS_PROCESSING, AlertEvent.STATUS_SILENCED],
@@ -947,6 +1020,12 @@ def security_settings(request):
     if denied:
         return denied
     settings_obj = DevOpsSetting.current()
+    visible_hosts = visible_hosts_for_request(request)
+    can_manage = has_role(request, DevOpsRole.ROLE_ADMIN, MODULE_SECURITY)
+    edit_baseline = None
+    if can_manage and request.GET.get('edit'):
+        edit_baseline = get_object_or_404(ComplianceBaseline, id=request.GET.get('edit'))
+    results = ComplianceResult.objects.select_related('baseline', 'host').filter(host__in=visible_hosts)
     return render(request, 'devops/security.html', {
         'policy_form': CommandPolicyForm(),
         'role_form': DevOpsRoleForm(),
@@ -958,7 +1037,72 @@ def security_settings(request):
         'roles': DevOpsRole.objects.select_related('user'),
         'module_permissions': DevOpsModulePermission.objects.select_related('user'),
         'host_scopes': DevOpsHostScope.objects.select_related('user').prefetch_related('groups', 'tags'),
+        'compliance_form': ComplianceBaselineForm(instance=edit_baseline) if can_manage else None,
+        'compliance_edit_baseline': edit_baseline,
+        'compliance_baselines': ComplianceBaseline.objects.prefetch_related('hosts') if can_manage else (),
+        'compliance_results': results,
+        'can_manage_compliance': can_manage,
     })
+
+
+@session_login_required
+def compliance_baseline_create(request):
+    denied = require_devops_role(request, DevOpsRole.ROLE_ADMIN, MODULE_SECURITY)
+    if denied:
+        return denied
+    if request.method != 'POST':
+        return HttpResponseNotAllowed(['POST'])
+    form = ComplianceBaselineForm(request.POST)
+    if form.is_valid():
+        baseline = form.save(commit=False)
+        baseline.created_by = request.session.get('user_name', '')
+        baseline.save()
+        form.save_m2m()
+        audit(request, '创建合规基线', 'ComplianceBaseline', baseline.id, baseline.name)
+    return redirect('devops:security_settings')
+
+
+@session_login_required
+def compliance_baseline_delete(request, id):
+    denied = require_devops_role(request, DevOpsRole.ROLE_ADMIN, MODULE_SECURITY)
+    if denied:
+        return denied
+    if request.method != 'POST':
+        return HttpResponseNotAllowed(['POST'])
+    baseline = get_object_or_404(ComplianceBaseline, id=id)
+    for host in baseline.hosts.all():
+        resolve_alert(host, 'compliance:%s' % baseline.id, '合规基线已删除')
+    audit(request, '删除合规基线', 'ComplianceBaseline', baseline.id, baseline.name)
+    baseline.delete()
+    return redirect('devops:security_settings')
+
+
+@session_login_required
+def compliance_baseline_update(request, id):
+    denied = require_devops_role(request, DevOpsRole.ROLE_ADMIN, MODULE_SECURITY)
+    if denied:
+        return denied
+    if request.method != 'POST':
+        return HttpResponseNotAllowed(['POST'])
+    baseline = get_object_or_404(ComplianceBaseline, id=id)
+    form = ComplianceBaselineForm(request.POST, instance=baseline)
+    if form.is_valid():
+        form.save()
+        audit(request, '更新合规基线', 'ComplianceBaseline', baseline.id, baseline.name)
+    return redirect('devops:security_settings')
+
+
+@session_login_required
+def compliance_baseline_scan(request, id):
+    denied = require_devops_role(request, DevOpsRole.ROLE_ADMIN, MODULE_SECURITY)
+    if denied:
+        return denied
+    if request.method != 'POST':
+        return HttpResponseNotAllowed(['POST'])
+    baseline = get_object_or_404(ComplianceBaseline, id=id)
+    scan_compliance_baseline(baseline)
+    audit(request, '手动扫描合规基线', 'ComplianceBaseline', baseline.id, baseline.name)
+    return redirect('devops:security_settings')
 
 
 @session_login_required

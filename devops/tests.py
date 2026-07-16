@@ -45,8 +45,10 @@ from .models import (
     NotificationChannel,
     NotificationLog,
     ServiceOperation,
+    ComplianceBaseline,
+    ComplianceResult,
 )
-from .services import cleanup_audit_logs, cleanup_metric_samples, enqueue_background_job, latest_metric_map, record_alert, record_metric_sample, run_background_job, send_notification_channel, validate_remote_path
+from .services import cleanup_audit_logs, cleanup_metric_samples, deployment_risk_preview, enqueue_background_job, latest_metric_map, record_alert, record_metric_sample, run_background_job, send_notification_channel, validate_remote_path, scan_compliance_baseline
 from .services import execute_batch_task, execute_command_record, execute_deployment_release, execute_deployment_rollback, execute_file_distribution
 from .services import COMMAND_ALLOWED, COMMAND_BLOCKED, evaluate_command_policy
 from .services import (
@@ -3015,6 +3017,17 @@ class DevOpsViewTests(TestCase):
         self.assertContains(response, 'collection failed')
         self.assertNotContains(response, 'cpu high')
         self.assertContains(response, '采集失败 1')
+        self.assertContains(response, '告警名称')
+        self.assertContains(response, '告警类型')
+        self.assertContains(response, '创建时间')
+        self.assertContains(response, '创建人员')
+        self.assertContains(response, '采集失败告警')
+        self.assertContains(response, '系统采集')
+
+        keyword_response = self.client.get(reverse('devops:alert_events'), {'q': 'CPU告警'})
+        self.assertEqual(keyword_response.status_code, 200)
+        self.assertContains(keyword_response, 'cpu high')
+        self.assertNotContains(keyword_response, 'collection failed')
 
     def test_alert_update_returns_to_filtered_alert_page(self):
         self.set_role(DevOpsRole.ROLE_OPERATOR)
@@ -3234,6 +3247,96 @@ class DevOpsViewTests(TestCase):
 
         self.assertEqual(response.status_code, 302)
         self.assertTrue(DeploymentApp.objects.filter(name='order-service').exists())
+
+    def test_deployment_risk_preview_collects_only_active_and_recent_risks(self):
+        other = NewLinux.objects.create(
+            linux_name='preview-hidden-host',
+            linux_ip='127.0.0.88',
+            linux_hostname='preview-hidden-host',
+        )
+        app = DeploymentApp.objects.create(name='preview-service')
+        recent = DeploymentRelease.objects.create(app=app, version='recent', deploy_script='echo deploy')
+        recent.hosts.add(self.host)
+        old = DeploymentRelease.objects.create(app=app, version='old', deploy_script='echo deploy')
+        old.hosts.add(self.host)
+        DeploymentRelease.objects.filter(id=old.id).update(created_at=timezone.now() - timezone.timedelta(hours=25))
+        hidden = DeploymentRelease.objects.create(app=app, version='hidden', deploy_script='echo deploy')
+        hidden.hosts.add(other)
+        approval = ApprovalRequest.objects.create(
+            request_type=ApprovalRequest.TYPE_ROLLBACK,
+            title='preview rollback',
+            deployment_release=recent,
+        )
+        AlertEvent.objects.create(host=self.host, message='open risk', status=AlertEvent.STATUS_OPEN)
+        AlertEvent.objects.create(host=self.host, message='processing risk', status=AlertEvent.STATUS_PROCESSING)
+        AlertEvent.objects.create(host=self.host, message='silenced risk', status=AlertEvent.STATUS_SILENCED)
+        AlertEvent.objects.create(host=other, message='hidden risk', status=AlertEvent.STATUS_OPEN)
+        older = record_metric_sample(
+            self.host, MetricSample.METRIC_CPU, 0.2,
+            collected_at=timezone.now() - timezone.timedelta(minutes=5),
+        )
+        latest = record_metric_sample(self.host, MetricSample.METRIC_CPU, 0.8)
+
+        preview = deployment_risk_preview([self.host])
+
+        self.assertEqual({alert.message for alert in preview['active_alerts']}, {'open risk', 'processing risk'})
+        self.assertEqual({release.id for release in preview['recent_releases']}, {recent.id})
+        self.assertEqual([item.id for item in preview['pending_approvals']], [approval.id])
+        self.assertEqual(preview['host_metrics'][0]['cpu'].id, latest.id)
+        self.assertNotEqual(preview['host_metrics'][0]['cpu'].id, older.id)
+
+    def test_deployment_risk_preview_is_read_only_and_respects_host_scope(self):
+        other = NewLinux.objects.create(
+            linux_name='preview-outside-host',
+            linux_ip='127.0.0.89',
+            linux_hostname='preview-outside-host',
+        )
+        group = HostGroup.objects.create(name='preview-visible-hosts')
+        group.hosts.add(self.host)
+        scope = DevOpsHostScope.objects.create(user=self.user)
+        scope.groups.add(group)
+        app = DeploymentApp.objects.create(name='preview-page-service')
+        hidden = DeploymentRelease.objects.create(app=app, version='hidden', deploy_script='echo deploy')
+        hidden.hosts.add(other)
+        AlertEvent.objects.create(host=self.host, message='visible preview risk', status=AlertEvent.STATUS_OPEN)
+        AlertEvent.objects.create(host=other, message='hidden preview risk', status=AlertEvent.STATUS_OPEN)
+        release_count = DeploymentRelease.objects.count()
+        approval_count = ApprovalRequest.objects.count()
+        audit_count = AuditLog.objects.count()
+
+        response = self.client.post(reverse('devops:deployments'), {
+            'form_type': 'release',
+            'submit_mode': 'preview',
+            'app': app.id,
+            'version': 'candidate',
+            'description': 'read-only preview',
+            'deploy_script': 'echo deploy',
+            'rollback_script': 'echo rollback',
+            'hosts': [self.host.id],
+        })
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(DeploymentRelease.objects.count(), release_count)
+        self.assertEqual(ApprovalRequest.objects.count(), approval_count)
+        self.assertEqual(AuditLog.objects.count(), audit_count)
+        preview = response.context['preview']
+        self.assertEqual([host.id for host in preview['hosts']], [self.host.id])
+        self.assertEqual([alert.message for alert in preview['active_alerts']], ['visible preview risk'])
+        self.assertNotContains(response, 'hidden preview risk')
+
+        blocked_response = self.client.post(reverse('devops:deployments'), {
+            'form_type': 'release',
+            'submit_mode': 'preview',
+            'app': app.id,
+            'version': 'blocked-candidate',
+            'deploy_script': 'echo deploy',
+            'hosts': [other.id],
+        })
+
+        self.assertEqual(blocked_response.status_code, 200)
+        self.assertIsNone(blocked_response.context['preview'])
+        self.assertTrue(blocked_response.context['release_form'].errors)
+        self.assertEqual(DeploymentRelease.objects.count(), release_count)
 
     def test_dangerous_deployment_is_blocked_with_host_results(self):
         app = DeploymentApp.objects.create(name='billing-service', created_by=self.user.user)
@@ -3795,3 +3898,68 @@ class DevOpsViewTests(TestCase):
         self.assertIn('名称=keep-secret-updated', log.detail)
         self.assertNotIn('https://example.com/original', log.detail)
         self.assertNotIn('original-secret', log.detail)
+
+    def test_compliance_baseline_form_rejects_unsafe_values(self):
+        self.set_role(DevOpsRole.ROLE_ADMIN)
+        response = self.client.post(reverse('devops:compliance_baseline_create'), {
+            'name': 'bad-file', 'baseline_type': 'file_sha256', 'file_path': '../etc/passwd',
+            'expected_sha256': 'not-a-sha', 'hosts': [self.host.id],
+        })
+        self.assertEqual(response.status_code, 302)
+        self.assertFalse(ComplianceBaseline.objects.exists())
+
+    @mock.patch('devops.services.create_host_ssh_client')
+    def test_compliance_scan_records_drift_and_recovery(self, ssh_client):
+        class Stream(object):
+            def __init__(self, value): self.value = value
+            def read(self): return self.value
+        class Client(object):
+            def __init__(self, value): self.value = value
+            def exec_command(self, command, timeout=None): return None, Stream(self.value), Stream(b'')
+            def close(self): pass
+        baseline = ComplianceBaseline.objects.create(
+            name='sshd active', baseline_type=ComplianceBaseline.TYPE_SERVICE_ACTIVE,
+            service_name='sshd', created_by=self.user.user,
+        )
+        baseline.hosts.add(self.host)
+        ssh_client.return_value = Client(b'inactive\n')
+        scan_compliance_baseline(baseline)
+        result = ComplianceResult.objects.get(baseline=baseline, host=self.host)
+        self.assertEqual(result.state, ComplianceResult.STATE_DRIFT)
+        self.assertTrue(AlertEvent.objects.filter(host=self.host, metric='compliance:%s' % baseline.id).exists())
+        ssh_client.return_value = Client(b'active\n')
+        scan_compliance_baseline(baseline)
+        result.refresh_from_db()
+        self.assertEqual(result.state, ComplianceResult.STATE_COMPLIANT)
+        self.assertEqual(AlertEvent.objects.get(host=self.host, metric='compliance:%s' % baseline.id).status, AlertEvent.STATUS_RESOLVED)
+
+    @mock.patch('devops.services.create_host_ssh_client', side_effect=Exception('connection failed'))
+    def test_compliance_scan_marks_one_host_error_without_stopping(self, ssh_client):
+        other = NewLinux.objects.create(linux_name='other', linux_ip='127.0.0.2', linux_hostname='other', linux_port='22', linux_user='root', linux_passwd='bad', linux_app='')
+        baseline = ComplianceBaseline.objects.create(name='service error', baseline_type='service_active', service_name='sshd')
+        baseline.hosts.add(self.host, other)
+        self.assertEqual(scan_compliance_baseline(baseline), 2)
+        self.assertEqual(ComplianceResult.objects.filter(baseline=baseline, state=ComplianceResult.STATE_ERROR).count(), 2)
+
+    def test_compliance_page_permissions_and_manual_scan_audit(self):
+        baseline = ComplianceBaseline.objects.create(name='manual', baseline_type='service_active', service_name='sshd')
+        baseline.hosts.add(self.host)
+        self.set_role(DevOpsRole.ROLE_VIEWER)
+        self.assertEqual(self.client.post(reverse('devops:compliance_baseline_scan', args=[baseline.id])).status_code, 403)
+        self.set_role(DevOpsRole.ROLE_ADMIN)
+        with mock.patch('devops.views.scan_compliance_baseline') as scanner:
+            response = self.client.post(reverse('devops:compliance_baseline_scan', args=[baseline.id]))
+        self.assertEqual(response.status_code, 302)
+        scanner.assert_called_once_with(baseline)
+        self.assertTrue(AuditLog.objects.filter(action='手动扫描合规基线', target_id=str(baseline.id)).exists())
+
+    def test_security_viewer_cannot_load_compliance_edit_target(self):
+        baseline = ComplianceBaseline.objects.create(
+            name='hidden-edit', baseline_type='service_active', service_name='sshd',
+        )
+        self.set_role(DevOpsRole.ROLE_VIEWER)
+
+        response = self.client.get(reverse('devops:security_settings'), {'edit': baseline.id})
+
+        self.assertEqual(response.status_code, 200)
+        self.assertIsNone(response.context['compliance_edit_baseline'])

@@ -63,7 +63,7 @@
 
 3. 生产化增强
    - 增加 Nginx 静态文件和反向代理示例
-   - CI 中加入 `manage.py check`、迁移检查和单元测试
+   - [已完成] GitHub Actions 在 push 和 pull request 中执行 `manage.py check`、迁移检查和单元测试
    - 增加数据库从 SQLite 切换到 MySQL/PostgreSQL 的环境变量配置
    - 接入独立 worker、Celery 或 RQ，替换 Web 进程内线程执行
 

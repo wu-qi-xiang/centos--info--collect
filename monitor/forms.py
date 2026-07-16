@@ -83,9 +83,13 @@ class AlertmanagerConfigForm(forms.ModelForm):
 class AlertNotificationForm(forms.Form):
     feishu_enabled = forms.BooleanField(required=False)
     feishu_name = forms.CharField(required=False, max_length=100)
+    feishu_alert_name = forms.CharField(required=False, max_length=100)
+    feishu_alertmanager_id = forms.IntegerField(required=False)
     feishu_webhook_url = forms.CharField(required=False)
     wecom_enabled = forms.BooleanField(required=False)
     wecom_name = forms.CharField(required=False, max_length=100)
+    wecom_alert_name = forms.CharField(required=False, max_length=100)
+    wecom_alertmanager_id = forms.IntegerField(required=False)
     wecom_webhook_url = forms.CharField(required=False)
 
     PROVIDERS = (
@@ -95,6 +99,7 @@ class AlertNotificationForm(forms.Form):
 
     def __init__(self, *args, **kwargs):
         self.existing = kwargs.pop('existing', {}) or {}
+        self.require_webhook = kwargs.pop('require_webhook', True)
         super(AlertNotificationForm, self).__init__(*args, **kwargs)
 
     def clean(self):
@@ -102,13 +107,21 @@ class AlertNotificationForm(forms.Form):
         for provider in self.PROVIDERS:
             url_field = '%s_webhook_url' % provider
             enabled_field = '%s_enabled' % provider
+            name_field = '%s_name' % provider
+            alert_name_field = '%s_alert_name' % provider
+            alertmanager_field = '%s_alertmanager_id' % provider
             value = (cleaned_data.get(url_field) or '').strip()
+            cleaned_data[name_field] = (cleaned_data.get(name_field) or '').strip()
+            cleaned_data[alert_name_field] = (cleaned_data.get(alert_name_field) or '').strip()
             existing = self.existing.get(provider)
-            if cleaned_data.get(enabled_field) and not value and not (existing and existing.decrypted_webhook_url):
+            alertmanager_id = cleaned_data.get(alertmanager_field)
+            if alertmanager_id and not AlertmanagerConfig.objects.filter(id=alertmanager_id).exists():
+                self.add_error(alertmanager_field, '选择的 Alertmanager 对接不存在')
+            if cleaned_data.get(enabled_field) and not value and self.require_webhook and not (existing and existing.decrypted_webhook_url):
                 self.add_error(url_field, '启用前请填写 Webhook 地址')
                 continue
             if value and not self._valid_webhook_url(value):
-                self.add_error(url_field, 'Webhook 地址必须是 http:// 或 https:// 开头的完整地址，且不要包含用户名、密码或查询参数')
+                self.add_error(url_field, 'Webhook 地址必须是 http:// 或 https:// 开头的完整地址，且不要包含用户名、密码或片段标识')
             cleaned_data[url_field] = value
         return cleaned_data
 
@@ -116,6 +129,6 @@ class AlertNotificationForm(forms.Form):
         parsed = urlparse.urlparse(value)
         if parsed.scheme not in ('http', 'https') or not parsed.netloc:
             return False
-        if parsed.username or parsed.password or parsed.query or parsed.fragment:
+        if parsed.username or parsed.password or parsed.fragment:
             return False
         return True

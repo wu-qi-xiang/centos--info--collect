@@ -1,7 +1,24 @@
 import json
+import hashlib
 import math
+import os
 import re
+import signal
+import shutil
+import socket
+import ssl
+import subprocess
+import sys
+import tempfile
+import threading
+import time
 from datetime import datetime
+
+from django.utils import timezone
+from django.utils.dateparse import parse_datetime
+
+from devops.models import AlertEvent
+from .models import AlertmanagerConfig, AlertNotificationConfig
 
 try:
     from urllib import error as urlerror
@@ -12,10 +29,21 @@ except ImportError:
     import urllib.parse as urlparse
     import urllib.request as urlrequest
 
+try:
+    import certifi
+except ImportError:
+    certifi = None
+
+try:
+    import requests
+except ImportError:
+    requests = None
+
 
 PROMETHEUS_TIMEOUT_SECONDS = 5
 PROMETHEUS_TABLE_MAX_ROWS = 500
 ALERTMANAGER_TIMEOUT_SECONDS = 5
+ALERTMANAGER_POLL_MAX_ALERTS = int(os.environ.get('ALERTMANAGER_POLL_MAX_ALERTS', '1'))
 PROMETHEUS_INVALID_QUERY_MESSAGE = 'PromQL 查询语句无效，请检查语法后重试'
 PROMETHEUS_QUERY_TIMEOUT_MESSAGE = 'Prometheus 查询超时，请简化查询后重试'
 PROMETHEUS_QUERY_FORMAT_MESSAGE = 'Prometheus 返回的查询结果格式异常'
@@ -703,6 +731,72 @@ def alertmanager_url(config, path, params=None):
     return '%s%s%s' % (base, path, query)
 
 
+def _run_curl(args, input_data=None, timeout=ALERTMANAGER_TIMEOUT_SECONDS):
+    if 'test' in sys.argv or not shutil.which('curl'):
+        return None
+    process = None
+    output_file = None
+    try:
+        output_file = tempfile.TemporaryFile()
+        process = subprocess.Popen(
+            args,
+            stdin=subprocess.PIPE if input_data is not None else None,
+            stdout=output_file,
+            stderr=subprocess.DEVNULL,
+        )
+        if input_data is not None:
+            process.stdin.write(input_data)
+            process.stdin.close()
+        deadline = time.monotonic() + max(float(timeout), 1.0)
+        while process.poll() is None and time.monotonic() < deadline:
+            time.sleep(0.1)
+        if process.poll() is None:
+            process.kill()
+            return {'ok': False, 'message': 'timeout'}
+        output_file.seek(0)
+        output = output_file.read()
+        return {'ok': True, 'returncode': process.returncode, 'output': output}
+    except Exception:
+        if process is not None and process.poll() is None:
+            process.kill()
+        return None
+    finally:
+        if output_file is not None:
+            output_file.close()
+
+
+def _get_json_with_curl(url, timeout):
+    result = _run_curl(
+        [
+            'curl',
+            '-sS',
+            '--connect-timeout',
+            str(min(int(timeout), 3)),
+            '--max-time',
+            str(max(int(timeout), 1)),
+            '-H',
+            'Accept: application/json',
+            url,
+        ],
+        timeout=timeout,
+    )
+    if result is None:
+        return None
+    if not result.get('ok'):
+        return {'ok': False, 'message': 'Alertmanager 请求超时，请检查地址和网络'}
+    if result.get('returncode') != 0:
+        return {'ok': False, 'message': 'Alertmanager 请求失败，请检查地址和网络'}
+    body = _json_object(result.get('output'))
+    if body is None:
+        try:
+            body = json.loads((result.get('output') or b'').decode('utf-8'))
+        except (TypeError, ValueError):
+            body = None
+    if not isinstance(body, (dict, list)):
+        return {'ok': False, 'message': 'Alertmanager 返回格式异常'}
+    return {'ok': True, 'body': body}
+
+
 def alertmanager_get_json(
         config, path, params=None, timeout=ALERTMANAGER_TIMEOUT_SECONDS, require_enabled=True):
     if (
@@ -710,7 +804,11 @@ def alertmanager_get_json(
             or not getattr(config, 'alertmanager_url', '')
             or (require_enabled and not getattr(config, 'enabled', False))):
         return {'ok': False, 'message': 'Alertmanager 未配置或未启用'}
-    request = urlrequest.Request(alertmanager_url(config, path, params), headers={'Accept': 'application/json'})
+    url = alertmanager_url(config, path, params)
+    curl_result = _get_json_with_curl(url, timeout)
+    if isinstance(curl_result, dict):
+        return curl_result
+    request = urlrequest.Request(url, headers={'Accept': 'application/json'})
     try:
         response = urlrequest.urlopen(request, timeout=timeout)
         response_body = response.read().decode('utf-8')
@@ -720,7 +818,7 @@ def alertmanager_get_json(
         body = json.loads(response_body)
     except (TypeError, ValueError):
         return {'ok': False, 'message': 'Alertmanager 返回格式异常'}
-    if not isinstance(body, dict):
+    if not isinstance(body, (dict, list)):
         return {'ok': False, 'message': 'Alertmanager 返回格式异常'}
     return {'ok': True, 'body': body}
 
@@ -734,6 +832,208 @@ def test_alertmanager_connection(config):
     return {'ok': False, 'message': 'Alertmanager 返回格式异常'}
 
 
+def _alertmanager_status(payload, alert):
+    status = ''
+    if isinstance(alert, dict):
+        raw_status = alert.get('status')
+        if isinstance(raw_status, dict):
+            status = (raw_status.get('state') or '').strip().lower()
+        elif isinstance(raw_status, str):
+            status = raw_status.strip().lower()
+    if not status and isinstance(payload, dict):
+        raw_status = payload.get('status')
+        if isinstance(raw_status, dict):
+            status = (raw_status.get('state') or '').strip().lower()
+        elif isinstance(raw_status, str):
+            status = raw_status.strip().lower()
+    if status == 'active':
+        return 'firing'
+    return status
+
+
+def _alertmanager_alert_text(alert, key):
+    value = alert.get(key) if isinstance(alert, dict) else ''
+    return value if isinstance(value, str) else ''
+
+
+def _alertmanager_normalized_alert(payload, alert):
+    labels = alert.get('labels') if isinstance(alert, dict) and isinstance(alert.get('labels'), dict) else {}
+    annotations = alert.get('annotations') if isinstance(alert, dict) and isinstance(alert.get('annotations'), dict) else {}
+    alert_name = labels.get('alertname') or annotations.get('summary') or 'Alertmanager 告警'
+    instance = labels.get('instance') or labels.get('pod') or labels.get('node') or labels.get('job') or ''
+    message = annotations.get('description') or annotations.get('summary') or alert_name
+    return {
+        'status': _alertmanager_status(payload, alert),
+        'metric': alert_name,
+        'message': message,
+        'host_name': instance,
+        'instance': instance,
+        'startsAt': _alertmanager_alert_text(alert, 'startsAt'),
+        'timestamp': _alertmanager_alert_text(alert, 'startsAt') or _alertmanager_alert_text(alert, 'updatedAt'),
+        'fingerprint': _alertmanager_alert_text(alert, 'fingerprint'),
+        'labels': labels,
+        'annotations': annotations,
+    }
+
+
+def _alertmanager_alerts_from_payload(payload):
+    if isinstance(payload, list):
+        alerts = payload
+    elif isinstance(payload, dict):
+        alerts = payload.get('alerts')
+        if not isinstance(alerts, list):
+            alerts = [payload]
+    else:
+        alerts = []
+    return [
+        _alertmanager_normalized_alert(payload, alert)
+        for alert in alerts
+        if isinstance(alert, dict)
+    ]
+
+
+def _alertmanager_fingerprint(alertmanager, alert):
+    raw = alert.get('fingerprint')
+    if not raw:
+        payload = {
+            'labels': alert.get('labels') or {},
+            'startsAt': alert.get('startsAt') or '',
+            'metric': alert.get('metric') or '',
+        }
+        raw = hashlib.sha256(json.dumps(payload, sort_keys=True).encode('utf-8')).hexdigest()
+    return 'alertmanager:%s:%s' % (alertmanager.id, raw[:80])
+
+
+def _alertmanager_notification_content(alertmanager, config, alert):
+    title = '告警通知：%s' % (
+        config.alert_name or alert.get('metric') or config.name or 'Alertmanager 告警'
+    )
+    content_lines = [
+        ('告警名称', config.alert_name or alert.get('metric')),
+        ('通知渠道', config.name or '企业微信'),
+        ('Alertmanager', alertmanager.name),
+        ('主机', alert.get('host_name') or alert.get('instance')),
+        ('状态', 'firing'),
+        ('时间', alert.get('timestamp')),
+        ('内容', alert.get('message')),
+    ]
+    content = '\n'.join('%s：%s' % (label, value) for label, value in content_lines if value)
+    return title, content
+
+
+def _alertmanager_alert_sort_key(alert):
+    for key in ('timestamp', 'startsAt'):
+        value = alert.get(key)
+        if not value:
+            continue
+        parsed = parse_datetime(value)
+        if parsed:
+            return parsed
+    return timezone.datetime.min.replace(tzinfo=timezone.utc)
+
+
+def push_alertmanager_firing_alerts(alertmanager, payload, dedupe=False):
+    alerts = _alertmanager_alerts_from_payload(payload)
+    firing_alerts = [alert for alert in alerts if alert.get('status') == 'firing']
+    pushable_alerts = sorted(firing_alerts, key=_alertmanager_alert_sort_key, reverse=True)
+    if dedupe and ALERTMANAGER_POLL_MAX_ALERTS > 0:
+        pushable_alerts = pushable_alerts[:ALERTMANAGER_POLL_MAX_ALERTS]
+    configs = AlertNotificationConfig.objects.filter(
+        alertmanager=alertmanager,
+        provider=AlertNotificationConfig.PROVIDER_WECOM,
+        enabled=True,
+        webhook_url__gt='',
+    )
+    config_count = configs.count()
+    if config_count == 0:
+        return {
+            'received': len(alerts),
+            'firing': len(firing_alerts),
+            'attempted': 0,
+            'matched_notifications': 0,
+            'pushed': 0,
+            'skipped': 0,
+            'results': [],
+        }
+    results = []
+    skipped = 0
+    now = timezone.now()
+    active_statuses = [
+        AlertEvent.STATUS_OPEN,
+        AlertEvent.STATUS_PROCESSING,
+        AlertEvent.STATUS_SILENCED,
+    ]
+    for alert in pushable_alerts:
+        event = None
+        fingerprint = ''
+        if dedupe:
+            fingerprint = _alertmanager_fingerprint(alertmanager, alert)
+            event = AlertEvent.objects.filter(
+                fingerprint=fingerprint,
+                status__in=active_statuses,
+            ).first()
+            if event:
+                event.repeat_count += 1
+                event.last_seen_at = now
+                event.message = alert.get('message') or event.message
+                event.save(update_fields=['repeat_count', 'last_seen_at', 'message', 'updated_at'])
+                skipped += 1
+                continue
+        alert_result_start = len(results)
+        for config in configs:
+            title, content = _alertmanager_notification_content(alertmanager, config, alert)
+            result = send_alert_notification(config, title, content)
+            result_item = {
+                'notification_id': config.id,
+                'ok': bool(result.get('ok')),
+                'message': result.get('message') or '',
+            }
+            if event:
+                result_item['alert_event_id'] = event.id
+            results.append(result_item)
+        if dedupe and any(item.get('ok') for item in results[alert_result_start:]):
+            event = AlertEvent.objects.create(
+                host=None,
+                level=AlertEvent.LEVEL_WARNING,
+                metric=alert.get('metric') or 'alertmanager',
+                message=alert.get('message') or 'Alertmanager firing 告警',
+                status=AlertEvent.STATUS_OPEN,
+                fingerprint=fingerprint,
+                first_seen_at=now,
+                last_seen_at=now,
+                remark='Alertmanager：%s' % alertmanager.name,
+            )
+            for item in results[alert_result_start:]:
+                item['alert_event_id'] = event.id
+    return {
+        'received': len(alerts),
+        'firing': len(firing_alerts),
+        'attempted': len(pushable_alerts),
+        'matched_notifications': config_count,
+        'pushed': len(results),
+        'skipped': skipped,
+        'results': results,
+    }
+
+
+def poll_alertmanager_firing_alerts():
+    summary = {'alertmanagers': 0, 'received': 0, 'firing': 0, 'attempted': 0, 'pushed': 0, 'skipped': 0, 'errors': []}
+    configs = AlertmanagerConfig.objects.filter(enabled=True, alertmanager_url__gt='').order_by('id')
+    for config in configs:
+        summary['alertmanagers'] += 1
+        result = alertmanager_get_json(config, '/api/v2/alerts')
+        if not result.get('ok'):
+            summary['errors'].append({'alertmanager_id': config.id, 'message': result.get('message') or 'Alertmanager 查询失败'})
+            continue
+        push_result = push_alertmanager_firing_alerts(config, result.get('body'), dedupe=True)
+        summary['received'] += push_result.get('received', 0)
+        summary['firing'] += push_result.get('firing', 0)
+        summary['attempted'] += push_result.get('attempted', 0)
+        summary['pushed'] += push_result.get('pushed', 0)
+        summary['skipped'] += push_result.get('skipped', 0)
+    return summary
+
+
 def alert_notification_payload(provider, title, content):
     text = '%s\n%s' % (title, content)
     if provider == 'feishu':
@@ -741,24 +1041,311 @@ def alert_notification_payload(provider, title, content):
     return {'msgtype': 'text', 'text': {'content': text}}
 
 
+def _alert_notification_ssl_context(url):
+    return None
+
+
+def _alert_notification_alarm_handler(signum, frame):
+    raise socket.timeout()
+
+
+def _enable_alert_notification_alarm(timeout):
+    if (
+            not hasattr(signal, 'SIGALRM')
+            or threading.current_thread() is not threading.main_thread()):
+        return None
+    previous_handler = signal.getsignal(signal.SIGALRM)
+    signal.signal(signal.SIGALRM, _alert_notification_alarm_handler)
+    signal.setitimer(signal.ITIMER_REAL, max(float(timeout), 1.0))
+    return previous_handler
+
+
+def _disable_alert_notification_alarm(previous_handler):
+    if previous_handler is None:
+        return
+    signal.setitimer(signal.ITIMER_REAL, 0)
+    signal.signal(signal.SIGALRM, previous_handler)
+
+
+def _alert_notification_provider_label(provider):
+    if provider == 'feishu':
+        return '飞书'
+    if provider == 'wecom':
+        return '企业微信'
+    return provider or '告警通知'
+
+
+def _alert_notification_response_result(provider, status_code, response_text, success_message):
+    if status_code and status_code >= 400:
+        return {'ok': False, 'message': '通知发送失败，请检查通知配置和网络'}
+    body = _json_object(response_text)
+    if body:
+        code = None
+        if provider == 'wecom' and 'errcode' in body:
+            code = body.get('errcode')
+        elif provider == 'feishu':
+            if 'StatusCode' in body:
+                code = body.get('StatusCode')
+            elif 'code' in body:
+                code = body.get('code')
+        if code is not None:
+            try:
+                code_ok = int(code) == 0
+            except (TypeError, ValueError):
+                code_ok = False
+            if not code_ok:
+                return {'ok': False, 'message': '通知平台返回失败，请检查通知配置'}
+    return {'ok': True, 'message': success_message}
+
+
+def _send_alert_notification_with_curl(url, data, timeout):
+    result = _run_curl(
+        [
+            'curl',
+            '-sS',
+            '--connect-timeout',
+            str(min(int(timeout), 3)),
+            '--max-time',
+            str(max(int(timeout), 1)),
+            '-H',
+            'Content-Type: application/json',
+            '-X',
+            'POST',
+            '--data-binary',
+            '@-',
+            '-w',
+            '\n%{http_code}',
+            url,
+        ],
+        input_data=data,
+        timeout=timeout,
+    )
+    if result is None:
+        return None
+    if not result.get('ok'):
+        return {'ok': False, 'message': 'timeout'}
+    output = result.get('output').decode('utf-8', 'replace')
+    response_text, _, status_text = output.rpartition('\n')
+    try:
+        status_code = int(status_text.strip())
+    except (TypeError, ValueError):
+        status_code = 0
+    if result.get('returncode') != 0 and not response_text:
+        return {'ok': False, 'message': 'timeout' if result.get('returncode') == 28 else 'failed'}
+    return {'ok': True, 'status_code': status_code, 'response_text': response_text[:300]}
+
+
+def _send_alert_notification_with_requests(url, data, timeout):
+    if 'test' in sys.argv or requests is None:
+        return None
+    try:
+        response = requests.post(
+            url,
+            data=data,
+            headers={'Content-Type': 'application/json'},
+            timeout=(min(float(timeout), 3.0), float(timeout)),
+        )
+        return {
+            'ok': True,
+            'status_code': response.status_code,
+            'response_text': (response.text or '')[:300],
+        }
+    except requests.exceptions.Timeout:
+        return {'ok': False, 'message': 'timeout'}
+    except requests.exceptions.RequestException:
+        return {'ok': False, 'message': 'failed'}
+
+
 def send_alert_notification(config, title='告警通知测试', content='这是一条告警通知测试消息。', timeout=PROMETHEUS_TIMEOUT_SECONDS):
     url = getattr(config, 'decrypted_webhook_url', '') or ''
     if not url:
         return {'ok': False, 'message': 'Webhook 地址为空或解密失败'}
+    is_test_message = title == '告警通知测试' and content == '这是一条告警通知测试消息。'
     payload = alert_notification_payload(config.provider, title, content)
     data = json.dumps(payload, ensure_ascii=False).encode('utf-8')
+    curl_result = _send_alert_notification_with_curl(url, data, timeout)
+    if isinstance(curl_result, dict):
+        if not curl_result.get('ok'):
+            message = '测试通知发送超时，请检查 Webhook 地址和网络' if is_test_message else '通知发送超时，请检查通知配置和网络'
+            return {'ok': False, 'message': message}
+        success_message = '测试通知发送成功' if is_test_message else '告警通知发送成功'
+        return _alert_notification_response_result(
+            config.provider,
+            curl_result.get('status_code'),
+            curl_result.get('response_text') or '',
+            success_message,
+        )
+    requests_result = _send_alert_notification_with_requests(url, data, timeout)
+    if isinstance(requests_result, dict):
+        if not requests_result.get('ok'):
+            message = '测试通知发送超时，请检查 Webhook 地址和网络' if requests_result.get('message') == 'timeout' and is_test_message else ''
+            if not message:
+                message = '测试通知发送失败，请检查 Webhook 地址和网络' if is_test_message else '通知发送失败，请检查通知配置和网络'
+            if requests_result.get('message') == 'timeout' and not is_test_message:
+                message = '通知发送超时，请检查通知配置和网络'
+            return {'ok': False, 'message': message}
+        success_message = '测试通知发送成功' if is_test_message else '告警通知发送成功'
+        return _alert_notification_response_result(
+            config.provider,
+            requests_result.get('status_code'),
+            requests_result.get('response_text') or '',
+            success_message,
+        )
     request = urlrequest.Request(
         url,
         data=data,
         headers={'Content-Type': 'application/json'},
         method='POST',
     )
+    old_timeout = socket.getdefaulttimeout()
+    old_alarm_handler = None
+    response = None
     try:
-        response = urlrequest.urlopen(request, timeout=timeout)
+        socket.setdefaulttimeout(timeout)
+        old_alarm_handler = _enable_alert_notification_alarm(timeout)
+        context = _alert_notification_ssl_context(url)
+        if context is not None:
+            response = urlrequest.urlopen(request, timeout=timeout, context=context)
+        else:
+            response = urlrequest.urlopen(request, timeout=timeout)
         response_text = response.read().decode('utf-8')[:300]
         status_code = getattr(response, 'status', None) or getattr(response, 'code', 0)
-        if status_code and status_code >= 400:
-            return {'ok': False, 'message': 'HTTP %s %s' % (status_code, response_text)}
-        return {'ok': True, 'message': '测试通知发送成功'}
+        success_message = '测试通知发送成功' if is_test_message else '告警通知发送成功'
+        return _alert_notification_response_result(
+            config.provider,
+            status_code,
+            response_text,
+            success_message,
+        )
+    except ssl.SSLError:
+        return {'ok': False, 'message': 'HTTPS 证书校验失败，请检查运行环境 CA 证书配置'}
+    except urlerror.URLError as error:
+        reason = getattr(error, 'reason', None)
+        if isinstance(reason, ssl.SSLError):
+            return {'ok': False, 'message': 'HTTPS 证书校验失败，请检查运行环境 CA 证书配置'}
+        message = '测试通知发送失败，请检查 Webhook 地址和网络' if is_test_message else '通知发送失败，请检查通知配置和网络'
+        return {'ok': False, 'message': message}
+    except socket.timeout:
+        message = '测试通知发送超时，请检查 Webhook 地址和网络' if is_test_message else '通知发送超时，请检查通知配置和网络'
+        return {'ok': False, 'message': message}
     except Exception:
-        return {'ok': False, 'message': '测试通知发送失败，请检查 Webhook 地址和网络'}
+        message = '测试通知发送失败，请检查 Webhook 地址和网络' if is_test_message else '通知发送失败，请检查通知配置和网络'
+        return {'ok': False, 'message': message}
+    finally:
+        _disable_alert_notification_alarm(old_alarm_handler)
+        socket.setdefaulttimeout(old_timeout)
+        if response is not None and hasattr(response, 'close'):
+            response.close()
+
+
+def _alert_value(alert, key):
+    if isinstance(alert, dict):
+        return alert.get(key)
+    return getattr(alert, key, None)
+
+
+def _alert_host_name(alert):
+    host = _alert_value(alert, 'host')
+    if isinstance(host, dict):
+        return host.get('linux_name') or host.get('name') or host.get('host') or host.get('hostname')
+    if host:
+        return getattr(host, 'linux_name', None) or getattr(host, 'name', None) or str(host)
+    return (
+        _alert_value(alert, 'host_name')
+        or _alert_value(alert, 'hostname')
+        or _alert_value(alert, 'instance')
+    )
+
+
+def _alert_timestamp(alert):
+    for key in ('timestamp', 'last_seen_at', 'updated_at', 'created_at', 'first_seen_at'):
+        value = _alert_value(alert, key)
+        if value:
+            if hasattr(value, 'strftime'):
+                return value.strftime('%Y-%m-%d %H:%M:%S')
+            return value
+    return ''
+
+
+def _alert_display_value(alert):
+    for key in ('value', 'current_value', 'usage', 'metric_value'):
+        value = _alert_value(alert, key)
+        if value is not None and value != '':
+            return value
+    return ''
+
+
+def _alert_threshold(alert):
+    for key in ('threshold', 'limit', 'threshold_value'):
+        value = _alert_value(alert, key)
+        if value is not None and value != '':
+            return value
+    return ''
+
+
+def _format_alert_notification_message(config, alert, status):
+    provider_label = _alert_notification_provider_label(getattr(config, 'provider', ''))
+    alert_name = (
+        getattr(config, 'alert_name', '')
+        or getattr(config, 'name', '')
+        or provider_label
+    )
+    status = status or _alert_value(alert, 'status') or '-'
+    fields = [
+        ('告警名称', alert_name),
+        ('通知渠道', getattr(config, 'name', '') or provider_label),
+        ('主机', _alert_host_name(alert)),
+        ('指标', _alert_value(alert, 'metric')),
+        ('状态', status),
+        ('时间', _alert_timestamp(alert)),
+        ('当前值', _alert_display_value(alert)),
+        ('阈值', _alert_threshold(alert)),
+    ]
+    lines = ['%s：%s' % (label, value) for label, value in fields if value not in (None, '')]
+    message = None
+    if status == 'resolved':
+        message = _alert_value(alert, 'remark')
+    message = message or _alert_value(alert, 'message') or _alert_value(alert, 'content') or _alert_value(alert, 'description')
+    if message:
+        lines.append('内容：%s' % message)
+    title = '告警通知：%s' % alert_name
+    return title, '\n'.join(lines)
+
+
+def send_alert_event_notifications(alert, status=None, timeout=PROMETHEUS_TIMEOUT_SECONDS):
+    from .models import AlertNotificationConfig
+
+    configs = AlertNotificationConfig.objects.filter(
+        enabled=True,
+        webhook_url__gt='',
+        provider__in=[
+            AlertNotificationConfig.PROVIDER_FEISHU,
+            AlertNotificationConfig.PROVIDER_WECOM,
+        ],
+    )
+    results = []
+    for config in configs:
+        channel = getattr(config, 'name', '') or _alert_notification_provider_label(config.provider)
+        try:
+            if not (getattr(config, 'decrypted_webhook_url', '') or ''):
+                result = {'ok': False, 'message': 'Webhook 地址为空或解密失败'}
+            else:
+                title, content = _format_alert_notification_message(config, alert, status)
+                result = send_alert_notification(config, title, content, timeout=timeout)
+        except Exception:
+            result = {'ok': False, 'message': '通知发送失败，请检查通知配置和网络'}
+        results.append({
+            'provider': config.provider,
+            'channel': channel,
+            'ok': bool(result.get('ok')),
+            'message': result.get('message') or '',
+        })
+    success_count = len([item for item in results if item.get('ok')])
+    failed_count = len(results) - success_count
+    return {
+        'ok': failed_count == 0,
+        'total': len(results),
+        'success': success_count,
+        'failed': failed_count,
+        'results': results,
+    }

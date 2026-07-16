@@ -10,7 +10,7 @@
 - 本机和远程主机基础信息采集。
 - 监控告警：CPU、内存、磁盘阈值配置，定时采集，邮件告警，告警恢复记录。
 - 密码管理：按当前登录用户隔离账号密码记录，支持加密存储和按需查看。
-- DevOps 控制台：主机分组、标签、命令执行、批量任务、服务管理、文件分发、发布部署、回滚、审批流、通知渠道、审计日志、监控历史。
+- DevOps 控制台：主机分组、标签、命令执行、批量任务、服务管理、文件分发、发布部署、发布前风险预览、回滚、审批流、通知渠道、审计日志、监控历史。
 - 权限控制：全局角色、模块权限、主机范围授权。
 - 部署基础：环境变量配置、Dockerfile、Compose、Gunicorn 配置、审计日志清理命令。
 
@@ -90,6 +90,8 @@ python manage.py crontab show
 python manage.py crontab remove
 ```
 
+DevOps“安全策略”页面支持服务运行状态和文件 SHA-256 合规基线。管理员可手动扫描、编辑或删除基线；系统每天 `03:30` 扫描已绑定主机，仅记录漂移或扫描失败，不自动修复。漂移会生成告警，恢复后自动关闭对应告警。
+
 ## 目录结构
 
 - `PyLinux/`：Django 项目配置、路由和 WSGI 入口。
@@ -115,6 +117,8 @@ docker compose -f deploy/docker-compose.yml up --build
 .venv/bin/python manage.py check
 .venv/bin/python manage.py test
 ```
+
+GitHub Actions 会在 push 和 pull request 时使用 Python 3.8 自动执行 `manage.py check`、迁移一致性检查和完整测试。
 
 当前测试覆盖包括登录注册、主机权限、SSH 凭据处理、密码管理、监控采集、告警、DevOps API、审批、文件分发、发布部署、通知和审计清理等核心路径。
 

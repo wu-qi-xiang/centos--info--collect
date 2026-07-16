@@ -480,6 +480,55 @@ class NotificationLog(models.Model):
         ordering = ['-created_at']
 
 
+class ComplianceBaseline(models.Model):
+    TYPE_SERVICE_ACTIVE = 'service_active'
+    TYPE_FILE_SHA256 = 'file_sha256'
+    TYPE_CHOICES = (
+        (TYPE_SERVICE_ACTIVE, '服务运行状态'),
+        (TYPE_FILE_SHA256, '文件 SHA-256'),
+    )
+
+    name = models.CharField(max_length=100, unique=True)
+    baseline_type = models.CharField(max_length=30, choices=TYPE_CHOICES)
+    service_name = models.CharField(max_length=100, blank=True)
+    file_path = models.CharField(max_length=500, blank=True)
+    expected_sha256 = models.CharField(max_length=64, blank=True)
+    hosts = models.ManyToManyField(NewLinux, blank=True)
+    created_by = models.CharField(max_length=100, blank=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        db_table = 'devops_compliance_baseline'
+        ordering = ['name']
+
+    def __str__(self):
+        return self.name
+
+
+class ComplianceResult(models.Model):
+    STATE_COMPLIANT = 'compliant'
+    STATE_DRIFT = 'drift'
+    STATE_ERROR = 'error'
+    STATE_CHOICES = (
+        (STATE_COMPLIANT, '符合'),
+        (STATE_DRIFT, '存在漂移'),
+        (STATE_ERROR, '扫描失败'),
+    )
+
+    baseline = models.ForeignKey(ComplianceBaseline, on_delete=models.CASCADE, related_name='results')
+    host = models.ForeignKey(NewLinux, on_delete=models.CASCADE)
+    state = models.CharField(max_length=20, choices=STATE_CHOICES)
+    actual_value = models.CharField(max_length=100, blank=True)
+    checked_at = models.DateTimeField(auto_now=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        db_table = 'devops_compliance_result'
+        unique_together = ('baseline', 'host')
+        ordering = ['baseline__name', 'host__linux_name']
+
+
 def devops_upload_path(instance, filename):
     now = timezone.now()
     return 'devops/%04d/%02d/%02d/%s' % (now.year, now.month, now.day, filename)

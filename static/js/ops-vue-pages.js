@@ -271,6 +271,7 @@
                 kind,
                 kindLabel: expectedKind === 'prometheus' ? 'Prometheus' : 'Alertmanager',
                 name,
+                url: typeof integration.url === 'string' ? integration.url.trim() : '',
                 enabled: Boolean(integration.enabled),
                 updatedAt: typeof integration.updated_at === 'string' ? integration.updated_at : '',
                 editUrl: typeof integration.edit_url === 'string' ? integration.edit_url : '',
@@ -300,23 +301,31 @@
 
     function normalizeAlertNotificationIntegrations(integrations) {
         if (!Array.isArray(integrations)) return [];
-        const seen = {};
         return integrations.reduce((items, integration) => {
             if (!integration || typeof integration !== 'object' || Array.isArray(integration)) return items;
             const provider = typeof integration.provider === 'string' ? integration.provider.trim() : '';
             const name = typeof integration.name === 'string' ? integration.name.trim() : '';
-            if (!provider || !name || seen[provider]) return items;
-            seen[provider] = true;
+            const id = Number(integration.id);
+            if (!provider || !name) return items;
             items.push({
+                id: Number.isSafeInteger(id) && id > 0 ? String(id) : provider + '-' + items.length,
                 provider,
                 providerLabel: typeof integration.provider_label === 'string' && integration.provider_label.trim()
                     ? integration.provider_label.trim()
                     : provider,
                 name,
+                alertName: typeof integration.alert_name === 'string' ? integration.alert_name.trim() : '',
+                alertType: typeof integration.alert_type === 'string' ? integration.alert_type.trim() : '',
+                createdAt: typeof integration.created_at === 'string' ? integration.created_at : '',
+                createdBy: typeof integration.created_by === 'string' ? integration.created_by.trim() : '',
+                alertmanagerId: integration.alertmanager_id ? String(integration.alertmanager_id) : '',
+                alertmanagerName: typeof integration.alertmanager_name === 'string' ? integration.alertmanager_name.trim() : '',
                 enabled: Boolean(integration.enabled),
                 configured: Boolean(integration.configured),
                 updatedAt: typeof integration.updated_at === 'string' ? integration.updated_at : '',
                 configureUrl: typeof integration.configure_url === 'string' ? integration.configure_url : '',
+                editUrl: typeof integration.edit_url === 'string' ? integration.edit_url : '',
+                deleteUrl: typeof integration.delete_url === 'string' ? integration.delete_url : '',
             });
             return items;
         }, []);
@@ -347,6 +356,12 @@
                     ? pageData.alertmanager_form.values.id
                     : null
             );
+            const initialIntegrationKind = monitorPrometheusIntegrations.length || !monitorAlertmanagerIntegrations.length
+                ? 'prometheus'
+                : 'alertmanager';
+            const alertNotificationIntegrations = normalizeAlertNotificationIntegrations(
+                pageData.notification_integrations
+            );
             return {
                 kind: payload.kind,
                 title: payload.title,
@@ -370,6 +385,8 @@
                 selectedMetricPrometheusId,
                 monitorPrometheusIntegrations,
                 monitorAlertmanagerIntegrations,
+                monitorIntegrationKind: initialIntegrationKind,
+                monitorIntegrationQuery: '',
                 monitorIntegrationSelections: {
                     prometheus: monitorPrometheusIntegrations.some((item) => item.id === activePrometheusId)
                         ? activePrometheusId
@@ -378,9 +395,11 @@
                         ? activeAlertmanagerId
                         : (monitorAlertmanagerIntegrations[0] ? monitorAlertmanagerIntegrations[0].id : ''),
                 },
-                alertNotificationIntegrations: normalizeAlertNotificationIntegrations(
-                    pageData.notification_integrations
-                ),
+                alertNotificationIntegrations,
+                alertNotificationProvider: alertNotificationIntegrations.some((item) => item.provider === 'feishu')
+                    ? 'feishu'
+                    : 'wecom',
+                alertNotificationQuery: '',
             };
         },
         computed: {
@@ -412,11 +431,76 @@
                     },
                 ];
             },
+            activeMonitorIntegrationGroup() {
+                return this.monitorIntegrationGroups.find((group) => (
+                    group.key === this.monitorIntegrationKind
+                )) || this.monitorIntegrationGroups[0];
+            },
+            filteredMonitorIntegrationItems() {
+                const group = this.activeMonitorIntegrationGroup || { items: [] };
+                const query = typeof this.monitorIntegrationQuery === 'string'
+                    ? this.monitorIntegrationQuery.trim().toLowerCase()
+                    : '';
+                if (!query) return group.items;
+                return group.items.filter((integration) => {
+                    const enabledText = integration.enabled ? '已启用 enabled' : '已停用 disabled';
+                    return [
+                        integration.displayName,
+                        integration.name,
+                        integration.url,
+                        integration.kindLabel,
+                        enabledText,
+                    ].some((value) => String(value || '').toLowerCase().indexOf(query) !== -1);
+                });
+            },
             canConfigureNotifications() {
                 if (this.data.can_manage_notifications !== undefined) {
                     return Boolean(this.data.can_manage_notifications);
                 }
                 return Boolean(this.data.configure_url);
+            },
+            alertNotificationGroups() {
+                const providers = [
+                    { key: 'feishu', label: '飞书', icon: 'fa-paper-plane' },
+                    { key: 'wecom', label: '企业微信', icon: 'fa-comments' },
+                ];
+                return providers.map((provider) => Object.assign({}, provider, {
+                    items: this.alertNotificationIntegrations.filter((item) => item.provider === provider.key),
+                }));
+            },
+            activeAlertNotificationGroup() {
+                return this.alertNotificationGroups.find((group) => (
+                    group.key === this.alertNotificationProvider
+                )) || this.alertNotificationGroups[0];
+            },
+            filteredAlertNotificationIntegrations() {
+                const group = this.activeAlertNotificationGroup || { items: [] };
+                const query = typeof this.alertNotificationQuery === 'string'
+                    ? this.alertNotificationQuery.trim().toLowerCase()
+                    : '';
+                if (!query) return group.items;
+                return group.items.filter((integration) => {
+                    const enabledText = integration.enabled ? '已启用 enabled' : '已停用 disabled';
+                    const configuredText = integration.configured ? '已配置 configured' : '未配置 unconfigured';
+                    return [
+                        integration.name,
+                        integration.alertName,
+                        integration.alertType,
+                        integration.alertmanagerName,
+                        integration.createdAt,
+                        integration.createdBy,
+                        integration.providerLabel,
+                        enabledText,
+                        configuredText,
+                        integration.updatedAt,
+                    ].some((value) => String(value || '').toLowerCase().indexOf(query) !== -1);
+                });
+            },
+            alertNotificationEnabledCount() {
+                return this.alertNotificationIntegrations.filter((integration) => integration.enabled).length;
+            },
+            alertNotificationConfiguredCount() {
+                return this.alertNotificationIntegrations.filter((integration) => integration.configured).length;
             },
             prometheusForm() {
                 return this.data.prometheus_form || { values: {} };
@@ -432,10 +516,14 @@
             },
             alertProviders() {
                 const notifications = this.data.notifications || {};
-                return [
+                const providers = [
                     { key: 'feishu', label: '飞书', icon: 'paper-plane', config: notifications.feishu || {} },
                     { key: 'wecom', label: '企业微信', icon: 'comments', config: notifications.wecom || {} },
                 ];
+                if (this.data.editing_provider) {
+                    return providers.filter((provider) => provider.key === this.data.editing_provider);
+                }
+                return providers;
             },
             selectedMetricPrometheus() {
                 return this.metricPrometheusConfigs.find(
@@ -1276,112 +1364,80 @@
                     </div>
                     <div class="ops-integration-overview mt-3">
                         <div class="ops-section-head">
-                            <div class="ops-section-title">监控对接</div>
+                            <div class="ops-section-title">监控对接列表</div>
                             <div class="ops-actions">
                                 <a v-if="data.integration_url" class="btn btn-sm btn-outline-primary" :href="data.integration_url"><i class="fas fa-plug" aria-hidden="true"></i> 管理对接</a>
                                 <a v-if="data.query_url" class="btn btn-sm btn-outline-secondary" :href="data.query_url">指标查询</a>
                                 <a v-if="data.alert_settings_url" class="btn btn-sm btn-outline-dark" :href="data.alert_settings_url">告警设置</a>
                             </div>
                         </div>
+                        <div class="ops-integration-filter">
+                            <div class="ops-integration-filter-kind">
+                                <label class="form-label" for="monitor-home-integration-kind">对接类型</label>
+                                <select id="monitor-home-integration-kind" class="form-control form-control-sm"
+                                        v-model="monitorIntegrationKind">
+                                    <option v-for="group in monitorIntegrationGroups" :key="group.key" :value="group.key">
+                                        [[ group.label ]]
+                                    </option>
+                                </select>
+                            </div>
+                            <div class="ops-integration-filter-query">
+                                <div class="ops-integration-query-control">
+                                    <i class="fas fa-search" aria-hidden="true"></i>
+                                    <input id="monitor-home-integration-query" class="form-control form-control-sm"
+                                           v-model.trim="monitorIntegrationQuery" aria-label="查询监控对接">
+                                </div>
+                            </div>
+                        </div>
                         <div class="ops-integration-picker-grid">
-                            <article class="ops-integration-picker" v-for="group in monitorIntegrationGroups" :key="group.key">
+                            <article class="ops-integration-picker">
                                 <div class="ops-integration-picker-head">
                                     <div>
                                         <div class="ops-integration-picker-title">
-                                            <i class="fas" :class="group.icon" aria-hidden="true"></i> [[ group.label ]]
+                                            <i class="fas" :class="activeMonitorIntegrationGroup.icon" aria-hidden="true"></i> [[ activeMonitorIntegrationGroup.label ]]
                                         </div>
-                                        <div class="ops-muted">[[ group.description ]]</div>
+                                        <div class="ops-muted">[[ activeMonitorIntegrationGroup.description ]]</div>
                                     </div>
-                                    <span class="ops-integration-picker-count">[[ group.items.length ]] 个</span>
+                                    <span class="ops-integration-picker-count">[[ filteredMonitorIntegrationItems.length ]] / [[ activeMonitorIntegrationGroup.items.length ]] 个</span>
                                 </div>
-                                <label class="form-label" :for="'monitor-home-' + group.key + '-selector'">已配置连接</label>
-                                <div class="ops-integration-picker-control">
-                                    <select class="form-control form-control-sm" :id="'monitor-home-' + group.key + '-selector'"
-                                            v-model="monitorIntegrationSelections[group.key]" :disabled="!group.items.length">
-                                        <option value="" disabled>[[ group.items.length ? ('选择 ' + group.label + ' 连接') : ('暂无 ' + group.label + ' 连接') ]]</option>
-                                        <option v-for="integration in group.items" :key="integration.id" :value="integration.id">
-                                            [[ integration.displayName ]] · [[ integration.enabled ? '已启用' : '已停用' ]]
-                                        </option>
-                                    </select>
-                                    <a v-if="data.can_manage_integrations && selectedMonitorIntegration(group.key) && selectedMonitorIntegration(group.key).editUrl"
-                                       class="btn btn-sm btn-outline-primary ops-integration-picker-action"
-                                       :href="selectedMonitorIntegration(group.key).editUrl"
-                                       :title="'编辑 ' + selectedMonitorIntegration(group.key).displayName"
-                                       :aria-label="'编辑 ' + selectedMonitorIntegration(group.key).displayName">
-                                        <i class="fas fa-edit" aria-hidden="true"></i>
-                                    </a>
-                                    <form v-if="data.can_manage_integrations && selectedMonitorIntegration(group.key) && selectedMonitorIntegration(group.key).deleteUrl"
-                                          class="ops-inline-form" method="post" :action="selectedMonitorIntegration(group.key).deleteUrl"
-                                          @submit="confirmDelete($event, selectedMonitorIntegration(group.key))">
-                                        <input type="hidden" name="csrfmiddlewaretoken" :value="data.csrf">
-                                        <button class="btn btn-sm btn-outline-danger ops-integration-picker-action" type="submit"
-                                                :title="'删除 ' + selectedMonitorIntegration(group.key).displayName"
-                                                :aria-label="'删除 ' + selectedMonitorIntegration(group.key).displayName">
-                                            <i class="fas fa-trash" aria-hidden="true"></i>
-                                        </button>
-                                    </form>
+                                <div v-if="filteredMonitorIntegrationItems.length" class="ops-integration-list">
+                                    <div class="ops-integration-list-row" v-for="integration in filteredMonitorIntegrationItems" :key="integration.id">
+                                        <div class="ops-integration-list-main">
+                                            <strong>[[ integration.displayName ]]</strong>
+                                            <code v-if="integration.url" class="ops-integration-address">[[ integration.url ]]</code>
+                                            <span v-if="integration.updatedAt">更新于 [[ formatDisplayDate(integration.updatedAt) ]]</span>
+                                        </div>
+                                        <div class="ops-integration-list-side">
+                                            <span class="ops-badge" :class="{ 'ops-badge-muted': !integration.enabled }">
+                                                [[ integration.enabled ? '已启用' : '已停用' ]]
+                                            </span>
+                                            <a v-if="data.can_manage_integrations && integration.editUrl"
+                                               class="btn btn-sm btn-outline-primary ops-integration-picker-action"
+                                               :href="integration.editUrl"
+                                               :title="'编辑 ' + integration.displayName"
+                                               :aria-label="'编辑 ' + integration.displayName">
+                                                <i class="fas fa-edit" aria-hidden="true"></i>
+                                            </a>
+                                            <form v-if="data.can_manage_integrations && integration.deleteUrl"
+                                                  class="ops-inline-form" method="post" :action="integration.deleteUrl"
+                                                  @submit="confirmDelete($event, integration)">
+                                                <input type="hidden" name="csrfmiddlewaretoken" :value="data.csrf">
+                                                <button class="btn btn-sm btn-outline-danger ops-integration-picker-action" type="submit"
+                                                        :title="'删除 ' + integration.displayName"
+                                                        :aria-label="'删除 ' + integration.displayName">
+                                                    <i class="fas fa-trash" aria-hidden="true"></i>
+                                                </button>
+                                            </form>
+                                        </div>
+                                    </div>
                                 </div>
-                                <div v-if="selectedMonitorIntegration(group.key)" class="ops-integration-picker-meta" role="status">
-                                    <span class="ops-badge" :class="{ 'ops-badge-muted': !selectedMonitorIntegration(group.key).enabled }">
-                                        [[ selectedMonitorIntegration(group.key).enabled ? '已启用' : '已停用' ]]
-                                    </span>
-                                    <span v-if="selectedMonitorIntegration(group.key).updatedAt">更新于 [[ formatDisplayDate(selectedMonitorIntegration(group.key).updatedAt) ]]</span>
-                                </div>
-                                <div v-else class="ops-integration-picker-empty">尚未配置</div>
+                                <div v-else class="ops-integration-picker-empty">[[ activeMonitorIntegrationGroup.items.length ? '未找到匹配的对接' : '尚未配置' ]]</div>
                             </article>
                         </div>
                     </div>
                 </section>
 
                 <div v-else-if="kind === 'monitor-integrations'" class="ops-integration-page">
-                    <div class="ops-integration-picker-grid">
-                        <article class="ops-integration-picker" v-for="group in monitorIntegrationGroups" :key="group.key">
-                            <div class="ops-integration-picker-head">
-                                <div>
-                                    <div class="ops-integration-picker-title">
-                                        <i class="fas" :class="group.icon" aria-hidden="true"></i> [[ group.label ]]
-                                    </div>
-                                    <div class="ops-muted">[[ group.description ]]</div>
-                                </div>
-                                <span class="ops-integration-picker-count">[[ group.items.length ]] 个</span>
-                            </div>
-                            <label class="form-label" :for="'monitor-integrations-' + group.key + '-selector'">已配置连接</label>
-                            <div class="ops-integration-picker-control">
-                                <select class="form-control form-control-sm" :id="'monitor-integrations-' + group.key + '-selector'"
-                                        v-model="monitorIntegrationSelections[group.key]" :disabled="!group.items.length">
-                                    <option value="" disabled>[[ group.items.length ? ('选择 ' + group.label + ' 连接') : ('暂无 ' + group.label + ' 连接') ]]</option>
-                                    <option v-for="integration in group.items" :key="integration.id" :value="integration.id">
-                                        [[ integration.displayName ]] · [[ integration.enabled ? '已启用' : '已停用' ]]
-                                    </option>
-                                </select>
-                                <a v-if="data.can_manage_integrations && selectedMonitorIntegration(group.key) && selectedMonitorIntegration(group.key).editUrl"
-                                   class="btn btn-sm btn-outline-primary ops-integration-picker-action"
-                                   :href="selectedMonitorIntegration(group.key).editUrl"
-                                   :title="'编辑 ' + selectedMonitorIntegration(group.key).displayName"
-                                   :aria-label="'编辑 ' + selectedMonitorIntegration(group.key).displayName">
-                                    <i class="fas fa-edit" aria-hidden="true"></i>
-                                </a>
-                                <form v-if="data.can_manage_integrations && selectedMonitorIntegration(group.key) && selectedMonitorIntegration(group.key).deleteUrl"
-                                      class="ops-inline-form" method="post" :action="selectedMonitorIntegration(group.key).deleteUrl"
-                                      @submit="confirmDelete($event, selectedMonitorIntegration(group.key))">
-                                    <input type="hidden" name="csrfmiddlewaretoken" :value="data.csrf">
-                                    <button class="btn btn-sm btn-outline-danger ops-integration-picker-action" type="submit"
-                                            :title="'删除 ' + selectedMonitorIntegration(group.key).displayName"
-                                            :aria-label="'删除 ' + selectedMonitorIntegration(group.key).displayName">
-                                        <i class="fas fa-trash" aria-hidden="true"></i>
-                                    </button>
-                                </form>
-                            </div>
-                            <div v-if="selectedMonitorIntegration(group.key)" class="ops-integration-picker-meta" role="status">
-                                <span class="ops-badge" :class="{ 'ops-badge-muted': !selectedMonitorIntegration(group.key).enabled }">
-                                    [[ selectedMonitorIntegration(group.key).enabled ? '已启用' : '已停用' ]]
-                                </span>
-                                <span v-if="selectedMonitorIntegration(group.key).updatedAt">更新于 [[ formatDisplayDate(selectedMonitorIntegration(group.key).updatedAt) ]]</span>
-                            </div>
-                            <div v-else class="ops-integration-picker-empty">尚未配置</div>
-                        </article>
-                    </div>
-
                     <section v-if="data.can_manage_integrations" class="ops-panel">
                         <div class="ops-section-title"><i class="fas fa-chart-line" aria-hidden="true"></i>[[ prometheusForm.editing ? '更新 Prometheus 对接' : '新增 Prometheus 对接' ]]</div>
                         <form class="ops-form ops-integration-form" method="post" :action="prometheusForm.action" @submit="submitForm">
@@ -1775,58 +1831,105 @@
                             <i class="fas fa-cog" aria-hidden="true"></i> 配置通知
                         </a>
                     </div>
-                    <div v-if="!alertNotificationIntegrations.length" class="ops-empty ops-notification-list-empty">
-                        <span>暂无已配置通知渠道</span>
-                        <a v-if="canConfigureNotifications && data.configure_url" class="btn btn-sm btn-outline-primary" :href="data.configure_url">前往配置</a>
+                    <section class="ops-notification-list-summary" aria-label="告警通知状态">
+                        <span><strong>[[ alertNotificationIntegrations.length ]]</strong> 渠道</span>
+                        <span class="is-enabled"><i class="fas fa-circle" aria-hidden="true"></i>[[ alertNotificationEnabledCount ]] 已启用</span>
+                        <span class="is-configured"><i class="fas fa-circle" aria-hidden="true"></i>[[ alertNotificationConfiguredCount ]] 已配置</span>
+                        <span class="is-current"><i class="fas fa-circle" aria-hidden="true"></i>[[ filteredAlertNotificationIntegrations.length ]] 当前显示</span>
+                    </section>
+                    <div class="ops-notification-filter">
+                        <div class="ops-notification-filter-kind">
+                            <label class="form-label" for="alert-notification-provider">通知类型</label>
+                            <select id="alert-notification-provider" class="form-control form-control-sm"
+                                    v-model="alertNotificationProvider">
+                                <option v-for="group in alertNotificationGroups" :key="group.key" :value="group.key">
+                                    [[ group.label ]]
+                                </option>
+                            </select>
+                        </div>
+                        <div class="ops-notification-filter-query">
+                            <div class="ops-notification-query-control">
+                                <input id="alert-notification-query" class="form-control form-control-sm"
+                                       v-model.trim="alertNotificationQuery" placeholder="查询告警名称、类型、创建人"
+                                       aria-label="查询告警通知">
+                                <button v-if="alertNotificationQuery" type="button"
+                                        class="ops-notification-query-clear"
+                                        aria-label="清空查询" @click="alertNotificationQuery = ''">
+                                    <i class="fas fa-times" aria-hidden="true"></i>
+                                </button>
+                            </div>
+                        </div>
                     </div>
-                    <div v-else class="table-responsive ops-notification-list-table-wrap">
-                        <table class="table table-sm ops-notification-list-table mb-0">
-                            <caption class="sr-only">已配置告警通知渠道</caption>
-                            <thead>
-                                <tr>
-                                    <th scope="col">名称</th>
-                                    <th scope="col">类型</th>
-                                    <th scope="col">启用状态</th>
-                                    <th scope="col">配置状态</th>
-                                    <th scope="col">更新时间</th>
-                                    <th v-if="canConfigureNotifications" scope="col">操作</th>
-                                </tr>
-                            </thead>
-                            <tbody>
-                                <tr v-for="integration in alertNotificationIntegrations" :key="integration.provider">
-                                    <td><strong>[[ integration.name ]]</strong></td>
-                                    <td><span class="ops-kind-label">[[ integration.providerLabel ]]</span></td>
-                                    <td>
-                                        <span class="ops-badge" :class="{ 'ops-badge-muted': !integration.enabled }">
-                                            [[ integration.enabled ? '已启用' : '已停用' ]]
-                                        </span>
-                                    </td>
-                                    <td>
-                                        <span class="ops-badge" :class="integration.configured ? 'ops-badge-success' : 'ops-badge-muted'">
-                                            [[ integration.configured ? '已配置' : '未配置' ]]
-                                        </span>
-                                    </td>
-                                    <td class="ops-notification-list-time">[[ integration.updatedAt || '-' ]]</td>
-                                    <td v-if="canConfigureNotifications">
-                                        <a v-if="integration.configureUrl" class="btn btn-sm btn-outline-primary" :href="integration.configureUrl">
-                                            <i class="fas fa-cog" aria-hidden="true"></i> 配置
-                                        </a>
-                                        <span v-else>-</span>
-                                    </td>
-                                </tr>
-                            </tbody>
-                        </table>
+                    <section v-if="filteredAlertNotificationIntegrations.length" class="ops-notification-table-panel">
+                        <div class="ops-notification-table-wrap">
+                            <table class="ops-notification-table">
+                                <thead>
+                                    <tr>
+                                        <th>告警名称</th>
+                                        <th>告警类型</th>
+                                        <th>Alertmanager 名称</th>
+                                        <th>状态</th>
+                                        <th>创建时间</th>
+                                        <th>创建人员</th>
+                                        <th><span class="visually-hidden">操作</span></th>
+                                    </tr>
+                                </thead>
+                                <tbody>
+                                    <tr v-for="integration in filteredAlertNotificationIntegrations" :key="integration.id">
+                                        <td>
+                                            <strong class="ops-notification-table-name">[[ integration.alertName || integration.name ]]</strong>
+                                            <small>[[ integration.name ]]</small>
+                                        </td>
+                                        <td><code>[[ integration.alertType || integration.providerLabel ]]</code></td>
+                                        <td><span class="ops-notification-table-text">[[ integration.alertmanagerName || '-' ]]</span></td>
+                                        <td>
+                                            <span class="ops-notification-list-status" :class="integration.enabled ? 'is-enabled' : 'is-disabled'">
+                                                <i class="fas fa-circle" aria-hidden="true"></i>[[ integration.enabled ? '已启用' : '已停用' ]]
+                                            </span>
+                                        </td>
+                                        <td class="ops-notification-table-time">[[ integration.createdAt || '-' ]]</td>
+                                        <td><span class="ops-notification-table-text">[[ integration.createdBy || '-' ]]</span></td>
+                                        <td>
+                                            <div class="ops-notification-list-actions">
+                                                <a v-if="canConfigureNotifications && integration.editUrl"
+                                                   class="ops-notification-icon-action"
+                                                   :href="integration.editUrl"
+                                                   :title="'配置 ' + (integration.alertName || integration.name)"
+                                                   :aria-label="'配置 ' + (integration.alertName || integration.name)">
+                                                    <i class="fas fa-cog" aria-hidden="true"></i>
+                                                </a>
+                                                <form v-if="canConfigureNotifications && integration.deleteUrl"
+                                                      class="ops-inline-form" method="post" :action="integration.deleteUrl"
+                                                      @submit="confirmDelete($event, integration)">
+                                                    <input type="hidden" name="csrfmiddlewaretoken" :value="data.csrf">
+                                                    <button class="ops-notification-icon-action is-delete" type="submit"
+                                                            :title="'删除 ' + (integration.alertName || integration.name)"
+                                                            :aria-label="'删除 ' + (integration.alertName || integration.name)">
+                                                        <i class="fas fa-trash" aria-hidden="true"></i>
+                                                    </button>
+                                                </form>
+                                            </div>
+                                        </td>
+                                    </tr>
+                                </tbody>
+                            </table>
+                        </div>
+                    </section>
+                    <div v-else class="ops-empty ops-notification-list-empty">
+                        <span>[[ activeAlertNotificationGroup.items.length ? '没有匹配的通知渠道' : '暂无已配置通知渠道' ]]</span>
+                        <a v-if="canConfigureNotifications && data.configure_url" class="btn btn-sm btn-outline-primary" :href="data.configure_url">前往配置</a>
                     </div>
                 </section>
 
                 <section v-else-if="kind === 'alert-notifications'">
+                    <div v-if="data.save_message" class="alert" :class="data.save_ok ? 'alert-success' : 'alert-danger'">[[ data.save_message ]]</div>
                     <div v-if="data.test_message" class="alert alert-info">[[ data.test_message ]]</div>
                     <div v-if="!canConfigureNotifications" class="alert alert-secondary py-2" role="status">
                         当前账号仅有查看权限。
                     </div>
                     <div class="ops-grid two">
                         <div class="ops-card ops-notification-card" v-for="provider in alertProviders" :key="provider.key">
-                            <form v-if="canConfigureNotifications" class="ops-form compact" method="post" :action="data.action" @submit="submitForm">
+                            <form v-if="canConfigureNotifications" class="ops-form compact" method="post" :action="provider.config.action || data.action" @submit="submitForm">
                                 <input type="hidden" name="csrfmiddlewaretoken" :value="data.csrf">
                                 <input type="hidden" name="provider" :value="provider.key">
                                 <div class="ops-notification-head">
@@ -1844,13 +1947,27 @@
                                     <input class="form-control" :name="provider.key + '_name'" :value="provider.config.name || provider.label" autocomplete="off">
                                 </div>
                                 <div>
+                                    <label class="form-label">告警名称</label>
+                                    <input class="form-control" :name="provider.key + '_alert_name'" :value="provider.config.alert_name || ''" autocomplete="off">
+                                </div>
+                                <div>
+                                    <label class="form-label">Alertmanager</label>
+                                    <select class="form-control" :name="provider.key + '_alertmanager_id'" :value="provider.config.alertmanager_id || ''">
+                                        <option value="">请选择 Alertmanager 对接</option>
+                                        <option v-for="item in data.alertmanager_options || []" :key="item.id" :value="String(item.id)">
+                                            [[ item.name ]]
+                                        </option>
+                                    </select>
+                                </div>
+                                <div>
                                     <label class="form-label">Webhook</label>
-                                    <input class="form-control" :name="provider.key + '_webhook_url'" type="password" placeholder="留空则保持现有 Webhook 不变" autocomplete="new-password">
-                                    <div v-if="provider.config.has_webhook" class="form-text">当前：已保存</div>
+                                    <input class="form-control" :name="provider.key + '_webhook_url'" type="text" :value="provider.config.webhook_url || ''" :placeholder="provider.config.editing ? '留空保持现有 Webhook 不变' : '填写 Webhook 地址'" autocomplete="off">
+                                    <div v-if="provider.config.has_webhook" class="form-text">当前：[[ provider.config.webhook_display || '已保存' ]]</div>
                                 </div>
                                 <div class="ops-actions">
-                                    <button class="btn btn-primary" type="submit">保存</button>
-                                    <button class="btn btn-outline-secondary" type="submit" :formaction="data.test_action" name="provider" :value="provider.key">测试[[ provider.label ]]</button>
+                                    <button class="btn btn-primary" type="submit">[[ provider.config.editing ? '更新' : '保存' ]]</button>
+                                    <button v-if="!provider.config.editing" class="btn btn-outline-secondary" type="submit" :formaction="data.test_action" name="provider" :value="provider.key">测试[[ provider.label ]]</button>
+                                    <a v-if="provider.config.editing" class="btn btn-outline-secondary" :href="data.list_url">取消</a>
                                 </div>
                             </form>
                             <div v-else class="ops-notification-readonly">
@@ -1858,6 +1975,7 @@
                                     <div>
                                         <div class="ops-section-title"><i class="fas" :class="'fa-' + provider.icon"></i> [[ provider.label ]]</div>
                                         <div class="ops-notification-readonly-name">[[ provider.config.name || provider.label ]]</div>
+                                        <div class="ops-muted">告警名称：[[ provider.config.alert_name || '-' ]]</div>
                                     </div>
                                     <span class="ops-badge ops-badge-muted">仅查看</span>
                                 </div>

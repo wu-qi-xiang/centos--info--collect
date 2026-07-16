@@ -24,6 +24,7 @@ from .models import (
     HostTag,
     K8sCluster,
     NotificationChannel,
+    ComplianceBaseline,
 )
 
 
@@ -66,6 +67,53 @@ class CommandPolicyForm(forms.ModelForm):
     class Meta:
         model = CommandPolicy
         fields = ('name', 'pattern', 'action', 'enabled', 'reason')
+
+
+class ComplianceBaselineForm(forms.ModelForm):
+    hosts = forms.ModelMultipleChoiceField(queryset=NewLinux.objects.all(), widget=forms.CheckboxSelectMultiple)
+
+    class Meta:
+        model = ComplianceBaseline
+        fields = ('name', 'baseline_type', 'service_name', 'file_path', 'expected_sha256', 'hosts')
+
+    def clean(self):
+        cleaned = super(ComplianceBaselineForm, self).clean()
+        baseline_type = cleaned.get('baseline_type')
+        if baseline_type == ComplianceBaseline.TYPE_SERVICE_ACTIVE:
+            valid, value = validate_compliance_service_name(cleaned.get('service_name'))
+            if not valid:
+                self.add_error('service_name', value)
+            cleaned['service_name'] = value if valid else ''
+            cleaned['file_path'] = ''
+            cleaned['expected_sha256'] = ''
+        elif baseline_type == ComplianceBaseline.TYPE_FILE_SHA256:
+            valid, value = validate_compliance_file_path(cleaned.get('file_path'))
+            if not valid:
+                self.add_error('file_path', value)
+            cleaned['file_path'] = value if valid else ''
+            sha = (cleaned.get('expected_sha256') or '').strip().lower()
+            if not re.match(r'^[a-f0-9]{64}$', sha):
+                self.add_error('expected_sha256', '请输入 64 位 SHA-256 十六进制值')
+            cleaned['expected_sha256'] = sha
+            cleaned['service_name'] = ''
+        return cleaned
+
+
+def validate_compliance_service_name(value):
+    value = (value or '').strip()
+    if not re.match(r'^[A-Za-z0-9_.@:-]+$', value):
+        return False, '服务名只能包含字母、数字、点、下划线、横线、冒号和 @'
+    return True, value
+
+
+def validate_compliance_file_path(value):
+    value = (value or '').strip()
+    if not value.startswith('/') or '\x00' in value or '\n' in value or '\r' in value:
+        return False, '文件路径必须是安全的绝对路径'
+    normalized = posixpath.normpath(value)
+    if normalized != value or normalized.startswith('/../') or normalized == '/..':
+        return False, '文件路径不能包含路径跳转'
+    return True, normalized
 
 
 class DevOpsRoleForm(forms.ModelForm):

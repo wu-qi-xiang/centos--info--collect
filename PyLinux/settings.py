@@ -224,6 +224,8 @@ EMAIL_TIMEOUT = 8
 
 CRONJOBS = [
 	('*/1 * * * *', 'monitor.crontab.monitor_send_email', '>>/tmp/test.log'),
+	('*/1 * * * *', 'monitor.crontab.poll_alertmanager_notifications', '>>/tmp/alertmanager_poll.log'),
+	('30 3 * * *', 'monitor.crontab.scan_compliance_baselines_daily', '>>/tmp/compliance_scan.log'),
 ]
 
 DEVOPS_SYNC_TASKS = 'test' in sys.argv

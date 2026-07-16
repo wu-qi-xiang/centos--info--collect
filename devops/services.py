@@ -70,6 +70,8 @@ from .models import (
     K8sCluster,
     NotificationChannel,
     NotificationLog,
+    ComplianceBaseline,
+    ComplianceResult,
 )
 from RemoteLinux.models import NewLinux
 
@@ -1293,13 +1295,78 @@ def resolve_alert(host, metric, message='指标已恢复正常'):
     alert = AlertEvent.objects.filter(fingerprint=fingerprint, status__in=active_statuses).first()
     if not alert:
         return None
-    update_alert_status(
+    alert = update_alert_status(
         alert,
         AlertEvent.STATUS_RESOLVED,
         handler='system',
         remark=message,
     )
+    try:
+        from monitor.services import send_alert_event_notifications
+        send_alert_event_notifications(alert, status=AlertEvent.STATUS_RESOLVED)
+    except Exception:
+        pass
     return alert
+
+
+def compliance_metric(baseline):
+    return 'compliance:%s' % baseline.id
+
+
+def compliance_scan_command(baseline):
+    if baseline.baseline_type == ComplianceBaseline.TYPE_SERVICE_ACTIVE:
+        if not re.match(r'^[A-Za-z0-9_.@:-]+$', baseline.service_name or ''):
+            return None, ''
+        return 'systemctl is-active -- %s' % shlex.quote(baseline.service_name), 'active'
+    path = baseline.file_path or ''
+    sha = (baseline.expected_sha256 or '').lower()
+    if (baseline.baseline_type != ComplianceBaseline.TYPE_FILE_SHA256 or not path.startswith('/')
+            or '\x00' in path or '\n' in path or '\r' in path
+            or posixpath.normpath(path) != path or not re.match(r'^[a-f0-9]{64}$', sha)):
+        return None, ''
+    return 'sha256sum -- %s' % shlex.quote(path), sha
+
+
+def scan_compliance_baseline(baseline):
+    """Scan a fixed, validated baseline without accepting arbitrary commands."""
+    scanned = 0
+    command, expected = compliance_scan_command(baseline)
+    for host in baseline.hosts.all():
+        client = None
+        state = ComplianceResult.STATE_ERROR
+        actual_value = ''
+        try:
+            if not command:
+                raise ValueError('invalid compliance baseline')
+            client = create_host_ssh_client(host, timeout=ssh_connect_timeout())
+            stdin, stdout, stderr = client.exec_command(command, timeout=command_timeout())
+            output = (stdout.read() or b'').decode('utf-8', 'ignore').strip()
+            if baseline.baseline_type == ComplianceBaseline.TYPE_FILE_SHA256:
+                actual_value = output.split()[0].lower() if output else ''
+                if not re.match(r'^[a-f0-9]{64}$', actual_value):
+                    actual_value = ''
+            else:
+                actual_value = output[:100]
+            state = ComplianceResult.STATE_COMPLIANT if actual_value == expected else ComplianceResult.STATE_DRIFT
+        except Exception:
+            state = ComplianceResult.STATE_ERROR
+        finally:
+            if client:
+                client.close()
+        ComplianceResult.objects.update_or_create(
+            baseline=baseline, host=host,
+            defaults={'state': state, 'actual_value': actual_value},
+        )
+        if state == ComplianceResult.STATE_DRIFT:
+            record_alert(host, compliance_metric(baseline), '合规基线“%s”存在漂移' % baseline.name, AlertEvent.LEVEL_WARNING)
+        elif state == ComplianceResult.STATE_COMPLIANT:
+            resolve_alert(host, compliance_metric(baseline), '合规基线“%s”已恢复' % baseline.name)
+        scanned += 1
+    return scanned
+
+
+def scan_compliance_baselines():
+    return sum(scan_compliance_baseline(baseline) for baseline in ComplianceBaseline.objects.prefetch_related('hosts'))
 
 
 def dingtalk_signed_url(url, secret):
@@ -1417,7 +1484,13 @@ def notify_alert(alert):
         alert.get_status_display() if hasattr(alert, 'get_status_display') else alert.status,
         alert.message,
     )
-    return send_notifications(NotificationLog.EVENT_ALERT, title, content)
+    logs = send_notifications(NotificationLog.EVENT_ALERT, title, content)
+    try:
+        from monitor.services import send_alert_event_notifications
+        send_alert_event_notifications(alert, status=alert.status)
+    except Exception:
+        pass
+    return logs
 
 
 def notify_approval(approval, action):
@@ -1491,6 +1564,51 @@ def latest_metric_map(hosts=None):
         if key not in result:
             result[key] = sample
     return result
+
+
+def deployment_risk_preview(hosts, now=None):
+    """Return read-only deployment risk data for the selected hosts."""
+    hosts = list(hosts)
+    host_ids = [host.id for host in hosts]
+    if not host_ids:
+        return {
+            'hosts': hosts,
+            'active_alerts': AlertEvent.objects.none(),
+            'recent_releases': DeploymentRelease.objects.none(),
+            'pending_approvals': ApprovalRequest.objects.none(),
+            'host_metrics': [],
+        }
+
+    cutoff = (now or timezone.now()) - timezone.timedelta(hours=24)
+    active_alerts = AlertEvent.objects.filter(
+        host_id__in=host_ids,
+        status__in=(AlertEvent.STATUS_OPEN, AlertEvent.STATUS_PROCESSING),
+    ).select_related('host')
+    recent_releases = DeploymentRelease.objects.filter(
+        hosts__in=host_ids,
+        created_at__gte=cutoff,
+    ).select_related('app').distinct()
+    pending_approvals = ApprovalRequest.objects.filter(
+        request_type__in=(ApprovalRequest.TYPE_DEPLOYMENT, ApprovalRequest.TYPE_ROLLBACK),
+        status=ApprovalRequest.STATUS_PENDING,
+        deployment_release__hosts__in=host_ids,
+    ).select_related('deployment_release__app').distinct()
+    metrics = latest_metric_map(hosts)
+    host_metrics = []
+    for host in hosts:
+        host_metrics.append({
+            'host': host,
+            'cpu': metrics.get((host.id, MetricSample.METRIC_CPU)),
+            'memory': metrics.get((host.id, MetricSample.METRIC_MEMORY)),
+            'disk': metrics.get((host.id, MetricSample.METRIC_DISK)),
+        })
+    return {
+        'hosts': hosts,
+        'active_alerts': active_alerts,
+        'recent_releases': recent_releases,
+        'pending_approvals': pending_approvals,
+        'host_metrics': host_metrics,
+    }
 
 
 def validate_remote_path(remote_path):

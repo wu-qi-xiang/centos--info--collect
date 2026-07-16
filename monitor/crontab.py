@@ -2,12 +2,14 @@ import time
 
 from PyLinux.settings import EMAIL_HOST_USER
 from .models import Monitor
-from devops.models import AlertEvent
+from devops.models import AlertEvent, AuditLog
 from devops.services import cleanup_metric_samples, record_alert, record_metric_sample, resolve_alert
+from devops.services import scan_compliance_baselines
 from RemoteLinux.models import NewLinux
 from RemoteLinux.collectors import collect_remote_usage
 from RemoteLinux.ssh_utils import create_host_ssh_client, describe_ssh_error
 from django.core.mail import send_mail    # 导入django发送邮件模块
+from .services import poll_alertmanager_firing_alerts
 
 
 def parse_percent(value, default=None):
@@ -107,3 +109,28 @@ def monitor_send_email():
             if ssh:
                 ssh.close()
     cleanup_metric_samples()
+
+
+def poll_alertmanager_notifications():
+    result = poll_alertmanager_firing_alerts()
+    print(
+        "Alertmanager轮询完成：对接%s个，收到%s条，firing%s条，尝试%s条，推送%s条，重复跳过%s条，错误%s个" % (
+            result.get('alertmanagers', 0),
+            result.get('received', 0),
+            result.get('firing', 0),
+            result.get('attempted', 0),
+            result.get('pushed', 0),
+            result.get('skipped', 0),
+            len(result.get('errors') or []),
+        )
+    )
+    return result
+
+
+def scan_compliance_baselines_daily():
+    scanned = scan_compliance_baselines()
+    AuditLog.objects.create(
+        user='system', action='定期扫描合规基线', target_type='ComplianceBaseline',
+        detail='扫描主机数=%s' % scanned,
+    )
+    return scanned

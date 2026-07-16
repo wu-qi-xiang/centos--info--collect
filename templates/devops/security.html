@@ -134,5 +134,33 @@
             </div></div>
         </div>
     </div>
+    <div class="row g-3 mt-1">
+        {% if can_manage_compliance %}
+        <div class="col-lg-4"><div class="card"><div class="card-header">新增合规基线</div><div class="card-body">
+            <form method="post" action="{% if compliance_edit_baseline %}{% url 'devops:compliance_baseline_update' compliance_edit_baseline.id %}{% else %}{% url 'devops:compliance_baseline_create' %}{% endif %}">{% csrf_token %}
+                <div class="mb-2"><label class="form-label">名称</label>{{ compliance_form.name }}</div>
+                <div class="mb-2"><label class="form-label">类型</label>{{ compliance_form.baseline_type }}</div>
+                <div class="mb-2"><label class="form-label">服务名</label>{{ compliance_form.service_name }}</div>
+                <div class="mb-2"><label class="form-label">文件路径</label>{{ compliance_form.file_path }}</div>
+                <div class="mb-2"><label class="form-label">预期 SHA-256</label>{{ compliance_form.expected_sha256 }}</div>
+                <div class="mb-2"><label class="form-label">主机</label>{{ compliance_form.hosts }}</div>
+                <button class="btn btn-primary" type="submit">{% if compliance_edit_baseline %}更新基线{% else %}保存基线{% endif %}</button>{% if compliance_edit_baseline %} <a class="btn btn-outline-secondary" href="{% url 'devops:security_settings' %}">取消</a>{% endif %}
+            </form>
+        </div></div></div>
+        <div class="col-lg-8"><div class="card"><div class="card-header">合规基线</div><div class="card-body table-responsive"><table class="table table-sm align-middle">
+            <tr><th>名称</th><th>类型</th><th>目标</th><th>主机</th><th>操作</th></tr>
+            {% for baseline in compliance_baselines %}<tr>
+                <td>{{ baseline.name }}</td><td>{{ baseline.get_baseline_type_display }}</td>
+                <td>{% if baseline.baseline_type == 'service_active' %}{{ baseline.service_name }}{% else %}{{ baseline.file_path }}{% endif %}</td>
+                <td>{% for host in baseline.hosts.all %}{{ host.linux_name }}{% if not forloop.last %}, {% endif %}{% endfor %}</td>
+                <td class="text-nowrap"><a class="btn btn-sm btn-outline-secondary" href="{% url 'devops:security_settings' %}?edit={{ baseline.id }}">编辑</a> <form class="d-inline" method="post" action="{% url 'devops:compliance_baseline_scan' baseline.id %}">{% csrf_token %}<button class="btn btn-sm btn-outline-primary" type="submit">扫描</button></form><form class="d-inline" method="post" action="{% url 'devops:compliance_baseline_delete' baseline.id %}">{% csrf_token %}<button class="btn btn-sm btn-outline-danger" type="submit">删除</button></form></td>
+            </tr>{% empty %}<tr><td colspan="5" class="text-muted">暂无合规基线</td></tr>{% endfor %}
+        </table></div></div></div>
+        {% endif %}
+        <div class="col-12"><div class="card"><div class="card-header">最近合规扫描结果</div><div class="card-body table-responsive"><table class="table table-sm">
+            <tr><th>基线</th><th>主机</th><th>状态</th><th>实际值</th><th>扫描时间</th></tr>
+            {% for result in compliance_results %}<tr><td>{{ result.baseline.name }}</td><td>{{ result.host.linux_name }}</td><td>{{ result.get_state_display }}</td><td>{{ result.actual_value|default:'-' }}</td><td>{{ result.checked_at|date:"Y-m-d H:i:s" }}</td></tr>{% empty %}<tr><td colspan="5" class="text-muted">暂无扫描结果</td></tr>{% endfor %}
+        </table></div></div></div>
+    </div>
 </div>
 {% endblock %}

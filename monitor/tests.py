@@ -1,6 +1,7 @@
 import json
 import io
 import socket
+import ssl
 
 from django.test import TestCase
 from django.urls import reverse
@@ -11,9 +12,20 @@ from devops.models import MetricSample
 from PyLinux.crypto import decrypt_text
 from RemoteLinux.models import User
 from RemoteLinux.models import NewLinux
+from devops.services import record_alert, resolve_alert
 from . import services
-from .crontab import monitor_send_email, parse_percent, record_collection_failure, send_threshold_alert
+from .crontab import monitor_send_email, parse_percent, poll_alertmanager_notifications, record_collection_failure, send_threshold_alert, scan_compliance_baselines_daily
 from .models import AlertmanagerConfig, AlertNotificationConfig, Monitor, PrometheusConfig
+
+
+class MockWebhookResponse(object):
+	def __init__(self, body, status=200):
+		self.body = body
+		self.status = status
+		self.code = status
+
+	def read(self):
+		return self.body.encode('utf-8')
 
 
 class MonitorSecurityTests(TestCase):
@@ -32,6 +44,12 @@ class MonitorSecurityTests(TestCase):
 
 	def set_role(self, role):
 		DevOpsRole.objects.update_or_create(user=self.user, defaults={'role': role})
+
+	@mock.patch('monitor.crontab.scan_compliance_baselines', return_value=3)
+	def test_daily_compliance_scan_is_scheduled_and_audited(self, scan):
+		self.assertEqual(scan_compliance_baselines_daily(), 3)
+		scan.assert_called_once_with()
+		self.assertTrue(AuditLog.objects.filter(action='定期扫描合规基线', user='system').exists())
 
 	def vue_data(self, response):
 		return json.loads(response.context['vue_page_payload'])['data']
@@ -289,10 +307,17 @@ class MonitorSecurityTests(TestCase):
 		})
 		self.assertEqual(data['integrations'][0]['edit_url'], reverse('monitor:prometheus_update', args=[prometheus.id]))
 		self.assertEqual(data['integrations'][1]['delete_url'], reverse('monitor:alertmanager_delete', args=[alertmanager.id]))
+		self.assertEqual(data['prometheus_integrations'][0]['url'], 'http://prometheus.local:9090')
+		self.assertEqual(data['alertmanager_integrations'][0]['url'], 'http://alertmanager.local:9093')
 		self.assertEqual(data['prometheus_form']['action'], reverse('monitor:prometheus_config'))
 		self.assertEqual(data['prometheus_form']['test_action'], reverse('monitor:prometheus_test'))
 		self.assertEqual(data['alertmanager_form']['action'], reverse('monitor:alertmanager_create'))
 		self.assertEqual(data['alertmanager_form']['test_action'], reverse('monitor:alertmanager_test'))
+		with open('static/js/ops-vue-pages.js', 'r') as handle:
+			vue_source = handle.read()
+		self.assertNotIn('id="monitor-integrations-kind"', vue_source)
+		self.assertNotIn('id="monitor-integrations-query"', vue_source)
+		self.assertNotIn('monitor-integrations-\' + group.key + \'-selector', vue_source)
 
 	def test_operator_can_create_multiple_named_prometheus_integrations(self):
 		self.set_role(DevOpsRole.ROLE_OPERATOR)
@@ -475,6 +500,17 @@ class MonitorSecurityTests(TestCase):
 		self.assertEqual([item['name'] for item in data['integrations']], ['Dashboard Prometheus', 'Dashboard Alertmanager'])
 		self.assertEqual([item['kind'] for item in data['prometheus_integrations']], ['prometheus'])
 		self.assertEqual([item['kind'] for item in data['alertmanager_integrations']], ['alertmanager'])
+		self.assertEqual(data['prometheus_integrations'][0]['url'], 'http://prometheus.local:9090')
+		self.assertEqual(data['alertmanager_integrations'][0]['url'], 'http://alertmanager.local:9093')
+		with open('static/js/ops-vue-pages.js', 'r') as handle:
+			vue_source = handle.read()
+		self.assertIn('监控对接列表', vue_source)
+		self.assertIn('id="monitor-home-integration-kind"', vue_source)
+		self.assertIn('id="monitor-home-integration-query"', vue_source)
+		self.assertIn('aria-label="查询监控对接"', vue_source)
+		self.assertIn('ops-integration-filter-query', vue_source)
+		self.assertIn('filteredMonitorIntegrationItems', vue_source)
+		self.assertNotIn('monitor-home-\' + group.key + \'-selector', vue_source)
 
 	def test_alert_query_requires_enabled_prometheus_config(self):
 		response = self.client.get(reverse('monitor:alert_query'), {'query': 'up'})
@@ -1288,7 +1324,7 @@ class MonitorSecurityTests(TestCase):
 		self.assertIn('this.expandedRuleCells.query = [];', vue_source)
 		self.assertIn('this.expandedRuleCells.labels = [];', vue_source)
 
-		static_version = '20260714-promql-scroll-width-sync'
+		static_version = '20260715-integration-filter'
 		self.assertEqual(page_template.count('?v=%s' % static_version), 2)
 		self.assertIn("static 'css/ops-vue-pages.css'", page_template)
 		self.assertIn("static 'js/ops-vue-pages.js'", page_template)
@@ -1309,7 +1345,7 @@ class MonitorSecurityTests(TestCase):
 			enabled=True,
 			webhook_url='',
 		)
-		AlertNotificationConfig.objects.create(
+		wecom_config = AlertNotificationConfig.objects.create(
 			provider=AlertNotificationConfig.PROVIDER_WECOM,
 			name='Configured Channel',
 			enabled=False,
@@ -1328,20 +1364,35 @@ class MonitorSecurityTests(TestCase):
 		self.assertEqual(len(list_data['notification_integrations']), 1)
 		item = list_data['notification_integrations'][0]
 		self.assertEqual(set(item), {
-			'provider', 'provider_label', 'name', 'enabled', 'configured', 'updated_at', 'configure_url',
+			'id', 'provider', 'provider_label', 'name', 'alert_name', 'alertmanager_id',
+			'alertmanager_name', 'alert_type', 'created_at', 'created_by',
+			'enabled', 'configured', 'updated_at', 'configure_url', 'edit_url', 'delete_url',
 		})
+		self.assertEqual(item['id'], wecom_config.id)
 		self.assertEqual(item['provider'], AlertNotificationConfig.PROVIDER_WECOM)
+		self.assertEqual(item['name'], 'Configured Channel')
+		self.assertEqual(item['alert_name'], '')
+		self.assertIsNone(item['alertmanager_id'])
+		self.assertEqual(item['alertmanager_name'], '')
+		self.assertEqual(item['alert_type'], '企业微信')
+		self.assertEqual(item['created_by'], '')
+		self.assertEqual(item['created_at'], '')
 		self.assertFalse(item['enabled'])
 		self.assertTrue(item['configured'])
 		self.assertRegex(item['updated_at'], r'^\d{4}-\d{2}-\d{2} \d{2}:\d{2}$')
 		self.assertEqual(item['configure_url'], reverse('monitor:alert_notifications'))
+		self.assertEqual(item['edit_url'], '%s?edit=%s' % (reverse('monitor:alert_notifications'), wecom_config.id))
+		self.assertEqual(item['delete_url'], reverse('monitor:alert_notification_delete', args=[wecom_config.id]))
 
 		self.assertEqual(config_response.status_code, 200)
 		self.assertFalse(config_data['can_manage_notifications'])
 		self.assertEqual(config_data['list_url'], reverse('monitor:alert_notification_list'))
 		self.assertTrue(config_data['notifications']['wecom']['has_webhook'])
 		self.assertTrue(config_data['notifications']['wecom']['configured'])
+		self.assertEqual(config_data['notifications']['wecom']['name'], 'Configured Channel')
+		self.assertEqual(config_data['notifications']['wecom']['alert_name'], '')
 		self.assertEqual(config_data['notifications']['wecom']['webhook_display'], '已配置')
+		self.assertEqual(config_data['notifications']['wecom']['webhook_url'], '')
 		self.assertNotIn('notify.example.test', list_response.context['vue_page_payload'])
 		self.assertNotIn('recognizable-fragment', list_response.context['vue_page_payload'])
 		self.assertNotIn('notify.example.test', config_response.context['vue_page_payload'])
@@ -1354,6 +1405,46 @@ class MonitorSecurityTests(TestCase):
 		self.assertEqual(list_actions['告警通知'], reverse('monitor:alert_notifications'))
 		self.assertEqual(config_actions['告警列表'], reverse('monitor:alert_notification_list'))
 		self.assertEqual(self.client.post(reverse('monitor:alert_notification_list')).status_code, 405)
+		with open('static/js/ops-vue-pages.js', 'r') as handle:
+			vue_source = handle.read()
+		self.assertIn('id="alert-notification-provider"', vue_source)
+		self.assertIn('id="alert-notification-query"', vue_source)
+		self.assertIn('filteredAlertNotificationIntegrations', vue_source)
+		self.assertIn('activeAlertNotificationGroup', vue_source)
+		self.assertIn('ops-notification-list-summary', vue_source)
+		self.assertIn('ops-notification-table', vue_source)
+		self.assertNotIn('<th>通知名称</th>', vue_source)
+		self.assertIn('<th>告警类型</th>', vue_source)
+		self.assertIn('<th>Alertmanager 名称</th>', vue_source)
+		self.assertIn('integration.alertmanagerName', vue_source)
+		self.assertIn('<th>创建时间</th>', vue_source)
+		self.assertIn('<th>创建人员</th>', vue_source)
+		self.assertNotIn('<small :class="integration.configured', vue_source)
+		self.assertIn('ops-notification-icon-action', vue_source)
+		self.assertIn('integration.deleteUrl', vue_source)
+		self.assertIn('data.editing_provider', vue_source)
+
+	def test_operator_alert_notification_config_clears_transient_fields_on_refresh(self):
+		self.set_role(DevOpsRole.ROLE_OPERATOR)
+		webhook_url = 'https://qyapi.weixin.qq.com/cgi-bin/webhook/send?key=plain-key'
+		AlertNotificationConfig.objects.create(
+			provider=AlertNotificationConfig.PROVIDER_WECOM,
+			name='Configured Channel',
+			alert_name='Configured Alert',
+			enabled=True,
+			webhook_url=webhook_url,
+		)
+
+		response = self.client.get(reverse('monitor:alert_notifications'))
+		data = self.vue_data(response)
+
+		self.assertTrue(data['can_manage_notifications'])
+		self.assertEqual(data['notifications']['wecom']['name'], 'Configured Channel')
+		self.assertEqual(data['notifications']['wecom']['alert_name'], '')
+		self.assertEqual(data['notifications']['wecom']['webhook_url'], '')
+		self.assertEqual(data['notifications']['wecom']['webhook_display'], '已配置')
+		self.assertNotContains(response, 'plain-key')
+		self.assertNotContains(response, 'Configured Alert')
 
 	def test_alert_notification_config_uses_read_only_vue_state_for_viewer(self):
 		self.set_role(DevOpsRole.ROLE_VIEWER)
@@ -1382,7 +1473,7 @@ class MonitorSecurityTests(TestCase):
 		})
 
 		self.assertEqual(response.status_code, 403)
-		self.assertEqual(AlertNotificationConfig.objects.count(), 0)
+		self.assertEqual(AlertNotificationConfig.objects.count(), 1)
 
 	def test_operator_can_save_alert_notifications_encrypted(self):
 		self.set_role(DevOpsRole.ROLE_OPERATOR)
@@ -1390,23 +1481,199 @@ class MonitorSecurityTests(TestCase):
 		response = self.client.post(reverse('monitor:alert_notifications'), {
 			'feishu_enabled': 'on',
 			'feishu_name': 'feishu',
+			'feishu_alert_name': 'feishu alert',
 			'feishu_webhook_url': 'https://open.feishu.cn/open-apis/bot/v2/hook/test',
 			'wecom_enabled': 'on',
 			'wecom_name': 'wecom',
-			'wecom_webhook_url': 'https://qyapi.weixin.qq.com/cgi-bin/webhook/send',
+			'wecom_alert_name': 'wecom alert',
+			'wecom_webhook_url': 'https://qyapi.weixin.qq.com/cgi-bin/webhook/send?key=test-key',
 		})
 
-		self.assertEqual(response.status_code, 302)
-		self.assertEqual(response.url, reverse('monitor:alert_notification_list'))
+		data = self.vue_data(response)
+
+		self.assertEqual(response.status_code, 200)
+		self.assertEqual(data['save_message'], '告警通知保存成功')
+		self.assertTrue(data['save_ok'])
+		self.assertEqual(data['notifications']['feishu']['alert_name'], '')
+		self.assertEqual(data['notifications']['wecom']['alert_name'], '')
+		self.assertEqual(data['notifications']['feishu']['webhook_url'], '')
+		self.assertEqual(data['notifications']['wecom']['webhook_url'], '')
+		self.assertEqual(data['notifications']['feishu']['webhook_display'], '已配置')
+		self.assertEqual(data['notifications']['wecom']['webhook_display'], '已配置')
 		feishu = AlertNotificationConfig.objects.get(provider=AlertNotificationConfig.PROVIDER_FEISHU)
 		wecom = AlertNotificationConfig.objects.get(provider=AlertNotificationConfig.PROVIDER_WECOM)
 		self.assertTrue(feishu.enabled)
 		self.assertTrue(wecom.enabled)
+		self.assertEqual(feishu.name, 'feishu')
+		self.assertEqual(feishu.alert_name, 'feishu alert')
+		self.assertIsNotNone(feishu.created_at)
+		self.assertEqual(feishu.created_by, 'tester')
+		self.assertEqual(wecom.name, 'wecom')
+		self.assertEqual(wecom.alert_name, 'wecom alert')
+		self.assertIsNotNone(wecom.created_at)
+		self.assertEqual(wecom.created_by, 'tester')
 		self.assertTrue(feishu.webhook_url.startswith('enc:'))
 		self.assertEqual(decrypt_text(feishu.webhook_url), 'https://open.feishu.cn/open-apis/bot/v2/hook/test')
+		self.assertEqual(decrypt_text(wecom.webhook_url), 'https://qyapi.weixin.qq.com/cgi-bin/webhook/send?key=test-key')
+		list_data = self.vue_data(self.client.get(reverse('monitor:alert_notification_list')))
+		wecom_item = [
+			item for item in list_data['notification_integrations']
+			if item['provider'] == AlertNotificationConfig.PROVIDER_WECOM
+		][0]
+		self.assertRegex(wecom_item['created_at'], r'^\d{4}-\d{2}-\d{2} \d{2}:\d{2}$')
+		self.assertEqual(wecom_item['created_by'], 'tester')
 		self.assertTrue(AuditLog.objects.filter(action='保存告警通知').exists())
 
-	def test_alert_notifications_blank_webhook_preserves_existing_value(self):
+	def test_operator_can_add_multiple_alert_notifications_for_same_provider(self):
+		self.set_role(DevOpsRole.ROLE_OPERATOR)
+
+		first = self.client.post(reverse('monitor:alert_notifications'), {
+			'provider': AlertNotificationConfig.PROVIDER_WECOM,
+			'wecom_enabled': 'on',
+			'wecom_name': 'wecom first',
+			'wecom_alert_name': 'first alert',
+			'wecom_webhook_url': 'https://qyapi.weixin.qq.com/cgi-bin/webhook/send?key=first-key',
+		})
+		second = self.client.post(reverse('monitor:alert_notifications'), {
+			'provider': AlertNotificationConfig.PROVIDER_WECOM,
+			'wecom_enabled': 'on',
+			'wecom_name': 'wecom second',
+			'wecom_alert_name': 'second alert',
+			'wecom_webhook_url': 'https://qyapi.weixin.qq.com/cgi-bin/webhook/send?key=second-key',
+		})
+
+		self.assertEqual(first.status_code, 200)
+		self.assertEqual(second.status_code, 200)
+		wecom_configs = AlertNotificationConfig.objects.filter(
+			provider=AlertNotificationConfig.PROVIDER_WECOM
+		).order_by('id')
+		self.assertEqual(wecom_configs.count(), 2)
+		self.assertEqual([item.name for item in wecom_configs], ['wecom first', 'wecom second'])
+		self.assertEqual(decrypt_text(wecom_configs[0].webhook_url), 'https://qyapi.weixin.qq.com/cgi-bin/webhook/send?key=first-key')
+		self.assertEqual(decrypt_text(wecom_configs[1].webhook_url), 'https://qyapi.weixin.qq.com/cgi-bin/webhook/send?key=second-key')
+		list_data = self.vue_data(self.client.get(reverse('monitor:alert_notification_list')))
+		wecom_items = [
+			item for item in list_data['notification_integrations']
+			if item['provider'] == AlertNotificationConfig.PROVIDER_WECOM
+		]
+		self.assertEqual(len(wecom_items), 2)
+		self.assertEqual(set(item['name'] for item in wecom_items), set(['wecom first', 'wecom second']))
+
+	def test_operator_can_edit_alert_notification_without_showing_other_provider_form(self):
+		self.set_role(DevOpsRole.ROLE_OPERATOR)
+		feishu = AlertNotificationConfig.objects.create(
+			provider=AlertNotificationConfig.PROVIDER_FEISHU,
+			name='feishu existing',
+			alert_name='feishu alert',
+			enabled=True,
+			webhook_url='https://open.feishu.cn/open-apis/bot/v2/hook/original',
+		)
+		wecom = AlertNotificationConfig.objects.create(
+			provider=AlertNotificationConfig.PROVIDER_WECOM,
+			name='wecom existing',
+			alert_name='wecom alert',
+			enabled=True,
+			webhook_url='https://qyapi.weixin.qq.com/cgi-bin/webhook/send?key=original',
+		)
+
+		edit_response = self.client.get(reverse('monitor:alert_notifications'), {'edit': wecom.id})
+		edit_data = self.vue_data(edit_response)
+
+		self.assertEqual(edit_response.status_code, 200)
+		self.assertEqual(edit_data['editing_notification_id'], wecom.id)
+		self.assertEqual(edit_data['editing_provider'], AlertNotificationConfig.PROVIDER_WECOM)
+		self.assertFalse(edit_data['notifications']['feishu']['editing'])
+		self.assertTrue(edit_data['notifications']['wecom']['editing'])
+		self.assertEqual(edit_data['notifications']['wecom']['name'], 'wecom existing')
+		self.assertEqual(edit_data['notifications']['wecom']['alert_name'], 'wecom alert')
+		self.assertEqual(edit_data['notifications']['wecom']['action'], reverse('monitor:alert_notification_update', args=[wecom.id]))
+		self.assertEqual(edit_data['notifications']['wecom']['webhook_url'], '')
+		self.assertNotContains(edit_response, 'original')
+
+		update_response = self.client.post(reverse('monitor:alert_notification_update', args=[wecom.id]), {
+			'provider': AlertNotificationConfig.PROVIDER_WECOM,
+			'wecom_enabled': 'on',
+			'wecom_name': 'wecom updated',
+			'wecom_alert_name': 'wecom updated alert',
+			'wecom_webhook_url': '',
+			'feishu_enabled': 'on',
+			'feishu_name': 'should not touch feishu',
+			'feishu_alert_name': 'wrong',
+			'feishu_webhook_url': 'https://open.feishu.cn/open-apis/bot/v2/hook/wrong',
+		})
+
+		self.assertEqual(update_response.status_code, 200)
+		self.assertEqual(AlertNotificationConfig.objects.count(), 2)
+		wecom.refresh_from_db()
+		feishu.refresh_from_db()
+		self.assertEqual(wecom.name, 'wecom updated')
+		self.assertEqual(wecom.alert_name, 'wecom updated alert')
+		self.assertEqual(decrypt_text(wecom.webhook_url), 'https://qyapi.weixin.qq.com/cgi-bin/webhook/send?key=original')
+		self.assertEqual(feishu.name, 'feishu existing')
+		self.assertEqual(feishu.alert_name, 'feishu alert')
+
+	def test_alert_notification_alertmanager_select_saves_and_prefills(self):
+		self.set_role(DevOpsRole.ROLE_OPERATOR)
+		alertmanager = AlertmanagerConfig.objects.create(
+			name='生产 Alertmanager',
+			alertmanager_url='http://alertmanager.local:9093',
+			enabled=True,
+		)
+
+		create_response = self.client.post(reverse('monitor:alert_notifications'), {
+			'provider': AlertNotificationConfig.PROVIDER_WECOM,
+			'wecom_enabled': 'on',
+			'wecom_name': 'wecom with alertmanager',
+			'wecom_alert_name': 'alertmanager alert',
+			'wecom_alertmanager_id': str(alertmanager.id),
+			'wecom_webhook_url': 'https://qyapi.weixin.qq.com/cgi-bin/webhook/send?key=alertmanager',
+		})
+
+		self.assertEqual(create_response.status_code, 200)
+		config = AlertNotificationConfig.objects.get(provider=AlertNotificationConfig.PROVIDER_WECOM)
+		self.assertEqual(config.alertmanager_id, alertmanager.id)
+		list_data = self.vue_data(self.client.get(reverse('monitor:alert_notification_list')))
+		item = list_data['notification_integrations'][0]
+		self.assertEqual(item['alertmanager_id'], alertmanager.id)
+		self.assertEqual(item['alertmanager_name'], '生产 Alertmanager')
+		edit_data = self.vue_data(self.client.get(reverse('monitor:alert_notifications'), {'edit': config.id}))
+		self.assertEqual(edit_data['alertmanager_options'], [{'id': alertmanager.id, 'name': '生产 Alertmanager'}])
+		self.assertEqual(edit_data['notifications']['wecom']['alertmanager_id'], str(alertmanager.id))
+		self.assertNotIn('alertmanager.local', json.dumps(edit_data))
+
+		other = AlertmanagerConfig.objects.create(
+			name='备用 Alertmanager',
+			alertmanager_url='http://backup-alertmanager.local:9093',
+			enabled=True,
+		)
+		update_response = self.client.post(reverse('monitor:alert_notification_update', args=[config.id]), {
+			'provider': AlertNotificationConfig.PROVIDER_WECOM,
+			'wecom_enabled': 'on',
+			'wecom_name': 'wecom with alertmanager',
+			'wecom_alert_name': 'alertmanager alert',
+			'wecom_alertmanager_id': str(other.id),
+			'wecom_webhook_url': '',
+		})
+		self.assertEqual(update_response.status_code, 200)
+		config.refresh_from_db()
+		self.assertEqual(config.alertmanager_id, other.id)
+
+	def test_operator_can_delete_alert_notification(self):
+		self.set_role(DevOpsRole.ROLE_OPERATOR)
+		config = AlertNotificationConfig.objects.create(
+			provider=AlertNotificationConfig.PROVIDER_WECOM,
+			name='delete me',
+			enabled=True,
+			webhook_url='https://qyapi.weixin.qq.com/cgi-bin/webhook/send?key=delete',
+		)
+
+		response = self.client.post(reverse('monitor:alert_notification_delete', args=[config.id]))
+
+		self.assertEqual(response.status_code, 302)
+		self.assertEqual(response.url, reverse('monitor:alert_notification_list'))
+		self.assertFalse(AlertNotificationConfig.objects.filter(id=config.id).exists())
+
+	def test_alert_notifications_blank_webhook_does_not_create_new_notification(self):
 		self.set_role(DevOpsRole.ROLE_OPERATOR)
 		config = AlertNotificationConfig.objects.create(
 			provider=AlertNotificationConfig.PROVIDER_FEISHU,
@@ -1414,20 +1681,44 @@ class MonitorSecurityTests(TestCase):
 			enabled=True,
 			webhook_url='https://open.feishu.cn/open-apis/bot/v2/hook/original',
 		)
-		encrypted = config.webhook_url
 
 		response = self.client.post(reverse('monitor:alert_notifications'), {
 			'feishu_enabled': 'on',
 			'feishu_name': 'new',
+			'feishu_alert_name': 'new alert',
 			'feishu_webhook_url': '',
 		})
 
-		self.assertEqual(response.status_code, 302)
-		self.assertEqual(response.url, reverse('monitor:alert_notification_list'))
+		data = self.vue_data(response)
+
+		self.assertEqual(response.status_code, 400)
+		self.assertEqual(data['save_message'], '告警通知保存失败，请检查表单信息')
+		self.assertFalse(data['save_ok'])
 		config.refresh_from_db()
-		self.assertEqual(config.webhook_url, encrypted)
 		self.assertEqual(config.decrypted_webhook_url, 'https://open.feishu.cn/open-apis/bot/v2/hook/original')
-		self.assertEqual(config.name, 'new')
+		self.assertEqual(config.name, 'old')
+		self.assertEqual(config.alert_name, '')
+		self.assertEqual(AlertNotificationConfig.objects.count(), 1)
+
+	def test_alert_notifications_blank_alert_name_stays_blank(self):
+		self.set_role(DevOpsRole.ROLE_OPERATOR)
+
+		response = self.client.post(reverse('monitor:alert_notifications'), {
+			'feishu_enabled': 'on',
+			'feishu_name': 'feishu',
+			'feishu_alert_name': '',
+			'feishu_webhook_url': 'https://open.feishu.cn/open-apis/bot/v2/hook/test',
+		})
+
+		data = self.vue_data(response)
+
+		self.assertEqual(response.status_code, 200)
+		self.assertEqual(data['save_message'], '告警通知保存成功')
+		self.assertTrue(data['save_ok'])
+		self.assertEqual(data['notifications']['feishu']['alert_name'], '')
+		config = AlertNotificationConfig.objects.get(provider=AlertNotificationConfig.PROVIDER_FEISHU)
+		self.assertEqual(config.name, 'feishu')
+		self.assertEqual(config.alert_name, '')
 
 	def test_alert_notifications_rejects_invalid_webhook(self):
 		self.set_role(DevOpsRole.ROLE_OPERATOR)
@@ -1438,8 +1729,44 @@ class MonitorSecurityTests(TestCase):
 		})
 
 		self.assertEqual(response.status_code, 400)
+		data = self.vue_data(response)
+		self.assertEqual(data['save_message'], '告警通知保存失败，请检查表单信息')
+		self.assertFalse(data['save_ok'])
+		self.assertEqual(data['notifications']['feishu']['webhook_url'], 'javascript:alert(1)')
 		self.assertContains(response, 'Webhook 地址必须是 http:// 或 https://', status_code=400)
 		self.assertEqual(AlertNotificationConfig.objects.count(), 0)
+
+	def test_alert_notifications_invalid_update_keeps_database_unchanged(self):
+		self.set_role(DevOpsRole.ROLE_OPERATOR)
+		config = AlertNotificationConfig.objects.create(
+			provider=AlertNotificationConfig.PROVIDER_WECOM,
+			name='old wecom',
+			alert_name='old alert',
+			enabled=True,
+			webhook_url='https://qyapi.weixin.qq.com/cgi-bin/webhook/send?key=old-key',
+		)
+		encrypted = config.webhook_url
+
+		response = self.client.post(reverse('monitor:alert_notifications'), {
+			'provider': AlertNotificationConfig.PROVIDER_WECOM,
+			'wecom_enabled': 'on',
+			'wecom_name': 'new wecom',
+			'wecom_alert_name': 'new alert',
+			'wecom_webhook_url': 'javascript:alert(1)',
+		})
+		data = self.vue_data(response)
+
+		self.assertEqual(response.status_code, 400)
+		self.assertEqual(data['save_message'], '告警通知保存失败，请检查表单信息')
+		self.assertEqual(data['notifications']['wecom']['name'], 'new wecom')
+		self.assertEqual(data['notifications']['wecom']['alert_name'], 'new alert')
+		self.assertEqual(data['notifications']['wecom']['webhook_url'], 'javascript:alert(1)')
+		config.refresh_from_db()
+		self.assertEqual(config.name, 'old wecom')
+		self.assertEqual(config.alert_name, 'old alert')
+		self.assertTrue(config.enabled)
+		self.assertEqual(config.webhook_url, encrypted)
+		self.assertEqual(AlertNotificationConfig.objects.count(), 1)
 
 	@mock.patch('monitor.views.send_alert_notification', return_value={'ok': True, 'message': '测试通知发送成功'})
 	def test_operator_can_test_alert_notification_without_saving(self, send_mock):
@@ -1449,6 +1776,7 @@ class MonitorSecurityTests(TestCase):
 			'provider': AlertNotificationConfig.PROVIDER_WECOM,
 			'wecom_enabled': 'on',
 			'wecom_name': 'wecom',
+			'wecom_alert_name': 'wecom alert',
 			'wecom_webhook_url': 'https://qyapi.weixin.qq.com/cgi-bin/webhook/send',
 		})
 
@@ -1456,6 +1784,372 @@ class MonitorSecurityTests(TestCase):
 		self.assertContains(response, '测试通知发送成功')
 		self.assertEqual(AlertNotificationConfig.objects.count(), 0)
 		self.assertEqual(send_mock.call_args[0][0].provider, AlertNotificationConfig.PROVIDER_WECOM)
+		self.assertEqual(send_mock.call_args[0][0].name, 'wecom')
+		self.assertEqual(send_mock.call_args[0][0].alert_name, 'wecom alert')
+
+	@mock.patch('monitor.services.urlrequest.urlopen')
+	def test_wecom_receives_real_alert_when_alert_is_created(self, urlopen_mock):
+		urlopen_mock.return_value = MockWebhookResponse('{"errcode":0,"errmsg":"ok"}')
+		host = NewLinux.objects.create(
+			linux_name='webhook-host',
+			linux_ip='127.0.0.1',
+			linux_hostname='webhook-host',
+			linux_port='22',
+			linux_user='root',
+			linux_passwd='',
+		)
+		AlertNotificationConfig.objects.create(
+			provider=AlertNotificationConfig.PROVIDER_WECOM,
+			name='wecom',
+			alert_name='CPU 告警',
+			enabled=True,
+			webhook_url='https://qyapi.weixin.qq.com/cgi-bin/webhook/send',
+		)
+
+		alert, created = record_alert(host, 'cpu', 'CPU 使用率超过阈值', AlertEvent.LEVEL_CRITICAL)
+
+		self.assertTrue(created)
+		self.assertEqual(alert.status, AlertEvent.STATUS_OPEN)
+		urlopen_mock.assert_called_once()
+		request = urlopen_mock.call_args[0][0]
+		payload = json.loads(request.data.decode('utf-8'))
+		self.assertEqual(payload['msgtype'], 'text')
+		content = payload['text']['content']
+		self.assertIn('告警通知：CPU 告警', content)
+		self.assertIn('告警名称：CPU 告警', content)
+		self.assertIn('主机：webhook-host', content)
+		self.assertIn('指标：cpu', content)
+		self.assertIn('状态：open', content)
+		self.assertIn('内容：CPU 使用率超过阈值', content)
+		self.assertNotIn('qyapi.weixin.qq.com', content)
+
+	@mock.patch('monitor.views.send_alert_notification')
+	def test_alertmanager_webhook_pushes_firing_to_bound_wecom_notification(self, send_mock):
+		send_mock.return_value = {'ok': True, 'message': '告警通知发送成功'}
+		bound = AlertmanagerConfig.objects.create(
+			name='Bound Alertmanager',
+			alertmanager_url='http://bound-alertmanager.local:9093',
+			enabled=True,
+		)
+		other = AlertmanagerConfig.objects.create(
+			name='Other Alertmanager',
+			alertmanager_url='http://other-alertmanager.local:9093',
+			enabled=True,
+		)
+		bound_wecom = AlertNotificationConfig.objects.create(
+			provider=AlertNotificationConfig.PROVIDER_WECOM,
+			alertmanager=bound,
+			name='bound wecom',
+			alert_name='绑定告警',
+			enabled=True,
+			webhook_url='https://qyapi.weixin.qq.com/cgi-bin/webhook/send?key=bound',
+		)
+		AlertNotificationConfig.objects.create(
+			provider=AlertNotificationConfig.PROVIDER_WECOM,
+			alertmanager=other,
+			name='other wecom',
+			alert_name='其他告警',
+			enabled=True,
+			webhook_url='https://qyapi.weixin.qq.com/cgi-bin/webhook/send?key=other',
+		)
+		AlertNotificationConfig.objects.create(
+			provider=AlertNotificationConfig.PROVIDER_FEISHU,
+			alertmanager=bound,
+			name='bound feishu',
+			enabled=True,
+			webhook_url='https://open.feishu.cn/open-apis/bot/v2/hook/bound',
+		)
+		payload = {
+			'status': 'firing',
+			'alerts': [
+				{
+					'status': 'firing',
+					'labels': {'alertname': 'HighCPU', 'instance': 'node-1'},
+					'annotations': {'summary': 'CPU 高', 'description': 'CPU 使用率过高'},
+					'startsAt': '2026-07-15T07:00:00Z',
+				},
+				{
+					'status': 'resolved',
+					'labels': {'alertname': 'Recovered', 'instance': 'node-2'},
+					'annotations': {'summary': '已恢复'},
+				},
+			],
+		}
+
+		response = self.client.post(
+			reverse('monitor:alertmanager_webhook', args=[bound.id]),
+			data=json.dumps(payload),
+			content_type='application/json',
+		)
+		data = json.loads(response.content.decode('utf-8'))
+
+		self.assertEqual(response.status_code, 200)
+		self.assertTrue(data['ok'])
+		self.assertEqual(data['received'], 2)
+		self.assertEqual(data['firing'], 1)
+		self.assertEqual(data['matched_notifications'], 1)
+		self.assertEqual(data['pushed'], 1)
+		send_mock.assert_called_once()
+		self.assertEqual(send_mock.call_args[0][0].id, bound_wecom.id)
+		self.assertIn('绑定告警', send_mock.call_args[0][1])
+		content = send_mock.call_args[0][2]
+		self.assertIn('Alertmanager：Bound Alertmanager', content)
+		self.assertIn('主机：node-1', content)
+		self.assertIn('状态：firing', content)
+		self.assertIn('内容：CPU 使用率过高', content)
+
+	@mock.patch('monitor.views.send_alert_notification')
+	def test_alertmanager_webhook_ignores_non_firing_alerts(self, send_mock):
+		alertmanager = AlertmanagerConfig.objects.create(
+			name='Bound Alertmanager',
+			alertmanager_url='http://bound-alertmanager.local:9093',
+			enabled=True,
+		)
+		AlertNotificationConfig.objects.create(
+			provider=AlertNotificationConfig.PROVIDER_WECOM,
+			alertmanager=alertmanager,
+			name='bound wecom',
+			enabled=True,
+			webhook_url='https://qyapi.weixin.qq.com/cgi-bin/webhook/send?key=bound',
+		)
+		payload = {
+			'status': 'resolved',
+			'alerts': [
+				{'status': 'resolved', 'labels': {'alertname': 'Recovered'}},
+			],
+		}
+
+		response = self.client.post(
+			reverse('monitor:alertmanager_webhook', args=[alertmanager.id]),
+			data=json.dumps(payload),
+			content_type='application/json',
+		)
+		data = json.loads(response.content.decode('utf-8'))
+
+		self.assertEqual(response.status_code, 200)
+		self.assertEqual(data['firing'], 0)
+		self.assertEqual(data['pushed'], 0)
+		send_mock.assert_not_called()
+
+	@mock.patch('monitor.services.send_alert_notification')
+	@mock.patch('monitor.services.alertmanager_get_json')
+	def test_poll_alertmanager_pushes_active_alert_once(self, get_json_mock, send_mock):
+		send_mock.return_value = {'ok': True, 'message': '告警通知发送成功'}
+		bound = AlertmanagerConfig.objects.create(
+			name='生产环境',
+			alertmanager_url='http://alertmanager.local:9093',
+			enabled=True,
+		)
+		other = AlertmanagerConfig.objects.create(
+			name='其他环境',
+			alertmanager_url='http://other-alertmanager.local:9093',
+			enabled=True,
+		)
+		bound_wecom = AlertNotificationConfig.objects.create(
+			provider=AlertNotificationConfig.PROVIDER_WECOM,
+			alertmanager=bound,
+			name='企业微信',
+			alert_name='生产告警',
+			enabled=True,
+			webhook_url='https://qyapi.weixin.qq.com/cgi-bin/webhook/send?key=bound',
+		)
+		AlertNotificationConfig.objects.create(
+			provider=AlertNotificationConfig.PROVIDER_WECOM,
+			alertmanager=other,
+			name='其他企业微信',
+			alert_name='其他告警',
+			enabled=True,
+			webhook_url='https://qyapi.weixin.qq.com/cgi-bin/webhook/send?key=other',
+		)
+		get_json_mock.side_effect = [
+			{
+				'ok': True,
+				'body': [
+					{
+						'status': {'state': 'active'},
+						'fingerprint': 'abc123',
+						'labels': {'alertname': 'HighCPU', 'instance': 'node-1'},
+						'annotations': {'description': 'CPU 使用率过高'},
+						'startsAt': '2026-07-15T07:00:00Z',
+					},
+					{
+						'status': {'state': 'suppressed'},
+						'fingerprint': 'resolved123',
+						'labels': {'alertname': 'Recovered'},
+					},
+				],
+			},
+			{'ok': True, 'body': []},
+		]
+
+		result = services.poll_alertmanager_firing_alerts()
+
+		self.assertEqual(result['alertmanagers'], 2)
+		self.assertEqual(result['received'], 2)
+		self.assertEqual(result['firing'], 1)
+		self.assertEqual(result['pushed'], 1)
+		self.assertEqual(result['skipped'], 0)
+		send_mock.assert_called_once()
+		self.assertEqual(send_mock.call_args[0][0].id, bound_wecom.id)
+		self.assertIn('生产告警', send_mock.call_args[0][1])
+		self.assertIn('Alertmanager：生产环境', send_mock.call_args[0][2])
+		self.assertIn('主机：node-1', send_mock.call_args[0][2])
+		self.assertEqual(AlertEvent.objects.filter(fingerprint='alertmanager:%s:abc123' % bound.id).count(), 1)
+
+	@mock.patch('monitor.services.send_alert_notification')
+	@mock.patch('monitor.services.alertmanager_get_json')
+	def test_poll_alertmanager_does_not_resend_duplicate_firing_alert(self, get_json_mock, send_mock):
+		send_mock.return_value = {'ok': True, 'message': '告警通知发送成功'}
+		alertmanager = AlertmanagerConfig.objects.create(
+			name='生产环境',
+			alertmanager_url='http://alertmanager.local:9093',
+			enabled=True,
+		)
+		AlertNotificationConfig.objects.create(
+			provider=AlertNotificationConfig.PROVIDER_WECOM,
+			alertmanager=alertmanager,
+			name='企业微信',
+			enabled=True,
+			webhook_url='https://qyapi.weixin.qq.com/cgi-bin/webhook/send?key=bound',
+		)
+		get_json_mock.return_value = {
+			'ok': True,
+			'body': [
+				{
+					'status': {'state': 'active'},
+					'fingerprint': 'same-alert',
+					'labels': {'alertname': 'HighCPU', 'instance': 'node-1'},
+					'annotations': {'description': 'CPU 使用率过高'},
+				},
+			],
+		}
+
+		first = services.poll_alertmanager_firing_alerts()
+		second = services.poll_alertmanager_firing_alerts()
+
+		self.assertEqual(first['pushed'], 1)
+		self.assertEqual(first['skipped'], 0)
+		self.assertEqual(second['pushed'], 0)
+		self.assertEqual(second['skipped'], 1)
+		send_mock.assert_called_once()
+		event = AlertEvent.objects.get(fingerprint='alertmanager:%s:same-alert' % alertmanager.id)
+		self.assertEqual(event.repeat_count, 2)
+
+	@mock.patch('monitor.crontab.poll_alertmanager_firing_alerts')
+	def test_poll_alertmanager_notifications_returns_summary(self, poll_mock):
+		poll_mock.return_value = {
+			'alertmanagers': 1,
+			'received': 2,
+			'firing': 1,
+			'pushed': 1,
+			'skipped': 0,
+			'errors': [],
+		}
+
+		result = poll_alertmanager_notifications()
+
+		self.assertEqual(result['pushed'], 1)
+		poll_mock.assert_called_once()
+
+	@mock.patch('monitor.services.urlrequest.urlopen')
+	def test_duplicate_alert_does_not_resend_wecom_notification(self, urlopen_mock):
+		urlopen_mock.return_value = MockWebhookResponse('{"errcode":0,"errmsg":"ok"}')
+		host = NewLinux.objects.create(
+			linux_name='dedupe-host',
+			linux_ip='127.0.0.1',
+			linux_hostname='dedupe-host',
+			linux_port='22',
+			linux_user='root',
+			linux_passwd='',
+		)
+		AlertNotificationConfig.objects.create(
+			provider=AlertNotificationConfig.PROVIDER_WECOM,
+			name='wecom',
+			enabled=True,
+			webhook_url='https://qyapi.weixin.qq.com/cgi-bin/webhook/send',
+		)
+
+		record_alert(host, 'disk', '磁盘使用率超过阈值')
+		record_alert(host, 'disk', '磁盘仍然超过阈值')
+
+		urlopen_mock.assert_called_once()
+
+	@mock.patch('monitor.services.urlrequest.urlopen')
+	def test_wecom_receives_recovery_alert_when_alert_resolves(self, urlopen_mock):
+		urlopen_mock.return_value = MockWebhookResponse('{"errcode":0,"errmsg":"ok"}')
+		host = NewLinux.objects.create(
+			linux_name='recover-host',
+			linux_ip='127.0.0.1',
+			linux_hostname='recover-host',
+			linux_port='22',
+			linux_user='root',
+			linux_passwd='',
+		)
+		AlertNotificationConfig.objects.create(
+			provider=AlertNotificationConfig.PROVIDER_WECOM,
+			name='wecom',
+			alert_name='',
+			enabled=True,
+			webhook_url='https://qyapi.weixin.qq.com/cgi-bin/webhook/send',
+		)
+		record_alert(host, 'memory', '内存使用率超过阈值')
+
+		alert = resolve_alert(host, 'memory', '内存使用率恢复正常')
+
+		self.assertIsNotNone(alert)
+		self.assertEqual(urlopen_mock.call_count, 2)
+		request = urlopen_mock.call_args[0][0]
+		payload = json.loads(request.data.decode('utf-8'))
+		content = payload['text']['content']
+		self.assertIn('状态：resolved', content)
+		self.assertIn('内容：内存使用率恢复正常', content)
+
+	def test_wecom_nonzero_errcode_is_failure(self):
+		config = AlertNotificationConfig.objects.create(
+			provider=AlertNotificationConfig.PROVIDER_WECOM,
+			name='wecom',
+			enabled=True,
+			webhook_url='https://qyapi.weixin.qq.com/cgi-bin/webhook/send',
+		)
+
+		with mock.patch('monitor.services.urlrequest.urlopen', return_value=MockWebhookResponse('{"errcode":40001,"errmsg":"invalid"}')):
+			result = services.send_alert_notification(config, '告警通知：CPU', '内容')
+
+		self.assertFalse(result['ok'])
+		self.assertEqual(result['message'], '通知平台返回失败，请检查通知配置')
+
+	@mock.patch('monitor.services.urlrequest.urlopen')
+	def test_https_alert_notification_uses_certifi_context(self, urlopen_mock):
+		urlopen_mock.return_value = MockWebhookResponse('{"errcode":0,"errmsg":"ok"}')
+		config = AlertNotificationConfig.objects.create(
+			provider=AlertNotificationConfig.PROVIDER_WECOM,
+			name='wecom',
+			enabled=True,
+			webhook_url='https://qyapi.weixin.qq.com/cgi-bin/webhook/send?key=test-key',
+		)
+
+		result = services.send_alert_notification(config)
+
+		self.assertTrue(result['ok'])
+		self.assertIn('context', urlopen_mock.call_args[1])
+
+	@mock.patch('monitor.services.urlrequest.urlopen')
+	def test_alert_notification_ssl_failure_returns_safe_message(self, urlopen_mock):
+		urlopen_mock.side_effect = services.urlerror.URLError(
+			ssl.SSLError('certificate verify failed: sensitive detail')
+		)
+		config = AlertNotificationConfig.objects.create(
+			provider=AlertNotificationConfig.PROVIDER_WECOM,
+			name='wecom',
+			enabled=True,
+			webhook_url='https://qyapi.weixin.qq.com/cgi-bin/webhook/send?key=test-key',
+		)
+
+		result = services.send_alert_notification(config)
+
+		self.assertFalse(result['ok'])
+		self.assertEqual(result['message'], 'HTTPS 证书校验失败，请检查运行环境 CA 证书配置')
+		self.assertNotIn('sensitive detail', result['message'])
 
 	@mock.patch('monitor.views.send_alert_notification')
 	def test_alert_notification_test_masks_untrusted_provider_failure_details(self, send_mock):

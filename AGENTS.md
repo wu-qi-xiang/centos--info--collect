@@ -36,11 +36,46 @@ Before focused work, read the matching project skill under `.codex/skills/`:
 
 Use the smallest relevant skill set. Do not treat this file as a replacement for feature-specific instructions.
 
+## Execution Model
+
+### Instruction Priority
+
+Resolve instruction conflicts in this order:
+
+1. The user's latest confirmed requirement.
+2. Security, permission, data-protection, and legacy-compatibility rules in this file and the relevant feature skill.
+3. Feature-specific project skills and references.
+4. General coding guidance, including `karpathy-guidelines`.
+
+General guidance is a quality lens, not an exception to project controls. In particular, prefer minimal, surgical changes and explicit success criteria, but never reduce required validation, authorization, encryption, or failure handling.
+
+### Task Triage
+
+Classify work before implementation. State the level in the user-facing TODO and use the lightest process that preserves safety and verification.
+
+- **L1 - low risk:** Read-only analysis, documentation-only corrections, or tiny isolated changes with no design choice and no effect on permissions, models, APIs, runtime configuration, external systems, or user-visible behavior. Use a short TODO, state any minor assumption, make the focused change directly, and run the narrowest relevant check.
+- **L2 - bounded change:** A single-module feature or bug fix with clear behavior and no schema, permission, or external-system contract change. Publish an execution contract, use a focused plan and validation, and delegate only when it creates a genuinely independent implementation or review track.
+- **L3 - high risk or cross-cutting:** Any model or migration change, permission/authentication work, SSH or remote execution, secrets, file handling, webhook or external integration, DevOps state transition, deployment/runtime change, or coordinated multi-module/UI/API work. Publish a full plan, confirm material requirements, use subagents for independent tracks, and include security, rollback, and integration validation.
+
+An explicit user request to implement, fix, or start work authorizes execution after the plan is published when the acceptance criteria are clear. It does not override a need to clarify a material ambiguity.
+
+### Execution Contract
+
+For L2 and L3 work, publish one concise execution contract before editing or delegating. It replaces repeated plan, assumption, and validation narration while preserving the required information:
+
+```text
+Scope: files/modules and behavior being changed.
+Assumptions: only minor, reversible assumptions; list material questions separately.
+Acceptance: observable behavior that proves the request is complete.
+Validation: focused tests/checks and any external integration intentionally not exercised.
+Risks: permissions, data, runtime, rollback, or compatibility concerns when applicable.
+```
+
 ## Requirement Confirmation
 
 After analyzing a request, separate confirmed requirements from assumptions and unresolved questions before planning implementation or modifying files.
 
-- If any uncertainty could materially affect functionality, user interaction, API behavior, data handling, permissions, scope, or acceptance criteria, ask the user a focused clarification question and wait for confirmation before editing code or delegating implementation.
+- If any uncertainty could materially affect functionality, user interaction, API behavior, data handling, permissions, scope, or acceptance criteria, ask the user a focused clarification question and wait for confirmation before editing code or delegating implementation. Do not block L1 work for a minor, reversible detail; state that assumption in the TODO or execution contract instead.
 - Do not substitute an inferred interpretation when the user can reasonably confirm the intended behavior. Present concrete options or examples when they make the decision easier to answer.
 - Begin implementation only when the required behavior and acceptance criteria are sufficiently clear. Treat the user's confirmed answer as the authoritative requirement and update the TODO and implementation plan accordingly.
 - Reasonable assumptions are allowed only for minor, reversible details that do not change the requested outcome. State any such assumption explicitly before relying on it.
@@ -48,7 +83,7 @@ After analyzing a request, separate confirmed requirements from assumptions and 
 
 ## Subagent Workflow
 
-Use subagents for complex project work after the main agent has read the relevant skill instructions and produced a clear plan. Complex work includes new features, optimizations, requirement changes, cross-module fixes, schema/API/runtime changes, security-sensitive changes, frontend flows that require coordinated Python/template/static edits, and any task that needs multiple investigation or implementation tracks.
+Use subagents for L3 work and for L2 work only when the task has independent, non-overlapping investigation, implementation, or review tracks. Complex project work includes new features, optimizations, requirement changes, cross-module fixes, schema/API/runtime changes, security-sensitive changes, frontend flows that require coordinated Python/template/static edits, and any task that needs multiple investigation or implementation tracks.
 
 The main agent is responsible for assigning work, coordinating subagents, collecting and merging their findings, reviewing results, validating the integrated change, and summarizing what changed for the user. It should keep the overall context, decisions, risks, and final report centralized.
 
@@ -63,7 +98,7 @@ When delegating, give each subagent explicit ownership:
 - Security constraints and sensitive data that must not be exposed.
 - Narrow validation commands to run, or the exact reason validation is skipped.
 
-Use `.codex/skills/centos-feature-dev/templates/subagent-task.md` as the default delegation prompt. Direct main-agent edits are reserved for non-development housekeeping or tiny, specific corrections with no design choice, permission impact, schema/API/runtime change, cross-module behavior, or substantive implementation work.
+Use `.codex/skills/centos-feature-dev/templates/subagent-task.md` as the default delegation prompt. L1 tasks and tightly coupled L2 tasks may be implemented directly when delegation would add coordination cost without improving safety, review quality, or elapsed time. All other implementation follows the ownership model above.
 
 ## Task TODO Visibility
 
@@ -97,7 +132,7 @@ At the start of every task, before beginning sequential investigation or impleme
 - Delegate bounded investigation, implementation, test, and review tracks to subagents when they have clear, non-overlapping ownership.
 - Keep useful main-agent work moving while subagents run; do not wait on one track when another independent track can proceed.
 - Keep dependent steps and edits to the same files serial unless ownership and merge order are unambiguous.
-- For tiny or tightly coupled tasks, execute directly when coordination overhead would cost more than concurrency saves.
+- For tiny or tightly coupled tasks, execute directly when coordination overhead would cost more than concurrency saves; record that decision in the user-facing TODO.
 - Reassess concurrency after new findings change the task scope, and parallelize newly independent follow-up work.
 
 When changing skill files, validate metadata and local references:
@@ -125,6 +160,7 @@ python3 .codex/skills/centos-feature-dev/scripts/check_skill_links.py
 - Use `visible_hosts_for_request`, `can_access_host`, `require_host_access`, or related helpers for host-scoped behavior.
 - Validate redirect targets, remote paths, uploaded files, and webhook payloads defensively.
 - Avoid adding user-controlled shell interpolation. Managed commands should target remote hosts through the existing SSH execution flow.
+- General advice to omit handling for "impossible" scenarios never applies to authentication, authorization, untrusted input, encrypted values, uploads, paths, SSH, remote commands, webhooks, network calls, or background jobs. These boundaries require defensive validation and failure handling appropriate to their risk.
 
 ## Feature Rules
 
