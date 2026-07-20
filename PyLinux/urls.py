@@ -19,6 +19,7 @@ from django.conf.urls.static import static
 from django.http import HttpResponse
 from django.urls import path, include
 from linux.views import asset_management, index, linux, search  # url导入views
+from PyLinux import health
 # from RemoteLinux.views import linux_create, linux_detail, linux_list_detail, linux_update, linux_delete, connect_test
 from RemoteLinux import views
 
@@ -26,6 +27,9 @@ from RemoteLinux import views
 import monitor
 
 urlpatterns = [
+    path('health/live/', health.liveness, name='health_liveness'),
+    path('health/ready/', health.readiness, name='health_readiness'),
+    path('runtime/status/', health.runtime_status, name='runtime_status'),
     path('', include('userprofile.urls', namespace='login')),
     path('index/', index, name='index'),
     path('assets/', asset_management, name='asset_management'),
@@ -48,6 +52,7 @@ urlpatterns = [
     path('monitor/', include('monitor.urls', namespace='monitor')),
     path('password/', include('password.urls', namespace='password')),
     path('devops/', include('devops.urls', namespace='devops')),
+    path('integrations/github/', include('devops.github_urls')),
     path('aiops/', include('aiops.urls', namespace='aiops')),
     path('favicon.ico', lambda request: HttpResponse(status=204), name='favicon'),
 ]

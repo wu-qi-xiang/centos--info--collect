@@ -1,0 +1,52 @@
+{% extends "base.html" %}
+
+{% block title %}项目接入 - DevOps平台{% endblock %}
+
+{% block content %}
+<div class="container-fluid px-4">
+    <h1 class="h3 mb-3">项目接入</h1>
+    {% include "devops/_nav.html" %}
+    <div class="card mb-3"><div class="card-header">新建项目与基础资源</div><div class="card-body">
+        <form method="post">
+            {% csrf_token %}
+            {{ form.non_field_errors }}
+            <div class="row">
+                <div class="col-md-4 mb-3"><label class="form-label">项目名称</label>{{ form.name }}{{ form.name.errors }}</div>
+                <div class="col-md-4 mb-3"><label class="form-label">负责人</label>{{ form.owner }}{{ form.owner.errors }}</div>
+                <div class="col-md-4 mb-3"><label class="form-label">项目说明</label>{{ form.description }}{{ form.description.errors }}</div>
+            </div>
+            <div class="row">
+                <div class="col-md-3 mb-3"><label class="form-label">CPU 阈值</label>{{ form.monitor_cpu }}{{ form.monitor_cpu.errors }}</div>
+                <div class="col-md-3 mb-3"><label class="form-label">内存阈值</label>{{ form.monitor_memory }}{{ form.monitor_memory.errors }}</div>
+                <div class="col-md-3 mb-3"><label class="form-label">磁盘阈值</label>{{ form.monitor_disk }}{{ form.monitor_disk.errors }}</div>
+                <div class="col-md-3 mb-3 pt-4"><div class="form-check">{{ form.monitoring_enabled }}<label class="form-check-label" for="{{ form.monitoring_enabled.id_for_label }}">启用基线监控</label></div></div>
+            </div>
+            <div class="row">
+                <div class="col-md-6 mb-3"><label class="form-label">关联主机</label>{{ form.hosts }}{{ form.hosts.errors }}</div>
+                <div class="col-md-6 mb-3"><label class="form-label">现有主机组</label>{{ form.groups }}{{ form.groups.errors }}</div>
+                <div class="col-md-6 mb-3"><label class="form-label">现有标签</label>{{ form.tags }}{{ form.tags.errors }}</div>
+                <div class="col-md-6 mb-3"><label class="form-label">现有服务</label>{{ form.services }}{{ form.services.errors }}</div>
+                <div class="col-md-6 mb-3"><label class="form-label">现有部署应用</label>{{ form.deployment_apps }}{{ form.deployment_apps.errors }}</div>
+            </div>
+            <div class="row border-top pt-3">
+                <div class="col-md-3 mb-3"><label class="form-label">{{ form.create_group_name.label }}</label>{{ form.create_group_name }}{{ form.create_group_name.errors }}</div>
+                <div class="col-md-3 mb-3"><label class="form-label">{{ form.create_tag_name.label }}</label>{{ form.create_tag_name }}{{ form.create_tag_name.errors }}</div>
+                <div class="col-md-3 mb-3"><label class="form-label">{{ form.create_service_name.label }}</label>{{ form.create_service_name }}{{ form.create_service_name.errors }}</div>
+                <div class="col-md-3 mb-3"><label class="form-label">{{ form.create_app_name.label }}</label>{{ form.create_app_name }}{{ form.create_app_name.errors }}</div>
+                <div class="col-md-4 mb-3"><label class="form-label">{{ form.create_app_repository.label }}</label>{{ form.create_app_repository }}{{ form.create_app_repository.errors }}</div>
+            </div>
+            <button class="btn btn-primary" type="submit">完成项目接入</button>
+        </form>
+    </div></div>
+    <div class="card"><div class="card-header">已接入项目</div><div class="card-body table-responsive">
+        <table class="table table-sm align-middle"><tr><th>项目</th><th>负责人</th><th>主机</th><th>服务</th><th>部署应用</th><th>基线监控</th></tr>
+        {% for project in projects %}<tr>
+            <td>{{ project.name }}</td><td>{{ project.owner|default:"-" }}</td>
+            <td>{% for host in project.hosts.all %}{{ host.linux_name }}{% if not forloop.last %}, {% endif %}{% empty %}-{% endfor %}</td>
+            <td>{% for service in project.services.all %}{{ service.name }}{% if not forloop.last %}, {% endif %}{% empty %}-{% endfor %}</td>
+            <td>{% for app in project.deployment_apps.all %}{{ app.name }}{% if not forloop.last %}, {% endif %}{% empty %}-{% endfor %}</td>
+            <td>{% if project.monitoring_enabled %}CPU {{ project.monitor_cpu }} / 内存 {{ project.monitor_memory }} / 磁盘 {{ project.monitor_disk }}{% else %}未启用{% endif %}</td>
+        </tr>{% empty %}<tr><td colspan="6" class="text-muted">暂无接入项目</td></tr>{% endfor %}</table>
+    </div></div>
+</div>
+{% endblock %}

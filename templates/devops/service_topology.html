@@ -1,0 +1,44 @@
+{% extends "base.html" %}
+
+{% block title %}服务拓扑 - DevOps平台{% endblock %}
+
+{% block content %}
+<div class="container-fluid px-4">
+    <h1 class="h3 mb-3">服务拓扑</h1>
+    {% include "devops/_nav.html" %}
+    {% if can_manage %}
+    <div class="card mb-3"><div class="card-header">{% if editing_service %}编辑服务：{{ editing_service.name }}{% else %}新增服务{% endif %}</div><div class="card-body">
+        <form method="post" action="{% if editing_service %}{% url 'devops:service_topology_update' editing_service.id %}{% else %}{% url 'devops:service_topology_create' %}{% endif %}">
+            {% csrf_token %}
+            <div class="row">
+                <div class="col-md-4 mb-3"><label class="form-label">服务名称</label>{{ edit_form.name|default:create_form.name }}{{ edit_form.name.errors|default:create_form.name.errors }}</div>
+                <div class="col-md-4 mb-3"><label class="form-label">负责人</label>{{ edit_form.owner|default:create_form.owner }}</div>
+                <div class="col-md-4 mb-3"><label class="form-label">环境</label>{{ edit_form.environment|default:create_form.environment }}</div>
+            </div>
+            <div class="mb-3"><label class="form-label">说明</label>{{ edit_form.description|default:create_form.description }}</div>
+            <div class="mb-3"><label class="form-label">关联主机</label>{{ edit_form.hosts|default:create_form.hosts }}{{ edit_form.hosts.errors|default:create_form.hosts.errors }}</div>
+            <div class="mb-3"><label class="form-label">上游依赖服务</label>{{ edit_form.upstream_services|default:create_form.upstream_services }}{{ edit_form.upstream_services.errors|default:create_form.upstream_services.errors }}</div>
+            <button class="btn btn-primary" type="submit">{% if editing_service %}保存服务{% else %}创建服务{% endif %}</button>
+            {% if editing_service %}<a class="btn btn-outline-secondary" href="{% url 'devops:service_topology' %}">取消</a>{% endif %}
+        </form>
+    </div></div>
+    {% endif %}
+    <div class="card"><div class="card-header">服务与依赖关系</div><div class="card-body table-responsive">
+        <table class="table table-sm align-middle">
+            <tr><th>服务</th><th>负责人</th><th>环境</th><th>关联主机</th><th>上游依赖</th><th>说明</th>{% if can_manage %}<th>操作</th>{% endif %}</tr>
+            {% for service in services %}
+            <tr>
+                <td>{{ service.name }}</td><td>{{ service.owner|default:"-" }}</td><td>{{ service.get_environment_display }}</td>
+                <td>{% for host in service.visible_hosts %}{{ host.linux_name }}{% if not forloop.last %}, {% endif %}{% empty %}-{% endfor %}</td>
+                <td>{% for dependency in service.visible_upstream_links %}{{ dependency.upstream_service.name }}{% if not forloop.last %}, {% endif %}{% empty %}-{% endfor %}</td>
+                <td>{{ service.description|default:"-" }}</td>
+                {% if can_manage %}<td class="text-nowrap">
+                    <a class="btn btn-outline-primary btn-sm" href="{% url 'devops:service_topology_update' service.id %}">编辑</a>
+                    <form method="post" action="{% url 'devops:service_topology_delete' service.id %}" class="d-inline">{% csrf_token %}<button class="btn btn-outline-danger btn-sm" type="submit">删除</button></form>
+                </td>{% endif %}
+            </tr>
+            {% empty %}<tr><td colspan="7" class="text-muted">暂无服务拓扑数据</td></tr>{% endfor %}
+        </table>
+    </div></div>
+</div>
+{% endblock %}

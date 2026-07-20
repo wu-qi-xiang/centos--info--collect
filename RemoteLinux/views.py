@@ -1,7 +1,7 @@
 #coding-utf-8
 # 增加webssh功能
 import csv
-from dwebsocket.decorators import accept_websocket
+from .websocket import accept_websocket
 from threading import Thread
 import time
 import socket

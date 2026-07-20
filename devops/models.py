@@ -1,4 +1,5 @@
 from django.db import models
+from django.core.exceptions import ValidationError
 from django.utils import timezone
 
 from PyLinux.crypto import decrypt_text, encrypt_text
@@ -130,6 +131,78 @@ class HostTag(models.Model):
     class Meta:
         db_table = "devops_host_tag"
         ordering = ['name']
+
+    def __str__(self):
+        return self.name
+
+
+class ServiceCatalog(models.Model):
+    ENV_DEVELOPMENT = 'development'
+    ENV_TEST = 'test'
+    ENV_STAGING = 'staging'
+    ENV_PRODUCTION = 'production'
+
+    ENVIRONMENT_CHOICES = (
+        (ENV_DEVELOPMENT, '开发'),
+        (ENV_TEST, '测试'),
+        (ENV_STAGING, '预发布'),
+        (ENV_PRODUCTION, '生产'),
+    )
+
+    name = models.CharField(max_length=100, unique=True)
+    owner = models.CharField(max_length=100, blank=True)
+    environment = models.CharField(max_length=20, choices=ENVIRONMENT_CHOICES, default=ENV_PRODUCTION)
+    description = models.CharField(max_length=300, blank=True)
+    created_by = models.CharField(max_length=100, blank=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+    hosts = models.ManyToManyField(NewLinux, blank=True, related_name='topology_services')
+
+    class Meta:
+        db_table = 'devops_service_catalog'
+        ordering = ['environment', 'name']
+
+    def __str__(self):
+        return self.name
+
+
+class ServiceDependency(models.Model):
+    service = models.ForeignKey(ServiceCatalog, on_delete=models.CASCADE, related_name='upstream_links')
+    upstream_service = models.ForeignKey(ServiceCatalog, on_delete=models.CASCADE, related_name='downstream_links')
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        db_table = 'devops_service_dependency'
+        unique_together = ('service', 'upstream_service')
+        ordering = ['service__name', 'upstream_service__name']
+
+    def __str__(self):
+        return '%s -> %s' % (self.service, self.upstream_service)
+
+
+class MaintenanceWindow(models.Model):
+    """A bounded maintenance period that affects explicit hosts or services."""
+    name = models.CharField(max_length=120)
+    reason = models.CharField(max_length=500, blank=True)
+    starts_at = models.DateTimeField()
+    ends_at = models.DateTimeField()
+    enabled = models.BooleanField(default=True)
+    hosts = models.ManyToManyField(NewLinux, blank=True, related_name='maintenance_windows')
+    services = models.ManyToManyField(ServiceCatalog, blank=True, related_name='maintenance_windows')
+    created_by = models.CharField(max_length=100, blank=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        db_table = 'devops_maintenance_window'
+        ordering = ['starts_at', 'id']
+        indexes = [
+            models.Index(fields=['enabled', 'starts_at', 'ends_at'], name='devops_mw_active_7ed7d1_idx'),
+        ]
+
+    def clean(self):
+        if self.starts_at and self.ends_at and self.ends_at <= self.starts_at:
+            raise ValidationError({'ends_at': '结束时间必须晚于开始时间'})
 
     def __str__(self):
         return self.name
@@ -376,6 +449,65 @@ class AlertHistory(models.Model):
         ordering = ['-created_at']
 
 
+class Incident(models.Model):
+    SEVERITY_LOW = 'low'
+    SEVERITY_MEDIUM = 'medium'
+    SEVERITY_HIGH = 'high'
+    SEVERITY_CRITICAL = 'critical'
+
+    STATUS_OPEN = 'open'
+    STATUS_PROCESSING = 'processing'
+    STATUS_RESOLVED = 'resolved'
+    STATUS_CLOSED = 'closed'
+
+    SEVERITY_CHOICES = (
+        (SEVERITY_LOW, '低'),
+        (SEVERITY_MEDIUM, '中'),
+        (SEVERITY_HIGH, '高'),
+        (SEVERITY_CRITICAL, '严重'),
+    )
+    STATUS_CHOICES = (
+        (STATUS_OPEN, '已打开'),
+        (STATUS_PROCESSING, '处理中'),
+        (STATUS_RESOLVED, '已解决'),
+        (STATUS_CLOSED, '已关闭'),
+    )
+
+    title = models.CharField(max_length=200)
+    severity = models.CharField(max_length=20, choices=SEVERITY_CHOICES, default=SEVERITY_MEDIUM)
+    description = models.TextField(blank=True)
+    status = models.CharField(max_length=20, choices=STATUS_CHOICES, default=STATUS_OPEN)
+    host = models.ForeignKey(NewLinux, null=True, blank=True, on_delete=models.SET_NULL)
+    alert = models.ForeignKey(AlertEvent, null=True, blank=True, on_delete=models.SET_NULL)
+    deployment_release = models.ForeignKey('DeploymentRelease', null=True, blank=True, on_delete=models.SET_NULL)
+    command_execution = models.ForeignKey('CommandExecution', null=True, blank=True, on_delete=models.SET_NULL)
+    root_cause = models.TextField(blank=True)
+    resolution = models.TextField(blank=True)
+    follow_up = models.TextField(blank=True)
+    created_by = models.CharField(max_length=100, blank=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+    resolved_at = models.DateTimeField(null=True, blank=True)
+
+    class Meta:
+        db_table = 'devops_incident'
+        ordering = ['-created_at']
+
+    def __str__(self):
+        return self.title
+
+
+class IncidentTimeline(models.Model):
+    incident = models.ForeignKey(Incident, on_delete=models.CASCADE, related_name='timeline')
+    note = models.TextField()
+    created_by = models.CharField(max_length=100, blank=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        db_table = 'devops_incident_timeline'
+        ordering = ['created_at', 'id']
+
+
 class MetricSample(models.Model):
     METRIC_CPU = 'cpu'
     METRIC_MEMORY = 'memory'
@@ -473,11 +605,56 @@ class NotificationLog(models.Model):
     content = models.TextField()
     status = models.CharField(max_length=20, choices=STATUS_CHOICES)
     response = models.TextField(blank=True)
+    failure_category = models.CharField(max_length=30, blank=True)
+    attempt_count = models.PositiveSmallIntegerField(default=0)
     created_at = models.DateTimeField(auto_now_add=True)
 
     class Meta:
         db_table = "devops_notification_log"
         ordering = ['-created_at']
+
+
+class NotificationTemplate(models.Model):
+    EVENT_ALERT = NotificationLog.EVENT_ALERT
+    EVENT_APPROVAL = NotificationLog.EVENT_APPROVAL
+    EVENT_DEPLOYMENT = NotificationLog.EVENT_DEPLOYMENT
+
+    EVENT_CHOICES = (
+        (EVENT_ALERT, '告警'),
+        (EVENT_APPROVAL, '审批'),
+        (EVENT_DEPLOYMENT, '发布'),
+    )
+
+    event_type = models.CharField(max_length=30, choices=EVENT_CHOICES, unique=True)
+    title_template = models.CharField(max_length=150, blank=True)
+    content_template = models.TextField(blank=True)
+    updated_by = models.CharField(max_length=100, blank=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        db_table = 'devops_notification_template'
+        ordering = ['event_type']
+
+
+class AlertNotificationEscalation(models.Model):
+    LEVEL_CHOICES = (
+        (AlertEvent.LEVEL_INFO, '信息'),
+        (AlertEvent.LEVEL_WARNING, '警告'),
+        (AlertEvent.LEVEL_CRITICAL, '严重'),
+    )
+
+    enabled = models.BooleanField(default=False)
+    minimum_level = models.CharField(max_length=20, choices=LEVEL_CHOICES, default=AlertEvent.LEVEL_CRITICAL)
+    channel = models.ForeignKey(NotificationChannel, null=True, blank=True, on_delete=models.SET_NULL, related_name='escalation_rules')
+    updated_by = models.CharField(max_length=100, blank=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        db_table = 'devops_alert_notification_escalation'
+
+    @classmethod
+    def current(cls):
+        return cls.objects.first() or cls()
 
 
 class ComplianceBaseline(models.Model):
@@ -581,12 +758,38 @@ class FileDistributionResult(models.Model):
 
 class DeploymentApp(models.Model):
     name = models.CharField(max_length=100, unique=True)
+    repository = models.CharField(max_length=140, blank=True, null=True, unique=True)
     description = models.CharField(max_length=300, blank=True)
     created_by = models.CharField(max_length=100, blank=True)
     created_at = models.DateTimeField(auto_now_add=True)
 
     class Meta:
         db_table = "devops_deployment_app"
+        ordering = ['name']
+
+    def __str__(self):
+        return self.name
+
+
+class DevOpsProject(models.Model):
+    name = models.CharField(max_length=100, unique=True)
+    owner = models.CharField(max_length=100, blank=True)
+    description = models.CharField(max_length=300, blank=True)
+    monitoring_enabled = models.BooleanField(default=True)
+    monitor_cpu = models.CharField(max_length=20, default='80%')
+    monitor_memory = models.CharField(max_length=20, default='80%')
+    monitor_disk = models.CharField(max_length=20, default='80%')
+    hosts = models.ManyToManyField(NewLinux, blank=True, related_name='devops_projects')
+    groups = models.ManyToManyField(HostGroup, blank=True, related_name='devops_projects')
+    tags = models.ManyToManyField(HostTag, blank=True, related_name='devops_projects')
+    services = models.ManyToManyField(ServiceCatalog, blank=True, related_name='devops_projects')
+    deployment_apps = models.ManyToManyField(DeploymentApp, blank=True, related_name='devops_projects')
+    created_by = models.CharField(max_length=100, blank=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        db_table = 'devops_project'
         ordering = ['name']
 
     def __str__(self):
@@ -654,6 +857,121 @@ class DeploymentResult(models.Model):
     class Meta:
         db_table = "devops_deployment_result"
         ordering = ['id']
+
+
+class BackgroundJob(models.Model):
+    """A durable reference to a vetted DevOps operation.
+
+    The queue deliberately stores neither callable paths nor operation input.  The
+    target records already hold the encrypted/sensitive values needed by their
+    existing execution services.
+    """
+    TYPE_COMMAND = 'command'
+    TYPE_BATCH_TASK = 'batch_task'
+    TYPE_FILE_DISTRIBUTION = 'file_distribution'
+    TYPE_DEPLOYMENT = 'deployment'
+    TYPE_ROLLBACK = 'rollback'
+
+    TYPE_CHOICES = (
+        (TYPE_COMMAND, '命令执行'),
+        (TYPE_BATCH_TASK, '批量任务'),
+        (TYPE_FILE_DISTRIBUTION, '文件分发'),
+        (TYPE_DEPLOYMENT, '发布部署'),
+        (TYPE_ROLLBACK, '发布回滚'),
+    )
+
+    STATUS_PENDING = 'pending'
+    STATUS_RUNNING = 'running'
+    STATUS_SUCCESS = 'success'
+    STATUS_FAILED = 'failed'
+
+    STATUS_CHOICES = (
+        (STATUS_PENDING, '等待执行'),
+        (STATUS_RUNNING, '执行中'),
+        (STATUS_SUCCESS, '执行成功'),
+        (STATUS_FAILED, '执行失败'),
+    )
+
+    job_type = models.CharField(max_length=30, choices=TYPE_CHOICES)
+    target_id = models.PositiveIntegerField()
+    role = models.CharField(max_length=20, blank=True)
+    status = models.CharField(max_length=20, choices=STATUS_CHOICES, default=STATUS_PENDING)
+    attempts = models.PositiveIntegerField(default=0)
+    error = models.CharField(max_length=500, blank=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+    started_at = models.DateTimeField(null=True, blank=True)
+    finished_at = models.DateTimeField(null=True, blank=True)
+
+    class Meta:
+        db_table = 'devops_background_job'
+        ordering = ['id']
+        indexes = [
+            models.Index(fields=['status', 'id'], name='devops_back_status_4bee48_idx'),
+        ]
+
+
+class IntegrationHealthEvent(models.Model):
+    """Append-only, non-sensitive outcomes for external integration health."""
+    TYPE_PROMETHEUS = 'prometheus'
+    TYPE_ALERTMANAGER = 'alertmanager'
+    TYPE_GITHUB_INBOUND = 'github_inbound'
+    TYPE_NOTIFICATION = 'notification'
+
+    TYPE_CHOICES = (
+        (TYPE_PROMETHEUS, 'Prometheus'),
+        (TYPE_ALERTMANAGER, 'Alertmanager'),
+        (TYPE_GITHUB_INBOUND, 'GitHub 入站'),
+        (TYPE_NOTIFICATION, '通知渠道'),
+    )
+
+    SOURCE_GITHUB_INBOUND = 'github_inbound'
+
+    STATUS_SUCCESS = 'success'
+    STATUS_FAILED = 'failed'
+
+    STATUS_CHOICES = (
+        (STATUS_SUCCESS, '成功'),
+        (STATUS_FAILED, '失败'),
+    )
+
+    CATEGORY_OK = 'ok'
+    CATEGORY_HTTP_ERROR = 'http_error'
+    CATEGORY_TIMEOUT = 'timeout'
+    CATEGORY_REQUEST_ERROR = 'request_error'
+    CATEGORY_CONFIGURATION = 'configuration'
+    CATEGORY_VALIDATION_ERROR = 'validation_error'
+    CATEGORY_REJECTED = 'rejected'
+    CATEGORY_DUPLICATE = 'duplicate'
+    CATEGORY_UNAVAILABLE = 'unavailable'
+    CATEGORY_INTERNAL_ERROR = 'internal_error'
+
+    CATEGORY_CHOICES = (
+        (CATEGORY_OK, '正常'),
+        (CATEGORY_HTTP_ERROR, 'HTTP 错误'),
+        (CATEGORY_TIMEOUT, '超时'),
+        (CATEGORY_REQUEST_ERROR, '请求异常'),
+        (CATEGORY_CONFIGURATION, '配置异常'),
+        (CATEGORY_VALIDATION_ERROR, '校验失败'),
+        (CATEGORY_REJECTED, '已拒绝'),
+        (CATEGORY_DUPLICATE, '重复投递'),
+        (CATEGORY_UNAVAILABLE, '服务不可用'),
+        (CATEGORY_INTERNAL_ERROR, '内部异常'),
+    )
+
+    integration_type = models.CharField(max_length=30, choices=TYPE_CHOICES)
+    source_id = models.PositiveIntegerField(null=True, blank=True)
+    source_name = models.CharField(max_length=100, blank=True)
+    status = models.CharField(max_length=20, choices=STATUS_CHOICES)
+    category = models.CharField(max_length=30, choices=CATEGORY_CHOICES)
+    summary = models.CharField(max_length=200)
+    occurred_at = models.DateTimeField(default=timezone.now)
+
+    class Meta:
+        db_table = 'devops_integration_health_event'
+        ordering = ['-occurred_at', '-id']
+        indexes = [
+            models.Index(fields=['integration_type', 'source_id', '-occurred_at'], name='devops_ihe_type_ref_5b36b3_idx'),
+        ]
 
 
 class ApprovalRequest(models.Model):

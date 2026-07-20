@@ -9,7 +9,7 @@ Use the narrowest meaningful validation first. Broaden when shared behavior chan
 .venv/bin/python manage.py test
 ```
 
-The dependency set targets legacy Django 2.1 and older Python. If the local environment cannot run it, report the exact failure and do not claim verification succeeded.
+The dependency set targets Python 3.11 and Django 4.2.16. If the local environment cannot run that baseline, report the exact failure and do not claim verification succeeded.
 
 ## Focused Tests
 
@@ -43,4 +43,3 @@ The dependency set targets legacy Django 2.1 and older Python. If the local envi
 ## Manual Verification Notes
 
 State explicitly when a path was not exercised because it needs a reachable SSH host, SMTP account, cron installation, Alertmanager, LLM credentials, Docker daemon, Kubernetes cluster, or browser session.
-

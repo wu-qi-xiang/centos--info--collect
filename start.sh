@@ -17,7 +17,7 @@ fi
 
 if ! command -v "$PYTHON_BIN" >/dev/null 2>&1 && [ ! -x "$PYTHON_BIN" ]; then
     echo "Python interpreter not found or not executable: $PYTHON_BIN" >&2
-    echo "Run: python3 -m venv .venv && .venv/bin/pip install Django==2.1.7" >&2
+    echo "Run: python3.11 -m venv .venv && .venv/bin/pip install -r requirements.txt" >&2
     exit 1
 fi
 

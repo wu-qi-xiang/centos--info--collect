@@ -1,7 +1,7 @@
 import csv
 import json
 import re
-from datetime import timedelta
+from datetime import datetime, timedelta
 try:
     from urllib import parse as urlparse
 except ImportError:
@@ -10,7 +10,7 @@ except ImportError:
 from django.conf import settings
 from django.core.paginator import Paginator
 from django.db import models
-from django.http import Http404, HttpResponse, HttpResponseForbidden, HttpResponseNotAllowed
+from django.http import Http404, HttpResponse, HttpResponseBadRequest, HttpResponseForbidden, HttpResponseNotAllowed
 from django.shortcuts import get_object_or_404, redirect, render
 from django.utils import timezone
 try:
@@ -41,7 +41,11 @@ from .forms import (
     K8sClusterConnectionForm,
     K8sClusterForm,
     NotificationChannelForm,
+    NotificationTemplateForm,
+    AlertNotificationEscalationForm,
     ServiceOperationForm,
+    ServiceCatalogForm,
+    ProjectOnboardingForm,
 )
 from .models import (
     AlertEvent,
@@ -65,9 +69,16 @@ from .models import (
     MetricSample,
     NotificationChannel,
     NotificationLog,
+    NotificationTemplate,
+    AlertNotificationEscalation,
     ServiceOperation,
+    ServiceCatalog,
+    ServiceDependency,
+    DevOpsProject,
     ComplianceBaseline,
     ComplianceResult,
+    IntegrationHealthEvent,
+    MaintenanceWindow,
 )
 from .services import (
     COMMAND_ALLOWED,
@@ -93,6 +104,7 @@ from .services import (
     visible_hosts_for_request,
     service_command,
     latest_metric_map,
+    require_deployment_maintenance_approval,
     clear_k8s_detail_cache,
     load_cached_k8s_cluster_detail,
     load_cached_k8s_node_detail,
@@ -101,6 +113,8 @@ from .services import (
     test_k8s_cluster_connection,
     scan_compliance_baseline,
     resolve_alert,
+    create_project_onboarding,
+    summarize_integration_health,
 )
 
 
@@ -289,6 +303,10 @@ def notification_channel_audit_detail(channel, action):
         bool(channel.notify_deployment),
         bool(channel.enabled),
     )
+
+
+def notification_governance_audit_detail(action, detail):
+    return '%s %s' % (action, detail)
 
 
 def csv_safe_cell(value):
@@ -611,6 +629,175 @@ def service_manage(request):
     })
 
 
+def topology_services_queryset(request):
+    hosts = visible_hosts_for_request(request)
+    services = ServiceCatalog.objects.filter(
+        models.Q(hosts__in=hosts) | models.Q(hosts__isnull=True)
+    ).distinct()
+    return services.prefetch_related(
+        models.Prefetch('hosts', queryset=hosts, to_attr='visible_hosts'),
+        models.Prefetch(
+            'upstream_links',
+            queryset=ServiceDependency.objects.filter(
+                upstream_service__in=services
+            ).select_related('upstream_service'),
+            to_attr='visible_upstream_links',
+        ),
+    )
+
+
+def topology_service_choices(request):
+    hosts = visible_hosts_for_request(request)
+    return ServiceCatalog.objects.filter(
+        models.Q(hosts__in=hosts) | models.Q(hosts__isnull=True)
+    ).distinct()
+
+
+def topology_service_form(request, *args, **kwargs):
+    form = ServiceCatalogForm(
+        *args,
+        upstream_services_queryset=topology_service_choices(request),
+        **kwargs
+    )
+    return apply_host_queryset(form, visible_hosts_for_request(request))
+
+
+def save_service_topology_dependencies(service, upstream_services):
+    ServiceDependency.objects.filter(service=service).delete()
+    ServiceDependency.objects.bulk_create([
+        ServiceDependency(service=service, upstream_service=upstream)
+        for upstream in upstream_services
+        if upstream.id != service.id
+    ])
+
+
+@session_login_required
+def service_topology(request):
+    denied = require_devops_role(request, DevOpsRole.ROLE_VIEWER, MODULE_SERVICE)
+    if denied:
+        return denied
+    return render(request, 'devops/service_topology.html', {
+        'services': topology_services_queryset(request),
+        'create_form': topology_service_form(request),
+        'can_manage': has_role(request, DevOpsRole.ROLE_OPERATOR, MODULE_SERVICE),
+    })
+
+
+@session_login_required
+def service_topology_create(request):
+    if request.method != 'POST':
+        return HttpResponseNotAllowed(['POST'])
+    denied = require_devops_role(request, DevOpsRole.ROLE_OPERATOR, MODULE_SERVICE)
+    if denied:
+        return denied
+    form = topology_service_form(request, request.POST)
+    if form.is_valid():
+        service = form.save(commit=False)
+        service.created_by = request.session.get('user_name')
+        service.save()
+        form.save_m2m()
+        save_service_topology_dependencies(service, form.cleaned_data['upstream_services'])
+        audit(request, '创建服务拓扑', 'ServiceCatalog', service.id, service.name)
+        return redirect('devops:service_topology')
+    return render(request, 'devops/service_topology.html', {
+        'services': topology_services_queryset(request),
+        'create_form': form,
+        'can_manage': True,
+    }, status=400)
+
+
+@session_login_required
+def service_topology_update(request, id):
+    service = get_object_or_404(topology_services_queryset(request), id=id)
+    if request.method == 'GET':
+        denied = require_devops_role(request, DevOpsRole.ROLE_OPERATOR, MODULE_SERVICE)
+        if denied:
+            return denied
+        return render(request, 'devops/service_topology.html', {
+            'services': topology_services_queryset(request),
+            'create_form': topology_service_form(request),
+            'editing_service': service,
+            'edit_form': topology_service_form(request, instance=service),
+            'can_manage': True,
+        })
+    if request.method != 'POST':
+        return HttpResponseNotAllowed(['GET', 'POST'])
+    denied = require_devops_role(request, DevOpsRole.ROLE_OPERATOR, MODULE_SERVICE)
+    if denied:
+        return denied
+    form = topology_service_form(request, request.POST, instance=service)
+    if not form.is_valid():
+        return render(request, 'devops/service_topology.html', {
+            'services': topology_services_queryset(request),
+            'create_form': topology_service_form(request),
+            'editing_service': service,
+            'edit_form': form,
+            'can_manage': True,
+        }, status=400)
+    service = form.save()
+    save_service_topology_dependencies(service, form.cleaned_data['upstream_services'])
+    audit(request, '更新服务拓扑', 'ServiceCatalog', service.id, service.name)
+    return redirect('devops:service_topology')
+
+
+@session_login_required
+def service_topology_delete(request, id):
+    if request.method != 'POST':
+        return HttpResponseNotAllowed(['POST'])
+    denied = require_devops_role(request, DevOpsRole.ROLE_OPERATOR, MODULE_SERVICE)
+    if denied:
+        return denied
+    service = get_object_or_404(topology_services_queryset(request), id=id)
+    name = service.name
+    service.delete()
+    audit(request, '删除服务拓扑', 'ServiceCatalog', id, name)
+    return redirect('devops:service_topology')
+
+
+def project_onboarding_form(request, *args, **kwargs):
+    form = ProjectOnboardingForm(*args, **kwargs)
+    hosts = visible_hosts_for_request(request)
+    form.fields['hosts'].queryset = hosts
+    form.fields['groups'].queryset = HostGroup.objects.filter(
+        models.Q(hosts__in=hosts) | models.Q(hosts__isnull=True)
+    ).distinct()
+    form.fields['tags'].queryset = HostTag.objects.filter(
+        models.Q(hosts__in=hosts) | models.Q(hosts__isnull=True)
+    ).distinct()
+    form.fields['services'].queryset = topology_service_choices(request)
+    form.fields['deployment_apps'].queryset = DeploymentApp.objects.all()
+    return form
+
+
+def visible_projects_queryset(request):
+    hosts = visible_hosts_for_request(request)
+    return DevOpsProject.objects.filter(
+        models.Q(hosts__in=hosts) | models.Q(hosts__isnull=True)
+    ).distinct().prefetch_related('hosts', 'groups', 'tags', 'services', 'deployment_apps')
+
+
+@session_login_required
+def project_onboarding(request):
+    denied = require_devops_role(request, DevOpsRole.ROLE_ADMIN, MODULE_SECURITY)
+    if denied:
+        return denied
+    if request.method == 'POST':
+        form = project_onboarding_form(request, request.POST)
+        if form.is_valid():
+            create_project_onboarding(request, form.cleaned_data)
+            return redirect('devops:project_onboarding')
+        return render(request, 'devops/project_onboarding.html', {
+            'form': form,
+            'projects': visible_projects_queryset(request),
+        }, status=400)
+    if request.method != 'GET':
+        return HttpResponseNotAllowed(['GET', 'POST'])
+    return render(request, 'devops/project_onboarding.html', {
+        'form': project_onboarding_form(request),
+        'projects': visible_projects_queryset(request),
+    })
+
+
 def metric_percent(value):
     try:
         number = float(value)
@@ -782,12 +969,19 @@ def deployments(request):
                     )
                     release.save()
                     release_form.save_m2m()
-                    if submit_for_approval:
+                    maintenance_approval = require_deployment_maintenance_approval(
+                        release,
+                        requester=request.session.get('user_name'),
+                    )
+                    if submit_for_approval or maintenance_approval:
+                        if maintenance_approval and release.status != DeploymentRelease.STATUS_PENDING:
+                            release.status = DeploymentRelease.STATUS_PENDING
+                            release.save(update_fields=['status'])
                         approval = create_deployment_approval(
                             release,
                             request.session.get('user_name'),
                             release.description,
-                        )
+                        ) if not maintenance_approval else maintenance_approval
                         audit(request, '提交发布审批', 'ApprovalRequest', approval.id, approval.title)
                     else:
                         enqueue_background_job(execute_deployment_release, release, user_role(request))
@@ -835,6 +1029,101 @@ def deployment_rollback(request, id):
     enqueue_background_job(execute_deployment_rollback, release, user_role(request))
     audit(request, '提交回滚', 'DeploymentRelease', release.id, release.version)
     return redirect('devops:deployment_detail', id=release.id)
+
+
+def maintenance_window_datetime(value):
+    """Parse the browser's local datetime input without accepting offsets."""
+    try:
+        parsed = datetime.strptime(value or '', '%Y-%m-%dT%H:%M')
+    except (TypeError, ValueError):
+        return None
+    return timezone.make_aware(parsed, timezone.get_current_timezone())
+
+
+def maintenance_window_scope(request, posted_hosts, posted_services):
+    """Resolve selected targets and ensure each remains in the caller's scope."""
+    try:
+        host_ids = [int(item) for item in posted_hosts]
+        service_ids = [int(item) for item in posted_services]
+    except (TypeError, ValueError):
+        return None, None
+    if len(set(host_ids)) != len(host_ids) or len(set(service_ids)) != len(service_ids):
+        return None, None
+    hosts = list(NewLinux.objects.filter(id__in=host_ids))
+    services = list(ServiceCatalog.objects.filter(id__in=service_ids).prefetch_related('hosts'))
+    if len(hosts) != len(host_ids) or len(services) != len(service_ids):
+        return None, None
+    if not can_access_hosts(request, hosts):
+        return None, None
+    for service in services:
+        if not can_access_hosts(request, service.hosts.all()):
+            return None, None
+    return hosts, services
+
+
+def can_manage_maintenance_window(request, window):
+    targets = list(window.hosts.all())
+    for service in window.services.prefetch_related('hosts'):
+        service_hosts = list(service.hosts.all())
+        # A service without topology cannot be safely scoped to this user.
+        if not service_hosts:
+            return False
+        targets.extend(service_hosts)
+    return bool(targets) and can_access_hosts(request, targets)
+
+
+@session_login_required
+def maintenance_windows(request):
+    denied = require_devops_role(request, DevOpsRole.ROLE_ADMIN, MODULE_SECURITY)
+    if denied:
+        return denied
+    hosts = visible_hosts_for_request(request)
+    if request.method == 'POST':
+        starts_at = maintenance_window_datetime(request.POST.get('starts_at'))
+        ends_at = maintenance_window_datetime(request.POST.get('ends_at'))
+        name = (request.POST.get('name') or '').strip()
+        reason = (request.POST.get('reason') or '').strip()
+        selected_hosts, selected_services = maintenance_window_scope(
+            request, request.POST.getlist('hosts'), request.POST.getlist('services'))
+        if (not name or len(name) > 120 or len(reason) > 500 or not starts_at or
+                not ends_at or ends_at <= starts_at or not (selected_hosts or selected_services)):
+            return HttpResponseBadRequest('维护窗口参数无效')
+        window = MaintenanceWindow(
+            name=name,
+            reason=reason,
+            starts_at=starts_at,
+            ends_at=ends_at,
+            enabled=request.POST.get('enabled') == 'on',
+            created_by=request.session.get('user_name', ''),
+        )
+        window.full_clean()
+        window.save()
+        window.hosts.set(selected_hosts)
+        window.services.set(selected_services)
+        audit(request, '创建维护窗口', 'MaintenanceWindow', window.id, window.name)
+        return redirect('devops:maintenance_windows')
+    return render(request, 'devops/maintenance_windows.html', {
+        'windows': [window for window in MaintenanceWindow.objects.prefetch_related(
+            'hosts', 'services__hosts').all() if can_manage_maintenance_window(request, window)][:100],
+        'hosts': hosts,
+        'services': ServiceCatalog.objects.prefetch_related('hosts').all(),
+    })
+
+
+@session_login_required
+def maintenance_window_toggle(request, id):
+    denied = require_devops_role(request, DevOpsRole.ROLE_ADMIN, MODULE_SECURITY)
+    if denied:
+        return denied
+    if request.method != 'POST':
+        return HttpResponseNotAllowed(['POST'])
+    window = get_object_or_404(MaintenanceWindow, id=id)
+    if not can_manage_maintenance_window(request, window):
+        return host_forbidden(request, window.name)
+    window.enabled = not window.enabled
+    window.save(update_fields=['enabled', 'updated_at'])
+    audit(request, '切换维护窗口', 'MaintenanceWindow', window.id, window.name)
+    return redirect('devops:maintenance_windows')
 
 
 @session_login_required
@@ -960,6 +1249,16 @@ def alert_events(request):
             metric='collector',
             status__in=[AlertEvent.STATUS_OPEN, AlertEvent.STATUS_PROCESSING, AlertEvent.STATUS_SILENCED],
         ).count(),
+    })
+
+
+@session_login_required
+def incidents_page(request):
+    denied = require_devops_role(request, DevOpsRole.ROLE_VIEWER, MODULE_ALERT)
+    if denied:
+        return denied
+    return render(request, 'devops/incidents.html', {
+        'can_operate_incidents': has_role(request, DevOpsRole.ROLE_OPERATOR, MODULE_ALERT),
     })
 
 
@@ -1215,10 +1514,83 @@ def notification_channels(request):
     denied = require_devops_role(request, DevOpsRole.ROLE_VIEWER, MODULE_SECURITY)
     if denied:
         return denied
+    logs = NotificationLog.objects.select_related('channel')
+    channel_id = request.GET.get('channel')
+    event_type = request.GET.get('event_type')
+    status = request.GET.get('status')
+    channels = NotificationChannel.objects.all()
+    if channel_id:
+        try:
+            channel_id = int(channel_id)
+        except (TypeError, ValueError):
+            return HttpResponseBadRequest('通知渠道参数无效')
+        if not channels.filter(id=channel_id).exists():
+            return HttpResponseBadRequest('通知渠道参数无效')
+        logs = logs.filter(channel_id=channel_id)
+    valid_events = [choice[0] for choice in NotificationLog.EVENT_CHOICES]
+    if event_type and event_type not in valid_events:
+        return HttpResponseBadRequest('通知事件类型无效')
+    if event_type:
+        logs = logs.filter(event_type=event_type)
+    valid_statuses = [choice[0] for choice in NotificationLog.STATUS_CHOICES]
+    if status and status not in valid_statuses:
+        return HttpResponseBadRequest('通知状态无效')
+    if status:
+        logs = logs.filter(status=status)
+    templates = {}
+    for item in NotificationTemplate.objects.all():
+        templates[item.event_type] = NotificationTemplateForm(instance=item)
+    template_rows = []
+    for event, label in NotificationTemplate.EVENT_CHOICES:
+        if event not in templates:
+            templates[event] = NotificationTemplateForm()
+        template_rows.append({'event': event, 'label': label, 'form': templates[event]})
+    escalation = AlertNotificationEscalation.current()
     return render(request, 'devops/notifications.html', {
         'form': NotificationChannelForm(),
-        'channels': NotificationChannel.objects.all(),
-        'logs': NotificationLog.objects.select_related('channel')[:50],
+        'channels': channels,
+        'logs': logs[:50],
+        'template_rows': template_rows,
+        'template_events': NotificationTemplate.EVENT_CHOICES,
+        'escalation_form': AlertNotificationEscalationForm(instance=escalation),
+        'selected_channel': channel_id,
+        'selected_event_type': event_type,
+        'selected_status': status,
+    })
+
+
+@session_login_required
+def integration_health(request):
+    denied = require_devops_role(request, DevOpsRole.ROLE_ADMIN, MODULE_SECURITY)
+    if denied:
+        return denied
+    from monitor.models import AlertmanagerConfig, PrometheusConfig
+    from .api import configured_integration_health, notification_health_summary
+    return render(request, 'devops/integration_health.html', {
+        'github': summarize_integration_health(
+            IntegrationHealthEvent.TYPE_GITHUB_INBOUND,
+            source_name=IntegrationHealthEvent.SOURCE_GITHUB_INBOUND,
+        ),
+        'prometheus': configured_integration_health(
+            PrometheusConfig.objects.only('id', 'name', 'enabled').order_by('id'),
+            IntegrationHealthEvent.TYPE_PROMETHEUS,
+        ),
+        'alertmanager': configured_integration_health(
+            AlertmanagerConfig.objects.only('id', 'name', 'enabled').order_by('id'),
+            IntegrationHealthEvent.TYPE_ALERTMANAGER,
+        ),
+        'notifications': notification_health_summary(),
+    })
+
+
+@session_login_required
+def worker_observability(request):
+    denied = require_devops_role(request, DevOpsRole.ROLE_ADMIN, MODULE_SECURITY)
+    if denied:
+        return denied
+    from .api import worker_observability_payload
+    return render(request, 'devops/worker_observability.html', {
+        'worker': worker_observability_payload(),
     })
 
 
@@ -1281,6 +1653,48 @@ def notification_test(request, id):
         '这是一条来自 DevOps 平台的测试消息',
     )
     audit(request, '测试通知渠道', 'NotificationChannel', channel.id, channel.name)
+    return redirect('devops:notification_channels')
+
+
+@session_login_required
+def notification_template_update(request, event_type):
+    denied = require_devops_role(request, DevOpsRole.ROLE_ADMIN, MODULE_SECURITY)
+    if denied:
+        return denied
+    if request.method != 'POST':
+        return HttpResponseNotAllowed(['POST'])
+    valid_events = [choice[0] for choice in NotificationTemplate.EVENT_CHOICES]
+    if event_type not in valid_events:
+        raise Http404
+    template, unused_created = NotificationTemplate.objects.get_or_create(event_type=event_type)
+    form = NotificationTemplateForm(request.POST, instance=template)
+    if form.is_valid():
+        template = form.save(commit=False)
+        template.updated_by = request.session.get('user_name')
+        template.save()
+        audit(request, '更新通知模板', 'NotificationTemplate', template.id,
+              notification_governance_audit_detail('更新模板', '事件=%s' % event_type))
+    return redirect('devops:notification_channels')
+
+
+@session_login_required
+def notification_escalation_update(request):
+    denied = require_devops_role(request, DevOpsRole.ROLE_ADMIN, MODULE_SECURITY)
+    if denied:
+        return denied
+    if request.method != 'POST':
+        return HttpResponseNotAllowed(['POST'])
+    escalation = AlertNotificationEscalation.current()
+    form = AlertNotificationEscalationForm(request.POST, instance=escalation)
+    if form.is_valid():
+        escalation = form.save(commit=False)
+        escalation.updated_by = request.session.get('user_name')
+        escalation.save()
+        audit(request, '更新告警升级规则', 'AlertNotificationEscalation', escalation.id,
+              notification_governance_audit_detail('更新升级规则', '启用=%s, 最低级别=%s, 渠道=%s' % (
+                  bool(escalation.enabled), escalation.minimum_level,
+                  escalation.channel.name if escalation.channel else '-',
+              )))
     return redirect('devops:notification_channels')
 
 

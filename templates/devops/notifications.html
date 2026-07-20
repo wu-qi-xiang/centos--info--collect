@@ -71,11 +71,51 @@
         </div>
     </div>
 
+    <div class="row g-3 mb-3">
+        <div class="col-lg-7">
+            <div class="card">
+                <div class="card-header">事件模板</div>
+                <div class="card-body">
+                    <div class="small text-muted mb-2">仅替换固定占位符，不执行模板表达式。通用：{% templatetag openvariable %}title{% templatetag closevariable %}、{% templatetag openvariable %}content{% templatetag closevariable %}；告警：host、metric、level、status、message。</div>
+                    {% for row in template_rows %}
+                    <form method="post" action="{% url 'devops:notification_template_update' row.event %}" class="border-top pt-2 mt-2">
+                        {% csrf_token %}
+                        <div class="fw-semibold mb-2">{{ row.label }}</div>
+                        <div class="mb-2"><label class="form-label">标题模板</label>{{ row.form.title_template }}</div>
+                        <div class="mb-2"><label class="form-label">内容模板</label>{{ row.form.content_template }}</div>
+                        <button class="btn btn-sm btn-outline-primary" type="submit">保存模板</button>
+                    </form>
+                    {% endfor %}
+                </div>
+            </div>
+        </div>
+        <div class="col-lg-5">
+            <div class="card">
+                <div class="card-header">告警升级</div>
+                <div class="card-body">
+                    <form method="post" action="{% url 'devops:notification_escalation_update' %}">
+                        {% csrf_token %}
+                        <div class="form-check mb-2">{{ escalation_form.enabled }} <label class="form-check-label" for="{{ escalation_form.enabled.id_for_label }}">启用升级路由</label></div>
+                        <div class="mb-2"><label class="form-label">最低级别</label>{{ escalation_form.minimum_level }}</div>
+                        <div class="mb-3"><label class="form-label">附加渠道</label>{{ escalation_form.channel }}</div>
+                        <button class="btn btn-sm btn-outline-primary" type="submit">保存规则</button>
+                    </form>
+                </div>
+            </div>
+        </div>
+    </div>
+
     <div class="card">
         <div class="card-header">近期发送日志</div>
         <div class="card-body table-responsive">
+            <form method="get" class="row g-2 mb-3">
+                <div class="col-md-3"><select name="channel" class="form-select form-select-sm"><option value="">全部渠道</option>{% for channel in channels %}<option value="{{ channel.id }}" {% if selected_channel == channel.id %}selected{% endif %}>{{ channel.name }}</option>{% endfor %}</select></div>
+                <div class="col-md-3"><select name="event_type" class="form-select form-select-sm"><option value="">全部事件</option>{% for event, label in template_events %}<option value="{{ event }}" {% if selected_event_type == event %}selected{% endif %}>{{ label }}</option>{% endfor %}<option value="test" {% if selected_event_type == 'test' %}selected{% endif %}>测试</option></select></div>
+                <div class="col-md-3"><select name="status" class="form-select form-select-sm"><option value="">全部状态</option><option value="success" {% if selected_status == 'success' %}selected{% endif %}>成功</option><option value="failed" {% if selected_status == 'failed' %}selected{% endif %}>失败</option></select></div>
+                <div class="col-md-3"><button class="btn btn-sm btn-outline-secondary" type="submit">筛选</button></div>
+            </form>
             <table class="table table-sm">
-                <tr><th>时间</th><th>渠道</th><th>事件</th><th>标题</th><th>状态</th><th>响应</th></tr>
+                <tr><th>时间</th><th>渠道</th><th>事件</th><th>标题</th><th>状态</th><th>尝试</th><th>响应</th></tr>
                 {% for log in logs %}
                 <tr>
                     <td>{{ log.created_at|date:"Y-m-d H:i:s" }}</td>
@@ -83,9 +123,10 @@
                     <td>{{ log.get_event_type_display }}</td>
                     <td>{{ log.title }}</td>
                     <td>{{ log.get_status_display }}</td>
+                    <td>{{ log.attempt_count }}</td>
                     <td><code>{{ log.response|truncatechars:120 }}</code></td>
                 </tr>
-                {% empty %}<tr><td colspan="6" class="text-muted">暂无发送日志</td></tr>{% endfor %}
+                {% empty %}<tr><td colspan="7" class="text-muted">暂无发送日志</td></tr>{% endfor %}
             </table>
         </div>
     </div>

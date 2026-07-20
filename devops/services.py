@@ -1,8 +1,10 @@
 import base64
+from datetime import timedelta
 from decimal import Decimal, InvalidOperation
 import hashlib
 import hmac
 import json
+import math
 import os
 import re
 import subprocess
@@ -10,7 +12,6 @@ import tempfile
 import time
 import posixpath
 import shlex
-from threading import Thread
 try:
     from urllib import parse as urlparse
 except ImportError:
@@ -22,7 +23,7 @@ except ImportError:
 
 from django.conf import settings
 from django.core.cache import cache
-from django.db import models
+from django.db import models, transaction
 from django.utils import timezone
 try:
     import requests
@@ -52,11 +53,14 @@ from RemoteLinux.ssh_utils import create_host_ssh_client, describe_ssh_error
 from .models import (
     AlertEvent,
     AlertHistory,
+    Incident,
+    IncidentTimeline,
     AlertSilence,
     ApprovalRequest,
     AuditLog,
     BatchTask,
     BatchTaskResult,
+    BackgroundJob,
     CommandExecution,
     CommandPolicy,
     DeploymentRelease,
@@ -70,8 +74,17 @@ from .models import (
     K8sCluster,
     NotificationChannel,
     NotificationLog,
+    NotificationTemplate,
+    AlertNotificationEscalation,
     ComplianceBaseline,
     ComplianceResult,
+    DevOpsProject,
+    DeploymentApp,
+    HostGroup,
+    HostTag,
+    IntegrationHealthEvent,
+    MaintenanceWindow,
+    ServiceCatalog,
 )
 from RemoteLinux.models import NewLinux
 
@@ -882,10 +895,445 @@ def claim_deployment_rollback(release):
 def enqueue_background_job(target, *args, **kwargs):
     if getattr(settings, 'DEVOPS_SYNC_TASKS', False):
         return target(*args, **kwargs)
-    thread = Thread(target=run_background_job, args=(target, args, kwargs))
-    thread.daemon = True
-    thread.start()
-    return thread
+    job_type, target_id, role = background_job_spec(target, args, kwargs)
+    return BackgroundJob.objects.create(
+        job_type=job_type,
+        target_id=target_id,
+        role=role,
+    )
+
+
+def background_job_spec(target, args, kwargs):
+    """Convert a supported execution call into a safe durable queue reference."""
+    if kwargs and set(kwargs) != set(['role']):
+        raise ValueError('后台任务仅支持 role 参数')
+    if not args:
+        raise ValueError('后台任务缺少目标记录')
+
+    obj = args[0]
+    role = kwargs.get('role', args[1] if len(args) > 1 else '')
+    if len(args) > 2 or (role and not isinstance(role, str)):
+        raise ValueError('后台任务参数无效')
+
+    supported = (
+        (execute_command_record, CommandExecution, BackgroundJob.TYPE_COMMAND),
+        (execute_batch_task, BatchTask, BackgroundJob.TYPE_BATCH_TASK),
+        (execute_file_distribution, FileDistribution, BackgroundJob.TYPE_FILE_DISTRIBUTION),
+        (execute_deployment_release, DeploymentRelease, BackgroundJob.TYPE_DEPLOYMENT),
+        (execute_deployment_rollback, DeploymentRelease, BackgroundJob.TYPE_ROLLBACK),
+    )
+    for expected_target, model_class, job_type in supported:
+        if target is expected_target and isinstance(obj, model_class) and obj.pk:
+            if job_type == BackgroundJob.TYPE_FILE_DISTRIBUTION and role:
+                raise ValueError('文件分发任务不支持 role 参数')
+            return job_type, obj.pk, role
+    raise ValueError('不支持的后台任务类型')
+
+
+def claim_next_background_job():
+    """Atomically claim one pending row without holding a transaction for I/O."""
+    candidate_ids = BackgroundJob.objects.filter(
+        status=BackgroundJob.STATUS_PENDING,
+    ).order_by('id').values_list('id', flat=True)[:20]
+    now = timezone.now()
+    for job_id in candidate_ids:
+        updated = BackgroundJob.objects.filter(
+            id=job_id,
+            status=BackgroundJob.STATUS_PENDING,
+        ).update(
+            status=BackgroundJob.STATUS_RUNNING,
+            attempts=models.F('attempts') + 1,
+            started_at=now,
+            finished_at=None,
+            error='',
+        )
+        if updated:
+            return BackgroundJob.objects.get(id=job_id)
+    return None
+
+
+def background_job_target(job):
+    targets = {
+        BackgroundJob.TYPE_COMMAND: (CommandExecution, execute_command_record),
+        BackgroundJob.TYPE_BATCH_TASK: (BatchTask, execute_batch_task),
+        BackgroundJob.TYPE_FILE_DISTRIBUTION: (FileDistribution, execute_file_distribution),
+        BackgroundJob.TYPE_DEPLOYMENT: (DeploymentRelease, execute_deployment_release),
+        BackgroundJob.TYPE_ROLLBACK: (DeploymentRelease, execute_deployment_rollback),
+    }
+    model_class, target = targets[job.job_type]
+    obj = model_class.objects.filter(id=job.target_id).first()
+    if obj is None:
+        raise ValueError('后台任务目标不存在')
+    return target, obj
+
+
+def process_background_job(job):
+    """Run a claimed job and record the worker result after remote work finishes."""
+    try:
+        target, obj = background_job_target(job)
+        if job.job_type == BackgroundJob.TYPE_FILE_DISTRIBUTION:
+            target(obj)
+        elif job.role:
+            target(obj, job.role)
+        else:
+            target(obj)
+    except Exception as exc:
+        mark_background_failure(target if 'target' in locals() else job.job_type, (obj,) if 'obj' in locals() else (), exc)
+        message = '后台任务异常：%s' % exc
+        BackgroundJob.objects.filter(id=job.id, status=BackgroundJob.STATUS_RUNNING).update(
+            status=BackgroundJob.STATUS_FAILED,
+            error=message[:500],
+            finished_at=timezone.now(),
+        )
+        return False
+
+    BackgroundJob.objects.filter(id=job.id, status=BackgroundJob.STATUS_RUNNING).update(
+        status=BackgroundJob.STATUS_SUCCESS,
+        finished_at=timezone.now(),
+    )
+    return True
+
+
+def fail_timed_out_background_jobs(timeout_seconds):
+    """Fail abandoned claims rather than replaying ambiguous remote operations."""
+    try:
+        timeout_seconds = int(timeout_seconds)
+    except (TypeError, ValueError):
+        return 0
+    if timeout_seconds <= 0:
+        return 0
+    expired_before = timezone.now() - timedelta(seconds=timeout_seconds)
+    jobs = list(BackgroundJob.objects.filter(
+        status=BackgroundJob.STATUS_RUNNING,
+        started_at__lt=expired_before,
+    ).order_by('id')[:100])
+    failed = 0
+    message = '后台任务超时，未自动重放以避免重复远程操作'
+    for job in jobs:
+        updated = BackgroundJob.objects.filter(
+            id=job.id,
+            status=BackgroundJob.STATUS_RUNNING,
+        ).update(status=BackgroundJob.STATUS_FAILED, error=message, finished_at=timezone.now())
+        if not updated:
+            continue
+        failed += 1
+        try:
+            target, obj = background_job_target(job)
+        except Exception:
+            target, obj = job.job_type, None
+        mark_background_failure(target, (obj,) if obj else (), RuntimeError(message))
+    return failed
+
+
+BACKGROUND_JOB_DEFAULT_TIMEOUT_SECONDS = 300
+BACKGROUND_JOB_RECENT_WINDOW = timedelta(hours=1)
+WORKER_ALERT_METRIC_PENDING = 'worker:pending'
+WORKER_ALERT_METRIC_FAILURE_RATE = 'worker:failure_rate'
+WORKER_ALERT_METRIC_TIMED_OUT = 'worker:timed_out'
+
+WORKER_ALERT_THRESHOLDS = (
+    (
+        'DEVOPS_WORKER_ALERT_PENDING_THRESHOLD',
+        WORKER_ALERT_METRIC_PENDING,
+        'pending',
+        AlertEvent.LEVEL_WARNING,
+        'Worker 待处理任务数',
+    ),
+    (
+        'DEVOPS_WORKER_ALERT_FAILURE_RATE_PERCENT_THRESHOLD',
+        WORKER_ALERT_METRIC_FAILURE_RATE,
+        'recent_failure_rate_percent',
+        AlertEvent.LEVEL_WARNING,
+        'Worker 最近一小时任务失败率',
+    ),
+    (
+        'DEVOPS_WORKER_ALERT_TIMED_OUT_THRESHOLD',
+        WORKER_ALERT_METRIC_TIMED_OUT,
+        'timed_out',
+        AlertEvent.LEVEL_WARNING,
+        'Worker 超时任务数',
+    ),
+)
+
+
+def _positive_worker_alert_threshold(setting_name):
+    """Return an enabled numeric worker threshold, otherwise ``None``."""
+    try:
+        threshold = float(getattr(settings, setting_name, 0))
+    except (TypeError, ValueError):
+        return None
+    return threshold if math.isfinite(threshold) and threshold > 0 else None
+
+
+def worker_alert_summary_values(summary=None):
+    """Return the Worker alert values using public threshold units.
+
+    Queue counts are integers and the rolling failure ratio is converted from
+    the internal 0.0--1.0 representation to the configured 0--100 percentage.
+    """
+    summary = summary if summary is not None else summarize_background_jobs()
+    try:
+        pending = float(summary['pending'])
+        timed_out = float(summary['timed_out'])
+        failure_rate_percent = float(summary['recent_failure_rate']) * 100
+    except (KeyError, TypeError, ValueError):
+        raise ValueError('Worker 汇总缺少有效的阈值告警数值。')
+    values = {
+        'pending': pending,
+        'recent_failure_rate_percent': failure_rate_percent,
+        'timed_out': timed_out,
+    }
+    if not all(math.isfinite(value) for value in values.values()):
+        raise ValueError('Worker 汇总缺少有效的阈值告警数值。')
+    return values
+
+
+def summarize_background_jobs(timeout_seconds=None, now=None):
+    """Return numeric-only queue health aggregates without changing job state.
+
+    ``recent_*`` values cover completed jobs whose ``finished_at`` is within the
+    preceding one-hour window.  Invalid worker timeout configuration falls back
+    to 300 seconds so a status read remains available during misconfiguration.
+    """
+    if timeout_seconds is None:
+        timeout_seconds = getattr(
+            settings,
+            'DEVOPS_WORKER_JOB_TIMEOUT_SECONDS',
+            BACKGROUND_JOB_DEFAULT_TIMEOUT_SECONDS,
+        )
+    try:
+        timeout_seconds = int(timeout_seconds)
+    except (TypeError, ValueError):
+        timeout_seconds = BACKGROUND_JOB_DEFAULT_TIMEOUT_SECONDS
+    if timeout_seconds <= 0:
+        timeout_seconds = BACKGROUND_JOB_DEFAULT_TIMEOUT_SECONDS
+
+    now = now or timezone.now()
+    status_counts = {
+        row['status']: row['total']
+        for row in BackgroundJob.objects.values('status').annotate(
+            total=models.Count('id'),
+        )
+    }
+    expired_before = now - timedelta(seconds=timeout_seconds)
+    timed_out = BackgroundJob.objects.filter(
+        status=BackgroundJob.STATUS_RUNNING,
+        started_at__lt=expired_before,
+    ).count()
+
+    recent_counts = {
+        row['status']: row['total']
+        for row in BackgroundJob.objects.filter(
+            status__in=(BackgroundJob.STATUS_SUCCESS, BackgroundJob.STATUS_FAILED),
+            finished_at__gte=now - BACKGROUND_JOB_RECENT_WINDOW,
+        ).values('status').annotate(total=models.Count('id'))
+    }
+    recent_completed = sum(recent_counts.values())
+    recent_failed = recent_counts.get(BackgroundJob.STATUS_FAILED, 0)
+
+    return {
+        'pending': status_counts.get(BackgroundJob.STATUS_PENDING, 0),
+        'running': status_counts.get(BackgroundJob.STATUS_RUNNING, 0),
+        'success': status_counts.get(BackgroundJob.STATUS_SUCCESS, 0),
+        'failed': status_counts.get(BackgroundJob.STATUS_FAILED, 0),
+        'timed_out': timed_out,
+        'recent_completed': recent_completed,
+        'recent_failed': recent_failed,
+        'recent_failure_rate': (
+            float(recent_failed) / recent_completed if recent_completed else 0.0
+        ),
+    }
+
+
+def evaluate_worker_alert_thresholds(summary=None):
+    """Record or resolve system Worker alerts from the read-only queue summary.
+
+    A threshold at or below zero (and malformed values) disables that individual
+    check.  Failure-rate thresholds use the summary's 0.0--1.0 ratio.
+    """
+    values = worker_alert_summary_values(summary)
+    alerts = {}
+    for setting_name, metric, summary_key, level, label in WORKER_ALERT_THRESHOLDS:
+        threshold = _positive_worker_alert_threshold(setting_name)
+        if threshold is None:
+            alerts[metric] = None
+            continue
+        value = values[summary_key]
+        if value >= threshold:
+            alert, created = record_alert(
+                None,
+                metric,
+                '%s为 %s，达到阈值 %s。' % (label, value, threshold),
+                level,
+            )
+            alerts[metric] = {'alert': alert, 'created': created, 'triggered': True}
+        else:
+            alerts[metric] = {
+                'alert': resolve_alert(
+                    None,
+                    metric,
+                    '%s已恢复正常：当前值 %s，阈值 %s。' % (label, value, threshold),
+                ),
+                'created': False,
+                'triggered': False,
+            }
+    return alerts
+
+
+INTEGRATION_HEALTH_SUMMARIES = {
+    IntegrationHealthEvent.CATEGORY_OK: '连接或投递正常',
+    IntegrationHealthEvent.CATEGORY_HTTP_ERROR: '远端返回 HTTP 错误',
+    IntegrationHealthEvent.CATEGORY_TIMEOUT: '请求超时',
+    IntegrationHealthEvent.CATEGORY_REQUEST_ERROR: '请求异常',
+    IntegrationHealthEvent.CATEGORY_CONFIGURATION: '配置不可用',
+    IntegrationHealthEvent.CATEGORY_VALIDATION_ERROR: '请求校验失败',
+    IntegrationHealthEvent.CATEGORY_REJECTED: '请求已拒绝',
+    IntegrationHealthEvent.CATEGORY_DUPLICATE: '重复投递已忽略',
+    IntegrationHealthEvent.CATEGORY_UNAVAILABLE: '服务暂不可用',
+    IntegrationHealthEvent.CATEGORY_INTERNAL_ERROR: '处理异常',
+}
+
+
+def _integration_health_source(source=None, source_id=None, source_name=''):
+    """Return a safe configuration/channel reference without serializing values."""
+    if source is not None:
+        if isinstance(source, int):
+            source_id = source
+        elif isinstance(source, str):
+            source_name = source
+        else:
+            source_id = getattr(source, 'pk', source_id)
+            source_name = getattr(source, 'name', source_name)
+
+    try:
+        source_id = int(source_id) if source_id not in (None, '') else None
+    except (TypeError, ValueError):
+        raise ValueError('集成来源编号无效')
+    if source_id is not None and source_id <= 0:
+        raise ValueError('集成来源编号无效')
+
+    source_name = str(source_name or '').replace('\n', ' ').replace('\r', ' ').strip()
+    # References are labels only. Drop URL-like or query-like input rather than
+    # risking an endpoint, token, or other secret entering this audit table.
+    if any(marker in source_name for marker in ('://', '/', '?', '&', '=', '@')):
+        source_name = ''
+    source_name = re.sub(r'[^\w .()#-]', '', source_name).strip()[:100]
+    return source_id, source_name
+
+
+def _integration_health_status(status, category):
+    allowed_types = set(item[0] for item in IntegrationHealthEvent.TYPE_CHOICES)
+    allowed_statuses = set(item[0] for item in IntegrationHealthEvent.STATUS_CHOICES)
+    allowed_categories = set(item[0] for item in IntegrationHealthEvent.CATEGORY_CHOICES)
+    if status not in allowed_statuses:
+        raise ValueError('集成健康状态无效')
+    if not category:
+        category = (IntegrationHealthEvent.CATEGORY_OK
+                    if status == IntegrationHealthEvent.STATUS_SUCCESS
+                    else IntegrationHealthEvent.CATEGORY_INTERNAL_ERROR)
+    if category not in allowed_categories:
+        raise ValueError('集成健康分类无效')
+    if status == IntegrationHealthEvent.STATUS_SUCCESS and category not in (
+            IntegrationHealthEvent.CATEGORY_OK,
+            IntegrationHealthEvent.CATEGORY_DUPLICATE):
+        raise ValueError('成功事件仅支持正常或重复分类')
+    return allowed_types, category
+
+
+def integration_health_summary(category, summary=''):
+    """Return a fixed safe message; never persist caller or remote response text."""
+    return INTEGRATION_HEALTH_SUMMARIES[category]
+
+
+def record_integration_health_event(integration_type, source=None,
+                                    status=IntegrationHealthEvent.STATUS_SUCCESS,
+                                    category='', summary='', occurred_at=None,
+                                    source_id=None, source_name=''):
+    """Append a safe outcome for a configured external integration.
+
+    ``summary`` is deliberately accepted only for a stable caller signature and
+    is discarded.  Categories select the fixed summaries above, so raw response
+    bodies, webhook payloads, headers, URLs, and exception messages cannot be
+    written to this table.
+    """
+    allowed_types, category = _integration_health_status(status, category)
+    if integration_type not in allowed_types:
+        raise ValueError('集成类型无效')
+    source_id, source_name = _integration_health_source(source, source_id, source_name)
+    return IntegrationHealthEvent.objects.create(
+        integration_type=integration_type,
+        source_id=source_id,
+        source_name=source_name,
+        status=status,
+        category=category,
+        summary=integration_health_summary(category, summary),
+        occurred_at=occurred_at or timezone.now(),
+    )
+
+
+def summarize_integration_health(integration_type, source=None, source_id=None,
+                                 source_name='', recent_since=None):
+    """Return safe status counts and latest outcome for one integration reference."""
+    allowed_types, unused_category = _integration_health_status(
+        IntegrationHealthEvent.STATUS_SUCCESS, IntegrationHealthEvent.CATEGORY_OK)
+    if integration_type not in allowed_types:
+        raise ValueError('集成类型无效')
+    source_id, source_name = _integration_health_source(source, source_id, source_name)
+    events = IntegrationHealthEvent.objects.filter(integration_type=integration_type)
+    if source_id is not None:
+        events = events.filter(source_id=source_id)
+    if source_name:
+        events = events.filter(source_name=source_name)
+
+    latest = events.first()
+    consecutive_failures = 0
+    for event in events.only('status'):
+        if event.status != IntegrationHealthEvent.STATUS_FAILED:
+            break
+        consecutive_failures += 1
+
+    recent_since = recent_since or (timezone.now() - timedelta(hours=24))
+    recent_events = events.filter(occurred_at__gte=recent_since)
+    recent_event_counts = {
+        'total': recent_events.count(),
+        IntegrationHealthEvent.STATUS_SUCCESS: recent_events.filter(
+            status=IntegrationHealthEvent.STATUS_SUCCESS).count(),
+        IntegrationHealthEvent.STATUS_FAILED: recent_events.filter(
+            status=IntegrationHealthEvent.STATUS_FAILED).count(),
+    }
+    current_status = latest.status if latest else 'unknown'
+    return {
+        'integration_type': integration_type,
+        'source_id': source_id,
+        'source_name': source_name,
+        'current_state': current_status,
+        'current_status': current_status,
+        'latest_check': latest.occurred_at if latest else None,
+        'latest_category': latest.category if latest else '',
+        'latest_summary': latest.summary if latest else '',
+        'consecutive_failures': consecutive_failures,
+        'recent_since': recent_since,
+        'recent_event_counts': recent_event_counts,
+    }
+
+
+def process_next_background_job(max_attempts=1):
+    job = claim_next_background_job()
+    if job is None:
+        return None
+    try:
+        max_attempts = max(1, int(max_attempts))
+    except (TypeError, ValueError):
+        max_attempts = 1
+    if job.attempts > max_attempts:
+        BackgroundJob.objects.filter(id=job.id).update(
+            status=BackgroundJob.STATUS_FAILED,
+            error='后台任务超过最大尝试次数',
+            finished_at=timezone.now(),
+        )
+        return job
+    process_background_job(job)
+    return job
 
 
 def mark_background_failure(target, args, exc):
@@ -949,6 +1397,58 @@ def audit(request, action, target_type='', target_id='', detail=''):
         detail=detail,
         ip_address=client_ip(request),
     )
+
+
+def create_project_onboarding(request, cleaned_data):
+    """Create the project aggregate and its optional catalog records atomically."""
+    username = request.session.get('user_name', '')
+    with transaction.atomic():
+        project = DevOpsProject.objects.create(
+            name=cleaned_data['name'],
+            owner=cleaned_data.get('owner', ''),
+            description=cleaned_data.get('description', ''),
+            monitoring_enabled=cleaned_data.get('monitoring_enabled', False),
+            monitor_cpu=cleaned_data.get('monitor_cpu', '80%'),
+            monitor_memory=cleaned_data.get('monitor_memory', '80%'),
+            monitor_disk=cleaned_data.get('monitor_disk', '80%'),
+            created_by=username,
+        )
+        hosts = list(cleaned_data.get('hosts') or [])
+        groups = list(cleaned_data.get('groups') or [])
+        tags = list(cleaned_data.get('tags') or [])
+        services = list(cleaned_data.get('services') or [])
+        apps = list(cleaned_data.get('deployment_apps') or [])
+        group_name = cleaned_data.get('create_group_name', '')
+        if group_name:
+            group = HostGroup.objects.create(name=group_name, created_by=username)
+            group.hosts.set(hosts)
+            groups.append(group)
+        tag_name = cleaned_data.get('create_tag_name', '')
+        if tag_name:
+            tag = HostTag.objects.create(name=tag_name, created_by=username)
+            tag.hosts.set(hosts)
+            tags.append(tag)
+        service_name = cleaned_data.get('create_service_name', '')
+        if service_name:
+            service = ServiceCatalog.objects.create(name=service_name, owner=project.owner, created_by=username)
+            service.hosts.set(hosts)
+            services.append(service)
+        app_name = cleaned_data.get('create_app_name', '')
+        if app_name:
+            apps.append(DeploymentApp.objects.create(
+                name=app_name,
+                repository=cleaned_data.get('create_app_repository') or None,
+                created_by=username,
+            ))
+        project.hosts.set(hosts)
+        project.groups.set(groups)
+        project.tags.set(tags)
+        project.services.set(services)
+        project.deployment_apps.set(apps)
+        audit(request, '项目接入', 'DevOpsProject', project.id, '项目=%s, 主机=%s, 服务=%s, 应用=%s' % (
+            project.name, len(hosts), len(services), len(apps),
+        ))
+    return project
 
 
 def cleanup_audit_logs(retention_days=None):
@@ -1049,6 +1549,73 @@ def can_access_hosts(request, hosts):
         return True
     allowed_ids = set(visible_hosts_for_request(request).filter(id__in=host_ids).values_list('id', flat=True))
     return set(host_ids).issubset(allowed_ids)
+
+
+def incident_reference_hosts(incident):
+    hosts = []
+    if incident.host_id:
+        hosts.append(incident.host)
+    if incident.alert_id and incident.alert.host_id:
+        hosts.append(incident.alert.host)
+    if incident.command_execution_id and incident.command_execution.host_id:
+        hosts.append(incident.command_execution.host)
+    if incident.deployment_release_id:
+        hosts.extend(list(incident.deployment_release.hosts.all()))
+    return hosts
+
+
+def can_access_incident(request, incident):
+    return can_access_hosts(request, incident_reference_hosts(incident))
+
+
+def create_incident(request, title, severity, description='', host=None, alert=None,
+                    deployment_release=None, command_execution=None):
+    incident = Incident(
+        title=title,
+        severity=severity,
+        description=description,
+        host=host,
+        alert=alert,
+        deployment_release=deployment_release,
+        command_execution=command_execution,
+        created_by=request.session.get('user_name', ''),
+    )
+    if not can_access_incident(request, incident):
+        return None
+    incident.save()
+    audit(request, '创建事件工单', 'Incident', incident.id, incident.title)
+    return incident
+
+
+def update_incident_status(request, incident, status):
+    previous_status = incident.status
+    incident.status = status
+    if status == Incident.STATUS_RESOLVED and not incident.resolved_at:
+        incident.resolved_at = timezone.now()
+    if status in (Incident.STATUS_OPEN, Incident.STATUS_PROCESSING):
+        incident.resolved_at = None
+    incident.save()
+    audit(request, '更新事件状态', 'Incident', incident.id, '%s -> %s' % (previous_status, status))
+    return incident
+
+
+def add_incident_timeline_note(request, incident, note):
+    entry = IncidentTimeline.objects.create(
+        incident=incident,
+        note=note,
+        created_by=request.session.get('user_name', ''),
+    )
+    audit(request, '追加事件时间线', 'Incident', incident.id, '时间线 #%s' % entry.id)
+    return entry
+
+
+def record_incident_postmortem(request, incident, root_cause, resolution, follow_up):
+    incident.root_cause = root_cause
+    incident.resolution = resolution
+    incident.follow_up = follow_up
+    incident.save(update_fields=['root_cause', 'resolution', 'follow_up', 'updated_at'])
+    audit(request, '记录事件复盘', 'Incident', incident.id, incident.title)
+    return incident
 
 
 def evaluate_command_policy(command, role=DevOpsRole.ROLE_OPERATOR):
@@ -1399,6 +1966,15 @@ def notification_payload(channel, event_type, title, content):
     }
 
 
+def notification_failure(category, attempt_count, summary):
+    return {
+        'status': NotificationLog.STATUS_FAILED,
+        'failure_category': category,
+        'attempt_count': attempt_count,
+        'response': summary,
+    }
+
+
 def send_notification_channel(channel, event_type, title, content):
     dedup_seconds = getattr(settings, 'NOTIFICATION_DEDUP_SECONDS', 300)
     if dedup_seconds:
@@ -1418,6 +1994,7 @@ def send_notification_channel(channel, event_type, title, content):
                 content=content,
                 status=NotificationLog.STATUS_SUCCESS,
                 response='deduped: %s秒内重复通知已跳过' % dedup_seconds,
+                attempt_count=0,
             )
 
     url = channel.decrypted_webhook_url
@@ -1427,8 +2004,7 @@ def send_notification_channel(channel, event_type, title, content):
             event_type=event_type,
             title=title,
             content=content,
-            status=NotificationLog.STATUS_FAILED,
-            response='Webhook URL 为空或解密失败',
+            **notification_failure('configuration', 0, '渠道配置不可用'),
         )
 
     if channel.channel_type == NotificationChannel.TYPE_DINGTALK:
@@ -1438,15 +2014,18 @@ def send_notification_channel(channel, event_type, title, content):
     attempts = max(1, int(getattr(settings, 'NOTIFICATION_RETRY_COUNT', 0) or 0) + 1)
     timeout = max(1, int(getattr(settings, 'NOTIFICATION_TIMEOUT_SECONDS', 5) or 5))
     status = NotificationLog.STATUS_FAILED
-    response_message = ''
+    failure_category = 'request_error'
+    response_message = '请求失败'
     for attempt in range(1, attempts + 1):
         try:
             response = requests.post(url, json=payload, timeout=timeout)
-            response_text = response.text[:1000]
-            response_message = 'HTTP %s %s' % (response.status_code, response_text)
+            response_message = 'HTTP %s' % response.status_code
             status = NotificationLog.STATUS_SUCCESS if response.status_code < 400 else NotificationLog.STATUS_FAILED
+            failure_category = '' if status == NotificationLog.STATUS_SUCCESS else 'http_error'
         except Exception as exc:
-            response_message = str(exc)
+            exception_name = exc.__class__.__name__.lower()
+            failure_category = 'timeout' if 'timeout' in exception_name else 'request_error'
+            response_message = '请求超时' if failure_category == 'timeout' else '请求异常'
             status = NotificationLog.STATUS_FAILED
         if status == NotificationLog.STATUS_SUCCESS:
             break
@@ -1459,10 +2038,44 @@ def send_notification_channel(channel, event_type, title, content):
         content=content,
         status=status,
         response=response_message,
+        failure_category=failure_category,
+        attempt_count=attempt,
     )
 
 
-def send_notifications(event_type, title, content):
+def render_notification_template(event_type, title, content, values=None):
+    template = NotificationTemplate.objects.filter(event_type=event_type).first()
+    if not template:
+        return title, content
+    values = values or {}
+    replacements = {
+        '{{title}}': title,
+        '{{content}}': content,
+    }
+    for key, value in values.items():
+        replacements['{{%s}}' % key] = str(value or '-')
+
+    def replace_fixed(text):
+        for placeholder, value in replacements.items():
+            text = text.replace(placeholder, value)
+        return text
+
+    return (
+        replace_fixed(template.title_template) if template.title_template else title,
+        replace_fixed(template.content_template) if template.content_template else content,
+    )
+
+
+def alert_level_rank(level):
+    return {
+        AlertEvent.LEVEL_INFO: 1,
+        AlertEvent.LEVEL_WARNING: 2,
+        AlertEvent.LEVEL_CRITICAL: 3,
+    }.get(level, 0)
+
+
+def send_notifications(event_type, title, content, template_values=None, escalation_alert=None):
+    title, content = render_notification_template(event_type, title, content, template_values)
     channels = NotificationChannel.objects.filter(enabled=True)
     if event_type == NotificationLog.EVENT_ALERT:
         channels = channels.filter(notify_alert=True)
@@ -1470,6 +2083,12 @@ def send_notifications(event_type, title, content):
         channels = channels.filter(notify_approval=True)
     elif event_type == NotificationLog.EVENT_DEPLOYMENT:
         channels = channels.filter(notify_deployment=True)
+    channels = list(channels)
+    if event_type == NotificationLog.EVENT_ALERT and escalation_alert:
+        rule = AlertNotificationEscalation.objects.select_related('channel').filter(enabled=True).first()
+        if rule and rule.channel and rule.channel.enabled and alert_level_rank(escalation_alert.level) >= alert_level_rank(rule.minimum_level):
+            if rule.channel_id not in [channel.id for channel in channels]:
+                channels.append(rule.channel)
     logs = []
     for channel in channels:
         logs.append(send_notification_channel(channel, event_type, title, content))
@@ -1484,7 +2103,19 @@ def notify_alert(alert):
         alert.get_status_display() if hasattr(alert, 'get_status_display') else alert.status,
         alert.message,
     )
-    logs = send_notifications(NotificationLog.EVENT_ALERT, title, content)
+    logs = send_notifications(
+        NotificationLog.EVENT_ALERT,
+        title,
+        content,
+        template_values={
+            'host': host_name,
+            'metric': alert.metric or 'general',
+            'level': alert.level,
+            'status': alert.status,
+            'message': alert.message,
+        },
+        escalation_alert=alert,
+    )
     try:
         from monitor.services import send_alert_event_notifications
         send_alert_event_notifications(alert, status=alert.status)
@@ -1503,7 +2134,12 @@ def notify_approval(approval, action):
         approval.reason or '-',
         approval.comment or '-',
     )
-    return send_notifications(NotificationLog.EVENT_APPROVAL, title, content)
+    return send_notifications(NotificationLog.EVENT_APPROVAL, title, content, {
+        'title': approval.title,
+        'status': approval.status,
+        'requester': approval.requester,
+        'approver': approval.approver,
+    })
 
 
 def notify_deployment(release, action='发布结果'):
@@ -1513,7 +2149,12 @@ def notify_deployment(release, action='发布结果'):
         release.summary or '-',
         release.created_by or '-',
     )
-    return send_notifications(NotificationLog.EVENT_DEPLOYMENT, title, content)
+    return send_notifications(NotificationLog.EVENT_DEPLOYMENT, title, content, {
+        'app': release.app.name,
+        'version': release.version,
+        'status': release.status,
+        'summary': release.summary,
+    })
 
 
 def update_alert_status(alert, to_status, handler='', remark='', from_status=None):
@@ -1609,6 +2250,85 @@ def deployment_risk_preview(hosts, now=None):
         'pending_approvals': pending_approvals,
         'host_metrics': host_metrics,
     }
+
+
+def active_maintenance_windows_for_hosts(hosts, now=None):
+    """Return enabled windows that affect the supplied hosts through topology.
+
+    A service-scoped window affects every host associated with that service.  The
+    query intentionally returns only window metadata; callers must still enforce
+    their own DevOps role and host-scope checks before rendering it.
+    """
+    host_ids = [host.id for host in hosts if getattr(host, 'id', None)]
+    if not host_ids:
+        return MaintenanceWindow.objects.none()
+    current = now or timezone.now()
+    return MaintenanceWindow.objects.filter(
+        enabled=True,
+        starts_at__lte=current,
+        ends_at__gte=current,
+    ).filter(
+        models.Q(hosts__id__in=host_ids) |
+        models.Q(services__hosts__id__in=host_ids)
+    ).distinct()
+
+
+def active_maintenance_windows_for_host(host, now=None):
+    return active_maintenance_windows_for_hosts([host], now=now)
+
+
+def active_maintenance_windows_for_release(release, now=None):
+    """Find active host- or service-scoped windows matching a release.
+
+    Services are resolved both from their topology hosts and from the existing
+    project-to-deployment-app relation, so an application can be covered before
+    its host assignment is populated.
+    """
+    current = now or timezone.now()
+    host_ids = list(release.hosts.values_list('id', flat=True))
+    service_ids = list(ServiceCatalog.objects.filter(
+        devops_projects__deployment_apps=release.app,
+    ).values_list('id', flat=True).distinct())
+    if not host_ids and not service_ids:
+        return MaintenanceWindow.objects.none()
+    matches = models.Q()
+    if host_ids:
+        matches |= models.Q(hosts__id__in=host_ids)
+        matches |= models.Q(services__hosts__id__in=host_ids)
+    if service_ids:
+        matches |= models.Q(services__id__in=service_ids)
+    return MaintenanceWindow.objects.filter(
+        enabled=True,
+        starts_at__lte=current,
+        ends_at__gte=current,
+    ).filter(matches).distinct()
+
+
+@transaction.atomic
+def require_deployment_maintenance_approval(release, requester='', now=None):
+    """Create or reuse a deployment approval when an active window applies.
+
+    The caller is responsible for deciding whether to execute immediately.  A
+    final approval is never reused, which keeps a later maintenance window from
+    being silently approved by an earlier completed request.
+    """
+    # Lock the parent release so concurrent submission retries cannot create two
+    # pending approvals for the same maintenance window.
+    release = DeploymentRelease.objects.select_for_update().get(pk=release.pk)
+    windows = active_maintenance_windows_for_release(release, now=now)
+    if not windows.exists():
+        return None
+    approval = ApprovalRequest.objects.filter(
+        request_type=ApprovalRequest.TYPE_DEPLOYMENT,
+        deployment_release=release,
+        status__in=(ApprovalRequest.STATUS_PENDING, ApprovalRequest.STATUS_APPROVED),
+    ).order_by('-created_at').first()
+    if approval:
+        return approval
+    names = list(windows.values_list('name', flat=True)[:5])
+    reason = '维护窗口要求审批：%s' % '、'.join(names)
+    approval = create_deployment_approval(release, requester=requester, reason=reason[:500])
+    return approval
 
 
 def validate_remote_path(remote_path):

@@ -1,13 +1,13 @@
 # Django Legacy Standards
 
-Follow these standards when changing this Django 2.1 codebase.
+Follow these standards when changing this Django 4.2.16 codebase with legacy compatibility constraints.
 
 ## General Style
 
 - Match nearby function-based views, forms, templates, and helper functions.
 - Prefer small local helpers for view-only formatting; use service/helper modules for reusable business workflows.
 - Do not introduce class-based views, DRF, a frontend build system, Celery, or major framework patterns unless explicitly requested.
-- Keep imports compatible with old Django/Python assumptions.
+- Keep imports compatible with the supported Python 3.11/Django 4.2.16 baseline and the project's legacy module paths.
 - Preserve explicit `db_table` values and legacy URL names unless the task is a deliberate migration.
 
 ## View Rules
@@ -56,4 +56,3 @@ Follow these standards when changing this Django 2.1 codebase.
 
 - Add comments only for non-obvious legacy compatibility, security-sensitive behavior, or complex state transitions.
 - Do not add comments that merely restate code.
-

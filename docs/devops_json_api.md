@@ -27,6 +27,10 @@
   - `counts.hosts/groups/open_alerts/pending_approvals` 均按当前用户可见主机范围统计；不返回不可见主机的告警或审批数量。
 - `GET /devops/api/hosts/`
   - 当前用户可见主机列表，不返回密码或私钥。
+- `GET /devops/api/service-topology/`
+  - 返回服务、负责人、环境、描述、当前用户可见的关联主机及上游依赖。
+  - 认证：需要 session 登录和服务管理模块只读权限；未登录返回 `401`，权限不足返回 `403`。
+  - 主机范围：仅返回无关联主机的服务，或关联至少一台当前用户可见主机的服务；主机字段不会返回密码、私钥或其他凭据。上游依赖仅在依赖服务同样可见时返回。
 - `GET /devops/api/dashboard/`
   - DevOps 概览、最近命令、最近告警、主机最新指标。
   - `recent_commands`、`recent_alerts`、`host_metrics` 和相关统计均按当前用户可见主机范围过滤。
@@ -57,6 +61,21 @@
   - `host` 必须在当前用户可见主机范围内；未指定时默认选择第一个可见主机。
 - `GET /devops/api/alerts/?limit=50`
   - 告警记录列表，仅返回当前用户可见主机上的告警和无主机关联的全局告警。
+- `GET /devops/api/incidents/?limit=50`
+  - 事件工单列表。需要告警模块只读权限；仅返回事件本身及其告警、命令、发布引用全部处于当前主机授权范围内的记录。
+  - 返回引用的安全摘要和复盘字段，不返回命令输出、错误文本、主机凭据或密钥。
+- `POST /devops/api/incidents/`
+  - 创建事件。需要告警模块运维操作权限。
+  - JSON：`title`、`severity`（`low`/`medium`/`high`/`critical`）、可选 `description`、`host_id`、`alert_id`、`deployment_release_id`、`command_execution_id`。
+  - 所有主机关联引用必须在当前授权范围内；越权返回 `403` 和 `code: "host_forbidden"`。
+- `GET /devops/api/incidents/<id>/`
+  - 事件详情和时间线。不可见或不存在统一返回 `404`。
+- `POST /devops/api/incidents/<id>/timeline/`
+  - 追加时间线备注。需要告警模块运维操作权限，JSON：`{"note": "..."}`。
+- `POST /devops/api/incidents/<id>/status/`
+  - 更新状态，JSON：`{"status": "open|processing|resolved|closed"}`。解决时记录解决时间。
+- `POST /devops/api/incidents/<id>/postmortem/`
+  - 为已解决或已关闭事件记录复盘，JSON：`root_cause`、`resolution`、`follow_up`。创建、时间线、状态和复盘变更均写入审计日志。
 - `GET /devops/api/approvals/?limit=100`
   - 审批列表，遵守主机组授权范围；命令审批按审批主机过滤，发布审批按发布目标主机过滤，无主机和无发布关联的全局审批仍可见。
 - `POST /devops/api/approvals/<id>/decide/`
@@ -74,6 +93,9 @@
 
 - `GET /devops/api/deployments/?limit=50`
   - 发布记录列表，仅返回包含当前用户可见主机的发布；`host_count` 只统计当前用户可见主机数量。
+- `GET /devops/api/maintenance-windows/`
+  - 维护窗口日历。需要安全策略模块管理员权限；返回名称、时间、启用状态及当前用户授权范围内的主机和服务摘要。
+  - 不返回主机凭据、服务配置、发布脚本或通知密钥。发布命中启用中的维护窗口时，平台会创建或复用待处理的发布审批，不能直接执行。
 - `GET /devops/api/files/?limit=50`
   - 文件分发记录列表，仅返回包含当前用户可见主机的分发；`host_count` 只统计当前用户可见主机数量。
 - `GET /devops/api/notifications/?channel=1&event_type=alert&status=failed&limit=50`
@@ -90,6 +112,16 @@
     - `logs[]`：`id`、`channel`、`channel_id`、`event_type`、`event_type_label`、`title`、`status`、`status_label`、`response`、`created_at`。
   - 安全：不返回 `webhook_url`、`secret` 或加密后的密文字段；`response` 仅返回截断后的预览，避免失败响应过长。
   - 无效 `channel`、`event_type` 或 `status` 返回 `400` 和 `code: "validation_error"`。
+- `GET /devops/api/integrations/health/`
+  - GitHub 入站投递与通知渠道的只读健康汇总。
+  - 认证：需要 session 登录；未登录返回 `401` 和 `code: "unauthorized"`。
+  - 权限：当前没有独立的集成模块，使用安全策略模块管理员权限，即 `DevOpsRole.ROLE_ADMIN` + `DevOpsModulePermission.MODULE_SECURITY`；权限不足返回 `403` 和 `code: "forbidden"`。
+  - 成功返回 `github_inbound`（当前状态、最近检查、连续失败和近期计数）、`prometheus[]`、`alertmanager[]`（配置 ID、名称、启用状态和安全健康摘要）及 `notifications[]`（渠道 ID、名称、类型、成功/失败计数、最近时间和失败分类）。
+  - 安全：不返回 GitHub payload、签名、投递 ID、仓库或提交信息；不返回 Prometheus/Alertmanager URL；通知汇总不返回 webhook URL、密钥、内容或响应文本。
+- `GET /devops/api/worker/`
+  - Worker 队列的只读观测汇总。需要 session 登录和安全策略模块管理员权限；未登录返回 `401`，权限不足返回 `403`。
+  - 成功返回 `worker.summary`（等待、执行中、累计成功/失败、超时、近一小时完成/失败及失败率）和 `worker.thresholds`（待处理、失败率、超时三个阈值的当前值、启用阈值与触发状态）。
+  - 安全：不返回任务 ID、目标对象、输入、角色、异常文本、任务错误、配置原始值、主机信息或任何凭据；接口不领取、重试、取消任务，也不写入告警状态。
 
 ## 审计日志
 

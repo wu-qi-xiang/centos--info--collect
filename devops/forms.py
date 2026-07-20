@@ -24,7 +24,11 @@ from .models import (
     HostTag,
     K8sCluster,
     NotificationChannel,
+    NotificationTemplate,
+    AlertNotificationEscalation,
     ComplianceBaseline,
+    ServiceCatalog,
+    DevOpsProject,
 )
 
 
@@ -182,6 +186,39 @@ class ServiceOperationForm(forms.Form):
         return value
 
 
+class ServiceCatalogForm(forms.ModelForm):
+    hosts = forms.ModelMultipleChoiceField(
+        queryset=NewLinux.objects.all(),
+        required=False,
+        widget=forms.CheckboxSelectMultiple,
+    )
+    upstream_services = forms.ModelMultipleChoiceField(
+        queryset=ServiceCatalog.objects.all(),
+        required=False,
+        widget=forms.CheckboxSelectMultiple,
+        label='上游依赖服务',
+    )
+
+    class Meta:
+        model = ServiceCatalog
+        fields = ('name', 'owner', 'environment', 'description', 'hosts')
+
+    def __init__(self, *args, **kwargs):
+        upstream_services_queryset = kwargs.pop('upstream_services_queryset', None)
+        super(ServiceCatalogForm, self).__init__(*args, **kwargs)
+        if upstream_services_queryset is not None:
+            self.fields['upstream_services'].queryset = upstream_services_queryset
+        if self.instance and self.instance.pk:
+            self.fields['upstream_services'].queryset = self.fields['upstream_services'].queryset.exclude(id=self.instance.id)
+            self.initial['upstream_services'] = self.instance.upstream_links.values_list('upstream_service_id', flat=True)
+
+    def clean_upstream_services(self):
+        services = self.cleaned_data.get('upstream_services')
+        if self.instance and self.instance.pk and services.filter(id=self.instance.id).exists():
+            raise forms.ValidationError('服务不能依赖自身')
+        return services
+
+
 class FileDistributionForm(forms.ModelForm):
     hosts = forms.ModelMultipleChoiceField(
         queryset=NewLinux.objects.all(),
@@ -203,7 +240,62 @@ class FileDistributionForm(forms.ModelForm):
 class DeploymentAppForm(forms.ModelForm):
     class Meta:
         model = DeploymentApp
-        fields = ('name', 'description')
+        fields = ('name', 'repository', 'description')
+
+    def clean_repository(self):
+        value = (self.cleaned_data.get('repository') or '').strip().lower()
+        if not value:
+            return None
+        if not re.match(r'^[a-z0-9](?:[a-z0-9-]{0,38})/[a-z0-9][a-z0-9._-]{0,99}$', value):
+            raise forms.ValidationError('仓库必须是 owner/repo 格式，不能包含 URL、凭据或查询参数')
+        return value
+
+
+class ProjectOnboardingForm(forms.ModelForm):
+    hosts = forms.ModelMultipleChoiceField(queryset=NewLinux.objects.all(), required=False, widget=forms.CheckboxSelectMultiple)
+    groups = forms.ModelMultipleChoiceField(queryset=HostGroup.objects.all(), required=False, widget=forms.CheckboxSelectMultiple)
+    tags = forms.ModelMultipleChoiceField(queryset=HostTag.objects.all(), required=False, widget=forms.CheckboxSelectMultiple)
+    services = forms.ModelMultipleChoiceField(queryset=ServiceCatalog.objects.all(), required=False, widget=forms.CheckboxSelectMultiple)
+    deployment_apps = forms.ModelMultipleChoiceField(queryset=DeploymentApp.objects.all(), required=False, widget=forms.CheckboxSelectMultiple)
+    create_group_name = forms.CharField(max_length=100, required=False, label='新建主机组')
+    create_tag_name = forms.CharField(max_length=50, required=False, label='新建标签')
+    create_service_name = forms.CharField(max_length=100, required=False, label='新建服务')
+    create_app_name = forms.CharField(max_length=100, required=False, label='新建部署应用')
+    create_app_repository = forms.CharField(max_length=140, required=False, label='新建应用仓库')
+
+    class Meta:
+        model = DevOpsProject
+        fields = ('name', 'owner', 'description', 'monitoring_enabled', 'monitor_cpu', 'monitor_memory', 'monitor_disk', 'hosts', 'groups', 'tags', 'services', 'deployment_apps')
+
+    def _clean_new_name(self, field, model):
+        value = (self.cleaned_data.get(field) or '').strip()
+        if value and model.objects.filter(name__iexact=value).exists():
+            self.add_error(field, '该名称已存在')
+        return value
+
+    def clean(self):
+        cleaned = super(ProjectOnboardingForm, self).clean()
+        self._clean_new_name('create_group_name', HostGroup)
+        self._clean_new_name('create_tag_name', HostTag)
+        self._clean_new_name('create_service_name', ServiceCatalog)
+        self._clean_new_name('create_app_name', DeploymentApp)
+        repository = (cleaned.get('create_app_repository') or '').strip().lower()
+        if repository and not re.match(r'^[a-z0-9](?:[a-z0-9-]{0,38})/[a-z0-9][a-z0-9._-]{0,99}$', repository):
+            self.add_error('create_app_repository', '仓库必须是 owner/repo 格式，不能包含 URL、凭据或查询参数')
+        elif repository and DeploymentApp.objects.filter(repository=repository).exists():
+            self.add_error('create_app_repository', '该仓库已关联其他部署应用')
+        cleaned['create_app_repository'] = repository
+        for field in ('monitor_cpu', 'monitor_memory', 'monitor_disk'):
+            value = (cleaned.get(field) or '').strip()
+            try:
+                number = float(value.rstrip('%'))
+            except (TypeError, ValueError):
+                number = -1
+            if not 0 <= number <= 100:
+                self.add_error(field, '请输入 0 到 100 的百分比')
+            else:
+                cleaned[field] = '%s%%' % ('%g' % number)
+        return cleaned
 
 
 class DeploymentReleaseForm(forms.ModelForm):
@@ -302,6 +394,31 @@ class NotificationChannelForm(forms.ModelForm):
         if self.instance and self.instance.pk:
             return self.instance.secret
         return ''
+
+
+class NotificationTemplateForm(forms.ModelForm):
+    class Meta:
+        model = NotificationTemplate
+        fields = ('title_template', 'content_template')
+        widgets = {
+            'content_template': forms.Textarea(attrs={'rows': 3}),
+        }
+
+
+class AlertNotificationEscalationForm(forms.ModelForm):
+    class Meta:
+        model = AlertNotificationEscalation
+        fields = ('enabled', 'minimum_level', 'channel')
+
+    def clean(self):
+        cleaned_data = super(AlertNotificationEscalationForm, self).clean()
+        if cleaned_data.get('enabled'):
+            channel = cleaned_data.get('channel')
+            if not channel:
+                self.add_error('channel', '启用升级规则时必须选择渠道')
+            elif not channel.enabled:
+                self.add_error('channel', '升级渠道必须处于启用状态')
+        return cleaned_data
 
 
 class K8sClusterForm(forms.ModelForm):

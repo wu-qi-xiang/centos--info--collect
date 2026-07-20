@@ -1,0 +1,73 @@
+{% extends "base.html" %}
+
+{% block title %}集成健康 - DevOps平台{% endblock %}
+
+{% block content %}
+<div class="container-fluid px-4">
+    <h1 class="h3 mb-3">集成健康</h1>
+    {% include "devops/_nav.html" %}
+
+    <div class="card mb-3">
+        <div class="card-header">GitHub 入站投递</div>
+        <div class="card-body table-responsive">
+            <table class="table table-sm mb-0">
+                <tr><th>当前状态</th><th>最近检查</th><th>连续失败</th><th>近期成功</th><th>近期失败</th></tr>
+                <tr>
+                    <td>{{ github.current_status|default:"暂无数据" }}</td>
+                    <td>{{ github.latest_check|default:"-" }}</td>
+                    <td>{{ github.consecutive_failures }}</td>
+                    <td>{{ github.recent_event_counts.success|default:0 }}</td>
+                    <td>{{ github.recent_event_counts.failed|default:0 }}</td>
+                </tr>
+            </table>
+        </div>
+    </div>
+
+    <div class="row g-3 mb-3">
+        <div class="col-lg-6">
+            <div class="card h-100">
+                <div class="card-header">Prometheus</div>
+                <div class="card-body table-responsive">
+                    <table class="table table-sm mb-0">
+                        <tr><th>名称</th><th>启用</th><th>状态</th><th>最近检查</th><th>连续失败</th></tr>
+                        {% for item in prometheus %}<tr><td>{{ item.name }}</td><td>{{ item.enabled|yesno:"是,否" }}</td><td>{{ item.current_status }}</td><td>{{ item.latest_check|default:"-" }}</td><td>{{ item.consecutive_failures }}</td></tr>{% empty %}<tr><td colspan="5" class="text-muted">暂无配置</td></tr>{% endfor %}
+                    </table>
+                </div>
+            </div>
+        </div>
+        <div class="col-lg-6">
+            <div class="card h-100">
+                <div class="card-header">Alertmanager</div>
+                <div class="card-body table-responsive">
+                    <table class="table table-sm mb-0">
+                        <tr><th>名称</th><th>启用</th><th>状态</th><th>最近检查</th><th>连续失败</th></tr>
+                        {% for item in alertmanager %}<tr><td>{{ item.name }}</td><td>{{ item.enabled|yesno:"是,否" }}</td><td>{{ item.current_status }}</td><td>{{ item.latest_check|default:"-" }}</td><td>{{ item.consecutive_failures }}</td></tr>{% empty %}<tr><td colspan="5" class="text-muted">暂无配置</td></tr>{% endfor %}
+                    </table>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <div class="card">
+        <div class="card-header">通知渠道发送汇总</div>
+        <div class="card-body table-responsive">
+            <table class="table table-sm mb-0">
+                <tr><th>渠道</th><th>类型</th><th>总数</th><th>成功</th><th>失败</th><th>最近发送</th><th>最近成功</th><th>最近失败</th><th>失败分类</th></tr>
+                {% for channel in notifications %}
+                <tr>
+                    <td>{{ channel.name }}</td>
+                    <td>{{ channel.channel_type }}</td>
+                    <td>{{ channel.total_count }}</td>
+                    <td>{{ channel.success_count }}</td>
+                    <td>{{ channel.failed_count }}</td>
+                    <td>{{ channel.last_sent_at|default:"-" }}</td>
+                    <td>{{ channel.last_success_at|default:"-" }}</td>
+                    <td>{{ channel.last_failure_at|default:"-" }}</td>
+                    <td>{% for category, count in channel.failure_categories.items %}<span class="me-2">{{ category }}: {{ count }}</span>{% empty %}-{% endfor %}</td>
+                </tr>
+                {% empty %}<tr><td colspan="9" class="text-muted">暂无通知渠道</td></tr>{% endfor %}
+            </table>
+        </div>
+    </div>
+</div>
+{% endblock %}

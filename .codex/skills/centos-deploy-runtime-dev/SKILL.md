@@ -49,8 +49,8 @@ Change:
 
 ## Invariants
 
-- The app targets legacy Django 2.1 and old dependencies.
-- Modern Python may fail with pinned legacy packages.
+- The app runs on the verified Python 3.11 and Django 4.2.16 baseline.
+- Use the pinned dependency set; do not substitute unsupported Python or Django versions.
 - Runtime code remains at repository top level to preserve old imports and migrations.
 - Production checks should warn about unsafe debug/host/secret defaults.
 

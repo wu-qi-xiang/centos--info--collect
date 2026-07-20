@@ -12,30 +12,42 @@ from .forms import AlertmanagerConfigForm, AlertNotificationForm, MonitorForm, P
 from .services import (
 	PROMETHEUS_RULES_FAILURE_MESSAGE,
 	PROMETHEUS_RULES_FORMAT_MESSAGE,
+	PROMETHEUS_DASHBOARD_QUERIES,
 	PROMETHEUS_METADATA_FAILURE_MESSAGE,
 	PROMETHEUS_METADATA_FORMAT_MESSAGE,
 	PROMETHEUS_TARGETS_FAILURE_MESSAGE,
 	PROMETHEUS_TARGETS_FORMAT_MESSAGE,
 	empty_prometheus_table,
 	normalize_prometheus_rules,
+	normalize_alertmanager_alerts,
 	normalize_prometheus_result,
 	normalize_prometheus_targets,
 	query_prometheus,
+	query_prometheus_dashboard,
 	query_prometheus_metadata,
 	query_prometheus_rules,
 	query_prometheus_targets,
+	query_alertmanager_alerts,
+	push_alertmanager_firing_alerts,
 	send_alert_notification,
 	test_alertmanager_connection,
 	test_prometheus_connection,
 )
-from devops.models import AlertEvent
-from devops.services import audit
+from devops.models import AlertEvent, DevOpsModulePermission, DevOpsRole, IntegrationHealthEvent
+from devops.services import (
+	audit,
+	integration_health_summary,
+	has_role,
+	record_integration_health_event,
+	summarize_integration_health,
+)
 from PyLinux.security import require_monitor_operator, security_context
 from PyLinux.vue import form_errors, model_dict, render_vue_page
 from userprofile.decorators import session_login_required
 
 
 PROMETHEUS_SELECTION_ERROR = '选择的 Prometheus 对接不可用'
+ALERTMANAGER_SELECTION_ERROR = '选择的 Alertmanager 对接不可用'
 
 
 def _available_prometheus_configs():
@@ -43,6 +55,14 @@ def _available_prometheus_configs():
 		config
 		for config in PrometheusConfig.objects.filter(enabled=True).order_by('id')
 		if (config.prometheus_url or '').strip()
+	]
+
+
+def _available_alertmanager_configs():
+	return [
+		config
+		for config in AlertmanagerConfig.objects.filter(enabled=True).order_by('id')
+		if (config.alertmanager_url or '').strip()
 	]
 
 
@@ -65,6 +85,20 @@ def _resolve_prometheus_config(raw_id, configs=None):
 	return None, PROMETHEUS_SELECTION_ERROR
 
 
+def _resolve_alertmanager_config(raw_id, configs=None):
+	configs = list(configs if configs is not None else _available_alertmanager_configs())
+	if raw_id is None or not str(raw_id).strip():
+		return (configs[0] if configs else None), ''
+	try:
+		config_id = int(str(raw_id).strip())
+	except (TypeError, ValueError):
+		return None, ALERTMANAGER_SELECTION_ERROR
+	for config in configs:
+		if config.id == config_id:
+			return config, ''
+	return None, ALERTMANAGER_SELECTION_ERROR
+
+
 def _prometheus_query_options(configs):
 	base_names = [
 		(config.name or '').strip() or 'Prometheus'
@@ -82,6 +116,17 @@ def _prometheus_query_options(configs):
 	]
 
 
+def _alertmanager_query_options(configs):
+	base_names = [(config.name or '').strip() or 'Alertmanager' for config in configs]
+	name_counts = {}
+	for name in base_names:
+		name_counts[name] = name_counts.get(name, 0) + 1
+	return [
+		{'id': config.id, 'name': name if name_counts[name] == 1 else '%s (#%s)' % (name, config.id)}
+		for config, name in zip(configs, base_names)
+	]
+
+
 def _prometheus_payload(config):
 	return {
 		'configured': bool(config and config.prometheus_url),
@@ -90,10 +135,53 @@ def _prometheus_payload(config):
 	}
 
 
-def _integration_items():
+def _connection_health_category(result):
+	if result.get('ok'):
+		return IntegrationHealthEvent.CATEGORY_OK
+	message = str(result.get('message') or '')
+	if '超时' in message:
+		return IntegrationHealthEvent.CATEGORY_TIMEOUT
+	if '未配置' in message:
+		return IntegrationHealthEvent.CATEGORY_CONFIGURATION
+	if '请求失败' in message:
+		return IntegrationHealthEvent.CATEGORY_REQUEST_ERROR
+	return IntegrationHealthEvent.CATEGORY_HTTP_ERROR
+
+
+def _safe_integration_health_payload(config, integration_type):
+	try:
+		summary = summarize_integration_health(integration_type, source=config)
+	except Exception:
+		return {}
+	counts = summary.get('recent_event_counts') or {}
+	state = summary.get('current_state')
+	if state not in ('success', 'failed', 'unknown'):
+		state = 'unknown'
+	category = summary.get('latest_category') or ''
+	allowed_categories = set(item[0] for item in IntegrationHealthEvent.CATEGORY_CHOICES)
+	if category not in allowed_categories:
+		category = ''
+	try:
+		consecutive_failures = max(0, int(summary.get('consecutive_failures') or 0))
+		recent_failures = max(0, int(counts.get(IntegrationHealthEvent.STATUS_FAILED) or 0))
+		recent_successes = max(0, int(counts.get(IntegrationHealthEvent.STATUS_SUCCESS) or 0))
+	except (TypeError, ValueError):
+		consecutive_failures = recent_failures = recent_successes = 0
+	return {
+		'state': state,
+		'last_checked_at': summary.get('latest_check'),
+		'category': category,
+		'summary': integration_health_summary(category) if category else '',
+		'consecutive_failures': consecutive_failures,
+		'recent_failures': recent_failures,
+		'recent_successes': recent_successes,
+	}
+
+
+def _integration_items(include_health=False):
 	items = []
 	for config in PrometheusConfig.objects.order_by('id'):
-		items.append({
+		item = {
 			'id': config.id,
 			'kind': 'prometheus',
 			'kind_label': 'Prometheus',
@@ -103,9 +191,13 @@ def _integration_items():
 			'updated_at': config.updated_at,
 			'edit_url': reverse('monitor:prometheus_update', args=[config.id]),
 			'delete_url': reverse('monitor:prometheus_delete', args=[config.id]),
-		})
+		}
+		if include_health:
+			item['health'] = _safe_integration_health_payload(
+				config, IntegrationHealthEvent.TYPE_PROMETHEUS)
+		items.append(item)
 	for config in AlertmanagerConfig.objects.order_by('id'):
-		items.append({
+		item = {
 			'id': config.id,
 			'kind': 'alertmanager',
 			'kind_label': 'Alertmanager',
@@ -115,12 +207,17 @@ def _integration_items():
 			'updated_at': config.updated_at,
 			'edit_url': reverse('monitor:alertmanager_update', args=[config.id]),
 			'delete_url': reverse('monitor:alertmanager_delete', args=[config.id]),
-		})
+		}
+		if include_health:
+			item['health'] = _safe_integration_health_payload(
+				config, IntegrationHealthEvent.TYPE_ALERTMANAGER)
+		items.append(item)
 	return items
 
 
-def _integration_lists_payload():
-	integrations = _integration_items()
+def _integration_lists_payload(request=None):
+	include_health = bool(request and _can_view_integration_health(request))
+	integrations = _integration_items(include_health=include_health)
 	return {
 		'integrations': integrations,
 		'prometheus_integrations': [
@@ -134,6 +231,14 @@ def _integration_lists_payload():
 
 def _can_manage_integrations(request):
 	return bool(security_context(request).get('can_manage_monitor'))
+
+
+def _can_view_integration_health(request):
+	return has_role(
+		request,
+		DevOpsRole.ROLE_ADMIN,
+		DevOpsModulePermission.MODULE_SECURITY,
+	)
 
 
 def _integration_form_values(kind, instance=None, form=None):
@@ -182,6 +287,7 @@ def _integration_page_payload(request, active_kind='', instance=None, form=None,
 		'subtitle': '统一管理 Prometheus 和 Alertmanager 对接',
 		'csrf': get_token(request),
 		'can_manage_integrations': _can_manage_integrations(request),
+		'can_view_integration_health': _can_view_integration_health(request),
 		'prometheus_form': _integration_form_payload('prometheus', prometheus_instance, prometheus_form),
 		'alertmanager_form': _integration_form_payload('alertmanager', alertmanager_instance, alertmanager_form),
 		'errors': form_errors(form),
@@ -189,7 +295,7 @@ def _integration_page_payload(request, active_kind='', instance=None, form=None,
 		'message_ok': bool(message_ok),
 		'actions': _monitor_actions(),
 	}
-	payload.update(_integration_lists_payload())
+	payload.update(_integration_lists_payload(request))
 	return payload
 
 
@@ -207,6 +313,35 @@ def _posted_instance(model, request):
 	if not config_id:
 		return None
 	return model.objects.filter(id=config_id).first()
+
+
+def _persisted_test_config(model, config, test_config, url_field):
+	if not config or not config.pk or test_config.pk != config.pk:
+		return None
+	persisted = model.objects.filter(pk=config.pk).first()
+	if not persisted:
+		return None
+	if (persisted.name != test_config.name
+			or getattr(persisted, url_field) != getattr(test_config, url_field)
+			or persisted.enabled != test_config.enabled):
+		return None
+	return persisted
+
+
+def _record_persisted_connection_test(config, integration_type, result):
+	if not config:
+		return
+	try:
+		record_integration_health_event(
+			integration_type,
+			source=config,
+			status=(IntegrationHealthEvent.STATUS_SUCCESS if result.get('ok')
+					else IntegrationHealthEvent.STATUS_FAILED),
+			category=_connection_health_category(result),
+		)
+	except Exception:
+		# Health telemetry must not alter the established test response.
+		return
 
 
 def _monitor_actions():
@@ -395,85 +530,6 @@ def _update_alert_notification_config(request, config, form):
 	config.save()
 
 
-def _alertmanager_alert_status(payload, alert):
-	status = ''
-	if isinstance(alert, dict):
-		status = (alert.get('status') or '').strip().lower()
-	if not status and isinstance(payload, dict):
-		status = (payload.get('status') or '').strip().lower()
-	return status
-
-
-def _alertmanager_alert_text(alert, key):
-	value = alert.get(key) if isinstance(alert, dict) else ''
-	return value if isinstance(value, str) else ''
-
-
-def _alertmanager_alert_dict(alert, status):
-	labels = alert.get('labels') if isinstance(alert, dict) and isinstance(alert.get('labels'), dict) else {}
-	annotations = alert.get('annotations') if isinstance(alert, dict) and isinstance(alert.get('annotations'), dict) else {}
-	alert_name = labels.get('alertname') or annotations.get('summary') or 'Alertmanager 告警'
-	instance = labels.get('instance') or labels.get('pod') or labels.get('node') or labels.get('job') or ''
-	message = annotations.get('description') or annotations.get('summary') or alert_name
-	return {
-		'status': status,
-		'metric': alert_name,
-		'message': message,
-		'host_name': instance,
-		'instance': instance,
-		'startsAt': _alertmanager_alert_text(alert, 'startsAt'),
-		'timestamp': _alertmanager_alert_text(alert, 'startsAt') or _alertmanager_alert_text(alert, 'updatedAt'),
-		'labels': labels,
-		'annotations': annotations,
-	}
-
-
-def _push_alertmanager_firing_alerts(alertmanager, payload):
-	alerts = payload.get('alerts') if isinstance(payload, dict) else None
-	if not isinstance(alerts, list):
-		alerts = [payload] if isinstance(payload, dict) else []
-	firing_alerts = [
-		_alertmanager_alert_dict(alert, _alertmanager_alert_status(payload, alert))
-		for alert in alerts
-		if isinstance(alert, dict) and _alertmanager_alert_status(payload, alert) == 'firing'
-	]
-	configs = AlertNotificationConfig.objects.filter(
-		alertmanager=alertmanager,
-		provider=AlertNotificationConfig.PROVIDER_WECOM,
-		enabled=True,
-		webhook_url__gt='',
-	)
-	results = []
-	for alert in firing_alerts:
-		for config in configs:
-			title = '告警通知：%s' % (
-				config.alert_name or alert.get('metric') or config.name or 'Alertmanager 告警'
-			)
-			content_lines = [
-				('告警名称', config.alert_name or alert.get('metric')),
-				('通知渠道', config.name or '企业微信'),
-				('Alertmanager', alertmanager.name),
-				('主机', alert.get('host_name') or alert.get('instance')),
-				('状态', 'firing'),
-				('时间', alert.get('timestamp')),
-				('内容', alert.get('message')),
-			]
-			content = '\n'.join('%s：%s' % (label, value) for label, value in content_lines if value)
-			result = send_alert_notification(config, title, content)
-			results.append({
-				'notification_id': config.id,
-				'ok': bool(result.get('ok')),
-				'message': result.get('message') or '',
-			})
-	return {
-		'received': len(alerts),
-		'firing': len(firing_alerts),
-		'matched_notifications': configs.count(),
-		'pushed': len(results),
-		'results': results,
-	}
-
-
 def _safe_alert_notification_test_message(result):
 	if result.get('ok'):
 		return '测试通知发送成功'
@@ -517,6 +573,7 @@ def _monitor_payload(request, monitor_obj=None, form=None, action=''):
 
 
 def _alert_query_payload(request, query, table, error, configs, selected_config):
+	alertmanager_configs = _available_alertmanager_configs()
 	return {
 		'subtitle': '使用已对接的 Prometheus 执行即时 PromQL 查询',
 		'csrf': get_token(request),
@@ -525,12 +582,27 @@ def _alert_query_payload(request, query, table, error, configs, selected_config)
 		'metadata_url': reverse('monitor:metric_query_metadata'),
 		'targets_url': reverse('monitor:metric_query_targets'),
 		'rules_url': reverse('monitor:metric_query_rules'),
+		'alerts_url': reverse('monitor:metric_query_alerts'),
 		'query': query,
 		'table': table if table is not None else empty_prometheus_table(),
 		'error': error,
 		'prometheus_configured': bool(configs),
 		'prometheus_configs': _prometheus_query_options(configs),
 		'selected_prometheus_id': selected_config.id if selected_config else None,
+		'alertmanager_configured': bool(alertmanager_configs),
+		'alertmanager_configs': _alertmanager_query_options(alertmanager_configs),
+		'selected_alertmanager_id': alertmanager_configs[0].id if alertmanager_configs else None,
+		'actions': _monitor_actions(),
+	}
+
+
+def _dashboard_payload(request, configs, selected_config):
+	return {
+		'subtitle': '按 Prometheus 对接汇总主机和 Pod 资源指标',
+		'csrf': get_token(request),
+		'prometheus_configs': _prometheus_query_options(configs),
+		'selected_prometheus_id': selected_config.id if selected_config else None,
+		'dashboard_url': reverse('monitor:monitor_dashboard_data'),
 		'actions': _monitor_actions(),
 	}
 
@@ -541,7 +613,7 @@ def monitor_home(request):
 	first_config = PrometheusConfig.objects.order_by('id').first()
 	monitor = Monitor.objects.order_by('id').first()
 	open_alert_count = AlertEvent.objects.filter(status=AlertEvent.STATUS_OPEN).count()
-	integration_lists = _integration_lists_payload()
+	integration_lists = _integration_lists_payload(request)
 	payload = {
 		'subtitle': '统一管理 Prometheus 对接、指标查询和阈值告警配置',
 		'cards': [
@@ -564,6 +636,7 @@ def monitor_home(request):
 		'actions': _monitor_actions(),
 		'prometheus': _prometheus_payload(config),
 		'can_manage_integrations': _can_manage_integrations(request),
+		'can_view_integration_health': _can_view_integration_health(request),
 		'csrf': get_token(request),
 		'alert_settings_url': reverse('monitor:monitor_index'),
 		'integration_url': reverse('monitor:prometheus_config'),
@@ -609,6 +682,10 @@ def prometheus_test(request):
 	if form.is_valid():
 		test_config = form.save(commit=False)
 		result = test_prometheus_connection(test_config)
+		persisted = _persisted_test_config(
+			PrometheusConfig, config, test_config, 'prometheus_url')
+		_record_persisted_connection_test(
+			persisted, IntegrationHealthEvent.TYPE_PROMETHEUS, result)
 		message_ok = bool(result.get('ok'))
 		message = result.get('message') or ('Prometheus 连接正常' if message_ok else 'Prometheus 连接失败')
 		status = 200 if message_ok else 400
@@ -678,6 +755,10 @@ def alertmanager_test(request):
 	if form.is_valid():
 		test_config = form.save(commit=False)
 		result = test_alertmanager_connection(test_config)
+		persisted = _persisted_test_config(
+			AlertmanagerConfig, config, test_config, 'alertmanager_url')
+		_record_persisted_connection_test(
+			persisted, IntegrationHealthEvent.TYPE_ALERTMANAGER, result)
 		message_ok = bool(result.get('ok'))
 		message = result.get('message') or ('Alertmanager 连接正常' if message_ok else 'Alertmanager 连接失败')
 		status = 200 if message_ok else 400
@@ -728,7 +809,9 @@ def alertmanager_webhook(request, id):
 		return JsonResponse({'ok': False, 'message': 'JSON 解析失败'}, status=400)
 	if not isinstance(payload, dict):
 		return JsonResponse({'ok': False, 'message': 'Alertmanager payload 格式异常'}, status=400)
-	result = _push_alertmanager_firing_alerts(alertmanager, payload)
+	# Webhook and polling use one lifecycle path so maintenance-window
+	# silencing, repeat handling, and delivery failures remain consistent.
+	result = push_alertmanager_firing_alerts(alertmanager, payload, dedupe=True)
 	result['ok'] = True
 	return JsonResponse(result)
 
@@ -770,6 +853,53 @@ def alert_query(request):
 		content,
 		status=status,
 	)
+
+
+@session_login_required
+def monitor_dashboard(request):
+	if request.method != 'GET':
+		return HttpResponseNotAllowed(['GET'])
+	configs = list(_available_prometheus_configs())
+	config, selection_error = _resolve_prometheus_config(request.GET.get('prometheus_id'), configs)
+	status = 400 if selection_error else 200
+	payload = _dashboard_payload(request, configs, config)
+	if selection_error:
+		payload['error'] = selection_error
+	return render_vue_page(
+		request,
+		'monitor-dashboard',
+		'监控看板',
+		payload,
+		security_context(request),
+		status=status,
+	)
+
+
+@session_login_required
+def monitor_dashboard_data(request):
+	if request.method != 'POST':
+		return HttpResponseNotAllowed(['POST'])
+	config, selection_error = _resolve_prometheus_config(request.POST.get('prometheus_id'))
+	if selection_error:
+		return JsonResponse({'ok': False, 'message': selection_error}, status=400)
+	if not config:
+		return JsonResponse({'ok': False, 'message': '请先配置并启用 Prometheus 对接'}, status=400)
+	result = query_prometheus_dashboard(config)
+	hosts = result.get('hosts') or []
+	pods = result.get('pods') or []
+	errors = result.get('errors') or []
+	if not hosts and not pods and len(errors) >= len(PROMETHEUS_DASHBOARD_QUERIES):
+		return JsonResponse({
+			'ok': False,
+			'message': '监控看板数据暂时不可用，请稍后刷新',
+		}, status=502)
+	return JsonResponse({
+		'ok': True,
+		'prometheus_id': config.id,
+		'hosts': hosts,
+		'pods': pods,
+		'errors': errors,
+	})
 
 
 @session_login_required
@@ -875,6 +1005,25 @@ def metric_query_rules(request):
 
 
 @session_login_required
+def metric_query_alerts(request):
+	if request.method != 'POST':
+		return HttpResponseNotAllowed(['POST'])
+	config, selection_error = _resolve_alertmanager_config(request.POST.get('alertmanager_id'))
+	if selection_error:
+		return JsonResponse({'ok': False, 'message': selection_error}, status=400)
+	if not config:
+		return JsonResponse({'ok': False, 'message': '请先配置并启用 Alertmanager 对接'}, status=400)
+	result = query_alertmanager_alerts(config)
+	if not isinstance(result, dict) or not result.get('ok'):
+		return JsonResponse({'ok': False, 'message': 'Alertmanager 告警查询失败'}, status=502)
+	return JsonResponse({
+		'ok': True,
+		'alertmanager_id': config.id,
+		'alerts': normalize_alertmanager_alerts(result.get('body')),
+	})
+
+
+@session_login_required
 def alert_notification_list(request):
 	if request.method != 'GET':
 		return HttpResponseNotAllowed(['GET'])
@@ -906,7 +1055,9 @@ def alert_notifications(request):
 		return denied
 	if request.method == "POST":
 		provider = (request.POST.get('provider') or '').strip()
-		form = AlertNotificationForm(request.POST, existing=configs)
+		# This endpoint always creates a new notification.  Existing records
+		# must not make a blank Webhook valid for a separate new record.
+		form = AlertNotificationForm(request.POST)
 		if form.is_valid():
 			_save_alert_notification_configs(request, form, configs, provider if provider in dict(AlertNotificationConfig.PROVIDER_CHOICES) else None)
 			audit(request, '保存告警通知', 'AlertNotificationConfig', '', dict(AlertNotificationConfig.PROVIDER_CHOICES).get(provider, '飞书/企业微信'))

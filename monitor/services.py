@@ -16,8 +16,10 @@ from datetime import datetime
 
 from django.utils import timezone
 from django.utils.dateparse import parse_datetime
+from django.db.models import Q
 
 from devops.models import AlertEvent
+from RemoteLinux.models import NewLinux
 from .models import AlertmanagerConfig, AlertNotificationConfig
 
 try:
@@ -61,6 +63,31 @@ PROMETHEUS_LABEL_KEY_MAX_LENGTH = 128
 PROMETHEUS_LABEL_VALUE_MAX_LENGTH = 256
 PROMETHEUS_METADATA_TEXT_MAX_LENGTH = 500
 PROMETHEUS_RULE_QUERY_MAX_LENGTH = 2000
+ALERTMANAGER_ALERTS_FAILURE_MESSAGE = 'Alertmanager 告警查询失败'
+ALERTMANAGER_ALERTS_FORMAT_MESSAGE = 'Alertmanager 返回的告警数据格式异常'
+ALERTMANAGER_ALERTS_MAX_ROWS = 500
+PROMETHEUS_DASHBOARD_MAX_ROWS = 500
+
+# Dashboard queries are intentionally fixed.  The dashboard must never become a
+# second arbitrary PromQL console, because it is loaded automatically on page open.
+PROMETHEUS_DASHBOARD_QUERIES = {
+    'host_cpu': '100 - (avg by (instance) (rate(node_cpu_seconds_total{mode="idle"}[5m])) * 100)',
+    'host_memory': '100 * (1 - (node_memory_MemAvailable_bytes / node_memory_MemTotal_bytes))',
+    'host_disk': 'max by (instance) (100 * (1 - (node_filesystem_avail_bytes{fstype!~"tmpfs|overlay"} / node_filesystem_size_bytes{fstype!~"tmpfs|overlay"})))',
+    'host_cpu_total': 'count by (instance) (node_cpu_seconds_total{mode="idle"})',
+    'host_memory_total': 'node_memory_MemTotal_bytes',
+    'host_memory_available': 'node_memory_MemAvailable_bytes',
+    'host_disk_total': 'sum by (instance) (node_filesystem_size_bytes{fstype!~"tmpfs|overlay"})',
+    'host_disk_available': 'sum by (instance) (node_filesystem_avail_bytes{fstype!~"tmpfs|overlay"})',
+    'host_io_read': 'sum by (instance) (rate(node_disk_read_bytes_total[5m]))',
+    'host_io_write': 'sum by (instance) (rate(node_disk_written_bytes_total[5m]))',
+    'host_load_one': 'node_load1',
+    'host_load_five': 'node_load5',
+    'host_load_fifteen': 'node_load15',
+    'pod_cpu': 'sum by (cluster, kubernetes_cluster, cluster_name, namespace, pod) (rate(container_cpu_usage_seconds_total{container!=""}[5m])) * 100',
+    'pod_memory': '100 * sum by (cluster, kubernetes_cluster, cluster_name, namespace, pod) (container_memory_working_set_bytes{container!=""}) / sum by (cluster, kubernetes_cluster, cluster_name, namespace, pod) (kube_pod_container_resource_limits{resource="memory", unit="byte"})',
+    'pod_status': 'max by (cluster, kubernetes_cluster, cluster_name, namespace, pod, phase) (kube_pod_status_phase{phase=~"Pending|Running|Failed|Unknown"})',
+}
 
 
 _SENSITIVE_LABEL_TERMS = {
@@ -432,6 +459,162 @@ def normalize_prometheus_result(body):
         'total_rows': total_rows,
         'truncated': total_rows > len(rows),
     }
+
+
+def _dashboard_metric_rows(body, label_keys, optional_label_keys=()):
+    """Return bounded, safe instant-vector samples keyed by the requested labels."""
+    data = body.get('data') if isinstance(body, dict) else None
+    result = data.get('result') if isinstance(data, dict) else None
+    if not isinstance(result, list):
+        return []
+    rows = []
+    for item in result:
+        if len(rows) >= PROMETHEUS_DASHBOARD_MAX_ROWS:
+            break
+        if not isinstance(item, dict):
+            continue
+        labels = _safe_prometheus_labels(item.get('metric'))
+        values = item.get('value')
+        if not isinstance(values, (list, tuple)) or len(values) < 2:
+            continue
+        try:
+            value = float(values[1])
+        except (TypeError, ValueError):
+            continue
+        if not math.isfinite(value):
+            continue
+        row = {}
+        for key in label_keys:
+            text = _safe_text(labels.get(key), PROMETHEUS_LABEL_VALUE_MAX_LENGTH)
+            if not text:
+                if key in optional_label_keys:
+                    continue
+                break
+            row[key] = text
+        else:
+            row['value'] = value
+            if 'phase' in labels:
+                row['phase'] = _safe_text(labels.get('phase'), 32)
+            rows.append(row)
+    return rows
+
+
+def _dashboard_percent(value):
+    if value is None or not math.isfinite(value):
+        return None
+    return round(max(0.0, min(100.0, value)), 2)
+
+
+def _dashboard_capacity(total=None, remaining=None, percent=None):
+    """Build a stable total/used/remaining capacity object from safe samples."""
+    if total is None or not math.isfinite(total) or total < 0:
+        return {'total': None, 'used': None, 'remaining': None}
+    total = round(total, 2)
+    if remaining is not None and math.isfinite(remaining):
+        remaining = round(max(0.0, min(total, remaining)), 2)
+        used = round(total - remaining, 2)
+    elif percent is not None:
+        used = round(total * _dashboard_percent(percent) / 100.0, 2)
+        remaining = round(total - used, 2)
+    else:
+        used = None
+        remaining = None
+    return {'total': total, 'used': used, 'remaining': remaining}
+
+
+def _dashboard_cluster(row, fallback):
+    for key in ('cluster', 'kubernetes_cluster', 'cluster_name'):
+        value = row.get(key)
+        if value:
+            return value
+    return fallback
+
+
+def query_prometheus_dashboard(config):
+    """Collect a safe, bounded host and pod summary from fixed Prometheus queries."""
+    samples = {}
+    errors = []
+    query_labels = {
+        'host_cpu': ('instance',), 'host_memory': ('instance',), 'host_disk': ('instance',),
+        'host_cpu_total': ('instance',), 'host_memory_total': ('instance',),
+        'host_memory_available': ('instance',), 'host_disk_total': ('instance',),
+        'host_disk_available': ('instance',),
+        'host_io_read': ('instance',), 'host_io_write': ('instance',),
+        'host_load_one': ('instance',), 'host_load_five': ('instance',),
+        'host_load_fifteen': ('instance',),
+        'pod_cpu': ('namespace', 'pod', 'cluster', 'kubernetes_cluster', 'cluster_name'),
+        'pod_memory': ('namespace', 'pod', 'cluster', 'kubernetes_cluster', 'cluster_name'),
+        'pod_status': ('namespace', 'pod', 'cluster', 'kubernetes_cluster', 'cluster_name'),
+    }
+    error_labels = {
+        'host_cpu': '主机 CPU', 'host_memory': '主机内存', 'host_disk': '主机磁盘',
+        'host_cpu_total': '主机 CPU 容量', 'host_memory_total': '主机内存总量',
+        'host_memory_available': '主机内存剩余量', 'host_disk_total': '主机磁盘总量',
+        'host_disk_available': '主机磁盘剩余量',
+        'host_io_read': '主机磁盘读取', 'host_io_write': '主机磁盘写入',
+        'host_load_one': '主机 1 分钟负载', 'host_load_five': '主机 5 分钟负载',
+        'host_load_fifteen': '主机 15 分钟负载',
+        'pod_cpu': 'Pod CPU', 'pod_memory': 'Pod 内存', 'pod_status': 'Pod 状态',
+    }
+    for key, query in PROMETHEUS_DASHBOARD_QUERIES.items():
+        result = query_prometheus(config, query)
+        if not isinstance(result, dict) or not result.get('ok'):
+            errors.append('%s 指标暂时不可用' % error_labels[key])
+            samples[key] = []
+            continue
+        samples[key] = _dashboard_metric_rows(
+            result.get('body') or {},
+            query_labels[key],
+            optional_label_keys=('cluster', 'kubernetes_cluster', 'cluster_name'),
+        )
+
+    hosts = {}
+    for key, metric_name in (('host_cpu', 'cpu'), ('host_memory', 'memory'), ('host_disk', 'disk'),
+                             ('host_cpu_total', 'cpu_total'), ('host_memory_total', 'memory_total'),
+                             ('host_memory_available', 'memory_available'), ('host_disk_total', 'disk_total'),
+                             ('host_disk_available', 'disk_available'), ('host_io_read', 'io_read'),
+                             ('host_io_write', 'io_write'), ('host_load_one', 'load_one'),
+                             ('host_load_five', 'load_five'), ('host_load_fifteen', 'load_fifteen')):
+        for row in samples[key]:
+            host = hosts.setdefault(row['instance'], {'instance': row['instance']})
+            host[metric_name] = _dashboard_percent(row['value']) if metric_name in ('cpu', 'memory', 'disk') else row['value']
+    for host in hosts.values():
+        host['capacity'] = {
+            'cpu': _dashboard_capacity(host.get('cpu_total'), percent=host.get('cpu')),
+            'memory': _dashboard_capacity(host.get('memory_total'), remaining=host.get('memory_available')),
+            'disk': _dashboard_capacity(host.get('disk_total'), remaining=host.get('disk_available')),
+        }
+        host['load'] = {
+            'one': host.pop('load_one', None),
+            'five': host.pop('load_five', None),
+            'fifteen': host.pop('load_fifteen', None),
+        }
+        for key in ('cpu_total', 'memory_total', 'memory_available', 'disk_total', 'disk_available'):
+            host.pop(key, None)
+
+    pods = {}
+    fallback_cluster = _safe_text(getattr(config, 'name', ''), PROMETHEUS_LABEL_VALUE_MAX_LENGTH) or 'Prometheus'
+    for key, metric_name in (('pod_cpu', 'cpu'), ('pod_memory', 'memory')):
+        for row in samples[key]:
+            cluster = _dashboard_cluster(row, fallback_cluster)
+            identity = (cluster, row['namespace'], row['pod'])
+            pod = pods.setdefault(identity, {
+                'cluster': cluster, 'namespace': row['namespace'], 'pod': row['pod'],
+            })
+            pod[metric_name] = _dashboard_percent(row['value'])
+    for row in samples['pod_status']:
+        if row['value'] != 1:
+            continue
+        cluster = _dashboard_cluster(row, fallback_cluster)
+        identity = (cluster, row['namespace'], row['pod'])
+        pod = pods.setdefault(identity, {
+            'cluster': cluster, 'namespace': row['namespace'], 'pod': row['pod'],
+        })
+        pod['status'] = row.get('phase') or 'Unknown'
+
+    host_rows = [hosts[name] for name in sorted(hosts)[:PROMETHEUS_DASHBOARD_MAX_ROWS]]
+    pod_rows = [pods[key] for key in sorted(pods)[:PROMETHEUS_DASHBOARD_MAX_ROWS]]
+    return {'ok': True, 'hosts': host_rows, 'pods': pod_rows, 'errors': errors}
 
 
 def _query_prometheus_collection(
@@ -832,6 +1015,62 @@ def test_alertmanager_connection(config):
     return {'ok': False, 'message': 'Alertmanager 返回格式异常'}
 
 
+def query_alertmanager_alerts(config):
+    result = alertmanager_get_json(config, '/api/v2/alerts')
+    if not isinstance(result, dict) or not result.get('ok'):
+        return {'ok': False, 'message': ALERTMANAGER_ALERTS_FAILURE_MESSAGE}
+    if not isinstance(result.get('body'), list):
+        return {'ok': False, 'message': ALERTMANAGER_ALERTS_FORMAT_MESSAGE}
+    return {'ok': True, 'body': result.get('body')}
+
+
+def _safe_alertmanager_timestamp(value):
+    if not isinstance(value, str):
+        return ''
+    parsed = parse_datetime(value.strip())
+    if not parsed:
+        return ''
+    try:
+        return parsed.isoformat()
+    except (TypeError, ValueError):
+        return ''
+
+
+def normalize_alertmanager_alerts(alerts):
+    if not isinstance(alerts, list):
+        return {'rows': [], 'summary': {'total': 0, 'firing': 0, 'resolved': 0, 'other': 0}, 'total_rows': 0, 'truncated': False}
+    rows = []
+    summary = {'total': 0, 'firing': 0, 'resolved': 0, 'other': 0}
+    for alert in alerts:
+        if not isinstance(alert, dict):
+            continue
+        summary['total'] += 1
+        status = _alertmanager_status({}, alert)
+        if status not in ('firing', 'resolved'):
+            status = 'unknown'
+        summary[status if status in ('firing', 'resolved') else 'other'] += 1
+        if len(rows) >= ALERTMANAGER_ALERTS_MAX_ROWS:
+            continue
+        labels = _safe_prometheus_labels(alert.get('labels'))
+        annotations = _safe_prometheus_labels(alert.get('annotations'))
+        name = _safe_text(labels.get('alertname') or annotations.get('summary') or 'Alertmanager 告警', 240)
+        rows.append({
+            'name': name,
+            'status': status,
+            'starts_at': _safe_alertmanager_timestamp(alert.get('startsAt')),
+            'updated_at': _safe_alertmanager_timestamp(alert.get('updatedAt')),
+            'ends_at': _safe_alertmanager_timestamp(alert.get('endsAt')),
+            'labels': labels,
+            'annotations': annotations,
+        })
+    return {
+        'rows': rows,
+        'summary': summary,
+        'total_rows': summary['total'],
+        'truncated': summary['total'] > len(rows),
+    }
+
+
 def _alertmanager_status(payload, alert):
     status = ''
     if isinstance(alert, dict):
@@ -932,6 +1171,47 @@ def _alertmanager_alert_sort_key(alert):
     return timezone.datetime.min.replace(tzinfo=timezone.utc)
 
 
+def _alertmanager_matching_host(alert):
+    """Find a managed host for an Alertmanager instance label, when unambiguous."""
+    instance = _safe_text(alert.get('instance'), 100)
+    if not instance:
+        return None
+    candidates = [instance]
+    # node_exporter commonly reports an IPv4/DNS instance as host:port.
+    if instance.count(':') == 1:
+        hostname, port = instance.rsplit(':', 1)
+        if hostname and port.isdigit():
+            candidates.append(hostname)
+    return NewLinux.objects.filter(
+        Q(linux_name__in=candidates)
+        | Q(linux_hostname__in=candidates)
+        | Q(linux_ip__in=candidates)
+    ).order_by('id').first()
+
+
+def _alertmanager_is_silenced_for_maintenance(host, now=None):
+    """Keep external alert delivery available when the maintenance lookup fails."""
+    if host is None:
+        return False
+    try:
+        from devops.services import active_maintenance_windows_for_host
+        return active_maintenance_windows_for_host(host, now=now).exists()
+    except Exception:
+        return False
+
+
+def _silence_alertmanager_event(event, now=None):
+    if event.status == AlertEvent.STATUS_SILENCED:
+        return event
+    from devops.services import update_alert_status
+    return update_alert_status(
+        event,
+        AlertEvent.STATUS_SILENCED,
+        handler='system',
+        remark='命中维护窗口',
+    )
+
+
 def push_alertmanager_firing_alerts(alertmanager, payload, dedupe=False):
     alerts = _alertmanager_alerts_from_payload(payload)
     firing_alerts = [alert for alert in alerts if alert.get('status') == 'firing']
@@ -953,10 +1233,12 @@ def push_alertmanager_firing_alerts(alertmanager, payload, dedupe=False):
             'matched_notifications': 0,
             'pushed': 0,
             'skipped': 0,
+            'silenced': 0,
             'results': [],
         }
     results = []
     skipped = 0
+    silenced = 0
     now = timezone.now()
     active_statuses = [
         AlertEvent.STATUS_OPEN,
@@ -966,6 +1248,8 @@ def push_alertmanager_firing_alerts(alertmanager, payload, dedupe=False):
     for alert in pushable_alerts:
         event = None
         fingerprint = ''
+        host = _alertmanager_matching_host(alert)
+        maintenance_silenced = _alertmanager_is_silenced_for_maintenance(host, now=now)
         if dedupe:
             fingerprint = _alertmanager_fingerprint(alertmanager, alert)
             event = AlertEvent.objects.filter(
@@ -976,9 +1260,27 @@ def push_alertmanager_firing_alerts(alertmanager, payload, dedupe=False):
                 event.repeat_count += 1
                 event.last_seen_at = now
                 event.message = alert.get('message') or event.message
+                if maintenance_silenced:
+                    _silence_alertmanager_event(event, now=now)
+                    silenced += 1
                 event.save(update_fields=['repeat_count', 'last_seen_at', 'message', 'updated_at'])
                 skipped += 1
                 continue
+        if maintenance_silenced:
+            if dedupe:
+                AlertEvent.objects.create(
+                    host=host,
+                    level=AlertEvent.LEVEL_WARNING,
+                    metric=alert.get('metric') or 'alertmanager',
+                    message=alert.get('message') or 'Alertmanager firing 告警',
+                    status=AlertEvent.STATUS_SILENCED,
+                    fingerprint=fingerprint,
+                    first_seen_at=now,
+                    last_seen_at=now,
+                    remark='命中维护窗口',
+                )
+            silenced += 1
+            continue
         alert_result_start = len(results)
         for config in configs:
             title, content = _alertmanager_notification_content(alertmanager, config, alert)
@@ -993,7 +1295,7 @@ def push_alertmanager_firing_alerts(alertmanager, payload, dedupe=False):
             results.append(result_item)
         if dedupe and any(item.get('ok') for item in results[alert_result_start:]):
             event = AlertEvent.objects.create(
-                host=None,
+                host=host,
                 level=AlertEvent.LEVEL_WARNING,
                 metric=alert.get('metric') or 'alertmanager',
                 message=alert.get('message') or 'Alertmanager firing 告警',
@@ -1012,6 +1314,7 @@ def push_alertmanager_firing_alerts(alertmanager, payload, dedupe=False):
         'matched_notifications': config_count,
         'pushed': len(results),
         'skipped': skipped,
+        'silenced': silenced,
         'results': results,
     }
 
@@ -1042,7 +1345,11 @@ def alert_notification_payload(provider, title, content):
 
 
 def _alert_notification_ssl_context(url):
-    return None
+    if urlparse.urlsplit(url).scheme.lower() != 'https':
+        return None
+    if certifi is not None:
+        return ssl.create_default_context(cafile=certifi.where())
+    return ssl.create_default_context()
 
 
 def _alert_notification_alarm_handler(signum, frame):

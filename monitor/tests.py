@@ -2,12 +2,14 @@ import json
 import io
 import socket
 import ssl
+from datetime import timedelta
 
 from django.test import TestCase
 from django.urls import reverse
+from django.utils import timezone
 from unittest import mock
 
-from devops.models import AlertEvent, AlertHistory, AuditLog, DevOpsRole
+from devops.models import AlertEvent, AlertHistory, AuditLog, DevOpsModulePermission, DevOpsRole, IntegrationHealthEvent, MaintenanceWindow
 from devops.models import MetricSample
 from PyLinux.crypto import decrypt_text
 from RemoteLinux.models import User
@@ -264,8 +266,9 @@ class MonitorSecurityTests(TestCase):
 		self.assertNotContains(response, 'token=secret', status_code=400)
 		self.assertEqual(PrometheusConfig.objects.count(), 0)
 
+	@mock.patch('monitor.views.record_integration_health_event')
 	@mock.patch('monitor.views.test_prometheus_connection', return_value={'ok': True, 'message': 'Prometheus 连接正常'})
-	def test_operator_can_test_prometheus_connection_without_saving(self, test_connection):
+	def test_operator_can_test_prometheus_connection_without_saving(self, test_connection, record_health):
 		self.set_role(DevOpsRole.ROLE_OPERATOR)
 
 		response = self.client.post(reverse('monitor:prometheus_test'), {
@@ -279,6 +282,7 @@ class MonitorSecurityTests(TestCase):
 		self.assertEqual(PrometheusConfig.objects.count(), 0)
 		self.assertEqual(test_connection.call_args[0][0].name, 'VictoriaMetrics 测试')
 		self.assertEqual(test_connection.call_args[0][0].prometheus_url, 'http://v-metrics.odc.sunline.cn')
+		record_health.assert_not_called()
 
 	def test_integration_page_exposes_safe_common_payload_and_forms(self):
 		prometheus = PrometheusConfig.objects.create(
@@ -313,6 +317,7 @@ class MonitorSecurityTests(TestCase):
 		self.assertEqual(data['prometheus_form']['test_action'], reverse('monitor:prometheus_test'))
 		self.assertEqual(data['alertmanager_form']['action'], reverse('monitor:alertmanager_create'))
 		self.assertEqual(data['alertmanager_form']['test_action'], reverse('monitor:alertmanager_test'))
+		self.assertNotIn('health', data['integrations'][0])
 		with open('static/js/ops-vue-pages.js', 'r') as handle:
 			vue_source = handle.read()
 		self.assertNotIn('id="monitor-integrations-kind"', vue_source)
@@ -366,8 +371,9 @@ class MonitorSecurityTests(TestCase):
 		self.assertFalse(PrometheusConfig.objects.filter(id=config.id).exists())
 		self.assertTrue(AuditLog.objects.filter(action='删除Prometheus对接', target_id=str(config.id)).exists())
 
+	@mock.patch('monitor.views.record_integration_health_event')
 	@mock.patch('monitor.views.test_prometheus_connection', return_value={'ok': True, 'message': 'Prometheus 连接正常'})
-	def test_prometheus_connection_test_does_not_update_existing_record(self, test_connection):
+	def test_prometheus_connection_test_does_not_update_existing_record(self, test_connection, record_health):
 		self.set_role(DevOpsRole.ROLE_OPERATOR)
 		config = PrometheusConfig.objects.create(
 			name='已保存 Prometheus',
@@ -387,6 +393,68 @@ class MonitorSecurityTests(TestCase):
 		self.assertEqual(config.name, '已保存 Prometheus')
 		self.assertEqual(config.prometheus_url, 'http://saved-prometheus.local:9090')
 		self.assertEqual(test_connection.call_args[0][0].name, '仅测试 Prometheus')
+		record_health.assert_not_called()
+
+	@mock.patch('monitor.views.record_integration_health_event')
+	@mock.patch('monitor.views.test_prometheus_connection', return_value={'ok': False, 'message': 'Prometheus 请求失败，请检查地址和网络'})
+	def test_persisted_prometheus_connection_test_records_safe_health_result(self, test_connection, record_health):
+		self.set_role(DevOpsRole.ROLE_OPERATOR)
+		config = PrometheusConfig.objects.create(
+			name='已保存 Prometheus', prometheus_url='http://saved-prometheus.local:9090', enabled=True,
+		)
+
+		response = self.client.post(reverse('monitor:prometheus_test'), {
+			'id': config.id, 'name': config.name, 'prometheus_url': config.prometheus_url, 'enabled': 'on',
+		})
+
+		self.assertEqual(response.status_code, 400)
+		record_health.assert_called_once_with(
+			IntegrationHealthEvent.TYPE_PROMETHEUS,
+			source=config,
+			status=IntegrationHealthEvent.STATUS_FAILED,
+			category=IntegrationHealthEvent.CATEGORY_REQUEST_ERROR,
+		)
+
+	@mock.patch('monitor.views.summarize_integration_health')
+	def test_integration_health_payload_is_admin_security_only(self, summarize_health):
+		config = PrometheusConfig.objects.create(
+			name='Health Prometheus', prometheus_url='http://prometheus.local:9090', enabled=True,
+		)
+		summarize_health.return_value = {
+			'current_state': 'failed', 'latest_check': '2026-07-19T10:00:00Z',
+			'latest_category': IntegrationHealthEvent.CATEGORY_TIMEOUT,
+			'latest_summary': 'untrusted raw token=secret', 'consecutive_failures': 2,
+			'recent_event_counts': {'failed': 3, 'success': 1},
+		}
+		self.set_role(DevOpsRole.ROLE_OPERATOR)
+
+		operator_data = self.vue_data(self.client.get(reverse('monitor:prometheus_config')))
+
+		self.assertFalse(operator_data['can_view_integration_health'])
+		self.assertNotIn('health', operator_data['integrations'][0])
+		summarize_health.assert_not_called()
+		self.set_role(DevOpsRole.ROLE_ADMIN)
+		DevOpsModulePermission.objects.update_or_create(
+			user=self.user,
+			module=DevOpsModulePermission.MODULE_SECURITY,
+			defaults={'role': DevOpsRole.ROLE_ADMIN},
+		)
+		admin_data = self.vue_data(self.client.get(reverse('monitor:prometheus_config')))
+
+		health = admin_data['integrations'][0]['health']
+		self.assertTrue(admin_data['can_view_integration_health'])
+		self.assertEqual(health, {
+			'state': 'failed', 'last_checked_at': '2026-07-19T10:00:00Z',
+			'category': IntegrationHealthEvent.CATEGORY_TIMEOUT,
+			'summary': '请求超时', 'consecutive_failures': 2,
+			'recent_failures': 3, 'recent_successes': 1,
+		})
+		summarize_health.assert_called_once_with(IntegrationHealthEvent.TYPE_PROMETHEUS, source=config)
+		with open('static/js/ops-vue-pages.js', 'r') as handle:
+			vue_source = handle.read()
+		self.assertIn('normalizeMonitorIntegrationHealth', vue_source)
+		self.assertIn('data.can_view_integration_health', vue_source)
+		self.assertIn('对接健康状态', vue_source)
 
 	def test_operator_can_create_update_and_delete_alertmanager_with_audits(self):
 		self.set_role(DevOpsRole.ROLE_OPERATOR)
@@ -437,8 +505,9 @@ class MonitorSecurityTests(TestCase):
 		self.assertNotContains(response, 'token=secret', status_code=400)
 		self.assertEqual(AlertmanagerConfig.objects.count(), 0)
 
+	@mock.patch('monitor.views.record_integration_health_event')
 	@mock.patch('monitor.views.test_alertmanager_connection', return_value={'ok': True, 'message': 'Alertmanager 连接正常'})
-	def test_operator_can_test_alertmanager_connection_without_saving(self, test_connection):
+	def test_operator_can_test_alertmanager_connection_without_saving(self, test_connection, record_health):
 		self.set_role(DevOpsRole.ROLE_OPERATOR)
 
 		response = self.client.post(reverse('monitor:alertmanager_test'), {
@@ -451,6 +520,27 @@ class MonitorSecurityTests(TestCase):
 		self.assertContains(response, 'Alertmanager 连接正常')
 		self.assertEqual(AlertmanagerConfig.objects.count(), 0)
 		self.assertEqual(test_connection.call_args[0][0].alertmanager_url, 'http://alertmanager.local:9093')
+		record_health.assert_not_called()
+
+	@mock.patch('monitor.views.record_integration_health_event')
+	@mock.patch('monitor.views.test_alertmanager_connection', return_value={'ok': True, 'message': 'Alertmanager 连接正常'})
+	def test_persisted_alertmanager_connection_test_records_safe_health_result(self, test_connection, record_health):
+		self.set_role(DevOpsRole.ROLE_OPERATOR)
+		config = AlertmanagerConfig.objects.create(
+			name='已保存 Alertmanager', alertmanager_url='http://alerts.local:9093', enabled=True,
+		)
+
+		response = self.client.post(reverse('monitor:alertmanager_test'), {
+			'id': config.id, 'name': config.name, 'alertmanager_url': config.alertmanager_url, 'enabled': 'on',
+		})
+
+		self.assertEqual(response.status_code, 200)
+		record_health.assert_called_once_with(
+			IntegrationHealthEvent.TYPE_ALERTMANAGER,
+			source=config,
+			status=IntegrationHealthEvent.STATUS_SUCCESS,
+			category=IntegrationHealthEvent.CATEGORY_OK,
+		)
 
 	def test_viewer_cannot_write_or_test_alertmanager_integrations(self):
 		self.set_role(DevOpsRole.ROLE_VIEWER)
@@ -510,6 +600,17 @@ class MonitorSecurityTests(TestCase):
 		self.assertIn('aria-label="查询监控对接"', vue_source)
 		self.assertIn('ops-integration-filter-query', vue_source)
 		self.assertIn('filteredMonitorIntegrationItems', vue_source)
+		self.assertIn('monitorIntegrationEnabledCount', vue_source)
+		self.assertIn('ops-integration-list-summary', vue_source)
+		self.assertIn('ops-integration-table', vue_source)
+		self.assertIn('<th>名称</th>', vue_source)
+		self.assertIn('<th>类型</th>', vue_source)
+		self.assertIn('<th>地址</th>', vue_source)
+		self.assertIn('<th>状态</th>', vue_source)
+		self.assertIn('<th>更新时间</th>', vue_source)
+		self.assertIn('integration.updatedAt ? formatDisplayDate(integration.updatedAt) : \'-\'', vue_source)
+		self.assertIn('ops-integration-icon-action', vue_source)
+		self.assertIn('integration.deleteUrl', vue_source)
 		self.assertNotIn('monitor-home-\' + group.key + \'-selector', vue_source)
 
 	def test_alert_query_requires_enabled_prometheus_config(self):
@@ -1196,8 +1297,8 @@ class MonitorSecurityTests(TestCase):
 		self.assertIn('isSensitiveMetricLabelValue(labels[key])', vue_source)
 		self.assertIn("this.fetchMetricJson(this.data.execute_url, form, 'query')", vue_source)
 		self.assertIn("this.fetchMetricJson(endpoint, form, 'resource')", vue_source)
-		self.assertEqual(vue_source.count('@keydown="handleMetricTabKeydown'), 3)
-		self.assertEqual(vue_source.count(':tabindex="metricView ==='), 3)
+		self.assertEqual(vue_source.count('@keydown="handleMetricTabKeydown'), 4)
+		self.assertEqual(vue_source.count(':tabindex="metricView ==='), 4)
 
 	def test_metric_query_frontend_metadata_suggestions_and_native_scroll_contract(self):
 		with open('static/js/ops-vue-pages.js', 'r') as handle:
@@ -1324,7 +1425,7 @@ class MonitorSecurityTests(TestCase):
 		self.assertIn('this.expandedRuleCells.query = [];', vue_source)
 		self.assertIn('this.expandedRuleCells.labels = [];', vue_source)
 
-		static_version = '20260715-integration-filter'
+		static_version = '20260716-alerts'
 		self.assertEqual(page_template.count('?v=%s' % static_version), 2)
 		self.assertIn("static 'css/ops-vue-pages.css'", page_template)
 		self.assertIn("static 'js/ops-vue-pages.js'", page_template)
@@ -1465,6 +1566,12 @@ class MonitorSecurityTests(TestCase):
 
 	def test_viewer_cannot_save_alert_notifications_when_roles_are_configured(self):
 		self.set_role(DevOpsRole.ROLE_VIEWER)
+		config = AlertNotificationConfig.objects.create(
+			provider=AlertNotificationConfig.PROVIDER_WECOM,
+			name='existing notification',
+			enabled=True,
+			webhook_url='https://qyapi.weixin.qq.com/cgi-bin/webhook/send?key=existing',
+		)
 
 		response = self.client.post(reverse('monitor:alert_notifications'), {
 			'feishu_enabled': 'on',
@@ -1474,6 +1581,12 @@ class MonitorSecurityTests(TestCase):
 
 		self.assertEqual(response.status_code, 403)
 		self.assertEqual(AlertNotificationConfig.objects.count(), 1)
+		config.refresh_from_db()
+		self.assertEqual(config.name, 'existing notification')
+		self.assertEqual(
+			config.decrypted_webhook_url,
+			'https://qyapi.weixin.qq.com/cgi-bin/webhook/send?key=existing',
+		)
 
 	def test_operator_can_save_alert_notifications_encrypted(self):
 		self.set_role(DevOpsRole.ROLE_OPERATOR)
@@ -1823,7 +1936,7 @@ class MonitorSecurityTests(TestCase):
 		self.assertIn('内容：CPU 使用率超过阈值', content)
 		self.assertNotIn('qyapi.weixin.qq.com', content)
 
-	@mock.patch('monitor.views.send_alert_notification')
+	@mock.patch('monitor.services.send_alert_notification')
 	def test_alertmanager_webhook_pushes_firing_to_bound_wecom_notification(self, send_mock):
 		send_mock.return_value = {'ok': True, 'message': '告警通知发送成功'}
 		bound = AlertmanagerConfig.objects.create(
@@ -1932,6 +2045,59 @@ class MonitorSecurityTests(TestCase):
 		send_mock.assert_not_called()
 
 	@mock.patch('monitor.services.send_alert_notification')
+	def test_alertmanager_webhook_silences_matching_active_maintenance_window(self, send_mock):
+		host = NewLinux.objects.create(
+			linux_name='maintenance-webhook',
+			linux_ip='127.0.0.7',
+			linux_hostname='maintenance-webhook',
+			linux_port='22',
+			linux_user='root',
+			linux_passwd='',
+		)
+		window = MaintenanceWindow.objects.create(
+			name='webhook maintenance',
+			starts_at=timezone.now() - timedelta(minutes=1),
+			ends_at=timezone.now() + timedelta(minutes=1),
+		)
+		window.hosts.add(host)
+		alertmanager = AlertmanagerConfig.objects.create(
+			name='Webhook Alertmanager',
+			alertmanager_url='http://webhook-alertmanager.local:9093',
+			enabled=True,
+		)
+		AlertNotificationConfig.objects.create(
+			provider=AlertNotificationConfig.PROVIDER_WECOM,
+			alertmanager=alertmanager,
+			name='企业微信',
+			enabled=True,
+			webhook_url='https://qyapi.weixin.qq.com/cgi-bin/webhook/send?key=maintenance',
+		)
+
+		response = self.client.post(
+			reverse('monitor:alertmanager_webhook', args=[alertmanager.id]),
+			data=json.dumps({
+				'status': 'firing',
+				'alerts': [{
+					'status': 'firing',
+					'fingerprint': 'webhook-maintenance',
+					'labels': {'alertname': 'HighCPU', 'instance': 'maintenance-webhook:9100'},
+					'annotations': {'description': 'CPU 使用率过高'},
+				}],
+			}),
+			content_type='application/json',
+		)
+
+		self.assertEqual(response.status_code, 200)
+		data = json.loads(response.content.decode('utf-8'))
+		self.assertTrue(data['ok'])
+		self.assertEqual(data['pushed'], 0)
+		self.assertEqual(data['silenced'], 1)
+		send_mock.assert_not_called()
+		event = AlertEvent.objects.get(fingerprint='alertmanager:%s:webhook-maintenance' % alertmanager.id)
+		self.assertEqual(event.host, host)
+		self.assertEqual(event.status, AlertEvent.STATUS_SILENCED)
+
+	@mock.patch('monitor.services.send_alert_notification')
 	@mock.patch('monitor.services.alertmanager_get_json')
 	def test_poll_alertmanager_pushes_active_alert_once(self, get_json_mock, send_mock):
 		send_mock.return_value = {'ok': True, 'message': '告警通知发送成功'}
@@ -2034,6 +2200,88 @@ class MonitorSecurityTests(TestCase):
 		send_mock.assert_called_once()
 		event = AlertEvent.objects.get(fingerprint='alertmanager:%s:same-alert' % alertmanager.id)
 		self.assertEqual(event.repeat_count, 2)
+
+	@mock.patch('monitor.services.send_alert_notification')
+	def test_alertmanager_poll_silences_matching_active_maintenance_window(self, send_mock):
+		host = NewLinux.objects.create(
+			linux_name='maintenance-node',
+			linux_ip='127.0.0.8',
+			linux_hostname='maintenance-node',
+			linux_port='22',
+			linux_user='root',
+			linux_passwd='',
+		)
+		window = MaintenanceWindow.objects.create(
+			name='planned maintenance',
+			starts_at=timezone.now() - timedelta(minutes=1),
+			ends_at=timezone.now() + timedelta(minutes=1),
+		)
+		window.hosts.add(host)
+		alertmanager = AlertmanagerConfig.objects.create(
+			name='生产环境',
+			alertmanager_url='http://alertmanager.local:9093',
+			enabled=True,
+		)
+		AlertNotificationConfig.objects.create(
+			provider=AlertNotificationConfig.PROVIDER_WECOM,
+			alertmanager=alertmanager,
+			name='企业微信',
+			enabled=True,
+			webhook_url='https://qyapi.weixin.qq.com/cgi-bin/webhook/send?key=bound',
+		)
+
+		result = services.push_alertmanager_firing_alerts(alertmanager, [{
+			'status': {'state': 'active'},
+			'fingerprint': 'maintenance-alert',
+			'labels': {'alertname': 'HighCPU', 'instance': 'maintenance-node:9100'},
+			'annotations': {'description': 'CPU 使用率过高'},
+		}], dedupe=True)
+
+		self.assertEqual(result['attempted'], 1)
+		self.assertEqual(result['pushed'], 0)
+		self.assertEqual(result['silenced'], 1)
+		self.assertEqual(result['results'], [])
+		send_mock.assert_not_called()
+		event = AlertEvent.objects.get(fingerprint='alertmanager:%s:maintenance-alert' % alertmanager.id)
+		self.assertEqual(event.host, host)
+		self.assertEqual(event.status, AlertEvent.STATUS_SILENCED)
+		self.assertEqual(event.remark, '命中维护窗口')
+
+	@mock.patch('monitor.services.send_alert_notification')
+	def test_alertmanager_poll_keeps_notifications_available_when_maintenance_lookup_fails(self, send_mock):
+		host = NewLinux.objects.create(
+			linux_name='maintenance-lookup-failure',
+			linux_ip='127.0.0.9',
+			linux_hostname='maintenance-lookup-failure',
+			linux_port='22',
+			linux_user='root',
+			linux_passwd='',
+		)
+		alertmanager = AlertmanagerConfig.objects.create(
+			name='生产环境',
+			alertmanager_url='http://alertmanager.local:9093',
+			enabled=True,
+		)
+		AlertNotificationConfig.objects.create(
+			provider=AlertNotificationConfig.PROVIDER_WECOM,
+			alertmanager=alertmanager,
+			name='企业微信',
+			enabled=True,
+			webhook_url='https://qyapi.weixin.qq.com/cgi-bin/webhook/send?key=bound',
+		)
+		with mock.patch('devops.services.active_maintenance_windows_for_host', side_effect=RuntimeError('db unavailable')):
+			result = services.push_alertmanager_firing_alerts(alertmanager, [{
+				'status': {'state': 'active'},
+				'fingerprint': 'maintenance-lookup-failure',
+				'labels': {'alertname': 'HighCPU', 'instance': host.linux_name},
+				'annotations': {'description': 'CPU 使用率过高'},
+			}], dedupe=True)
+
+		self.assertEqual(result['pushed'], 1)
+		self.assertEqual(result['silenced'], 0)
+		send_mock.assert_called_once()
+		event = AlertEvent.objects.get(fingerprint='alertmanager:%s:maintenance-lookup-failure' % alertmanager.id)
+		self.assertEqual(event.status, AlertEvent.STATUS_OPEN)
 
 	@mock.patch('monitor.crontab.poll_alertmanager_firing_alerts')
 	def test_poll_alertmanager_notifications_returns_summary(self, poll_mock):
@@ -2173,6 +2421,242 @@ class MonitorSecurityTests(TestCase):
 		self.assertNotIn('secret-fragment', response.context['vue_page_payload'])
 		self.assertNotContains(response, 'recognizable-fragment', status_code=400)
 		self.assertNotContains(response, 'secret-fragment', status_code=400)
+
+	@mock.patch('monitor.views.query_alertmanager_alerts')
+	def test_metric_query_alerts_selects_enabled_alertmanager_and_returns_safe_rows(self, query_mock):
+		AlertmanagerConfig.objects.create(name='Disabled', alertmanager_url='http://disabled.local:9093', enabled=False)
+		selected = AlertmanagerConfig.objects.create(name='Primary', alertmanager_url='http://alerts.local:9093', enabled=True)
+		query_mock.return_value = {'ok': True, 'body': [{
+			'status': {'state': 'active'}, 'startsAt': '2025-01-01T00:00:00Z',
+			'labels': {'alertname': 'HostDown', 'token': 'private-token'},
+			'annotations': {'summary': 'Host down', 'password': 'private-password'},
+		}]}
+
+		response = self.client.post(reverse('monitor:metric_query_alerts'), {'alertmanager_id': selected.id})
+
+		self.assertEqual(response.status_code, 200)
+		self.assertEqual(response.json()['alertmanager_id'], selected.id)
+		self.assertEqual(response.json()['alerts']['rows'][0]['status'], 'firing')
+		self.assertEqual(response.json()['alerts']['rows'][0]['labels'], {'alertname': 'HostDown'})
+		self.assertEqual(response.json()['alerts']['rows'][0]['annotations'], {'summary': 'Host down'})
+		self.assertNotIn('private-token', response.content.decode('utf-8'))
+		query_mock.assert_called_once_with(selected)
+
+	@mock.patch('monitor.views.query_alertmanager_alerts')
+	def test_metric_query_alerts_rejects_invalid_config_and_masks_failure(self, query_mock):
+		config = AlertmanagerConfig.objects.create(alertmanager_url='http://alerts.local:9093', enabled=True)
+		invalid = self.client.post(reverse('monitor:metric_query_alerts'), {'alertmanager_id': 'bad'})
+		missing = self.client.post(reverse('monitor:metric_query_alerts'))
+		query_mock.return_value = {'ok': False, 'message': 'raw upstream token=private-value'}
+		failed = self.client.post(reverse('monitor:metric_query_alerts'), {'alertmanager_id': config.id})
+
+		self.assertEqual(invalid.status_code, 400)
+		self.assertEqual(invalid.json(), {'ok': False, 'message': '选择的 Alertmanager 对接不可用'})
+		self.assertEqual(missing.status_code, 502)
+		self.assertEqual(missing.json(), {'ok': False, 'message': 'Alertmanager 告警查询失败'})
+		self.assertEqual(failed.status_code, 502)
+		self.assertEqual(failed.json(), {'ok': False, 'message': 'Alertmanager 告警查询失败'})
+		self.assertNotIn('private-value', failed.content.decode('utf-8'))
+
+	def test_metric_query_alerts_payload_and_frontend_contract(self):
+		primary = AlertmanagerConfig.objects.create(
+			name='Primary Alerts', alertmanager_url='http://alerts-primary.local:9093', enabled=True,
+		)
+		secondary = AlertmanagerConfig.objects.create(
+			name='Secondary Alerts', alertmanager_url='http://alerts-secondary.local:9093', enabled=True,
+		)
+		data = self.vue_data(self.client.get(reverse('monitor:alert_query')))
+		with open('static/js/ops-vue-pages.js', 'r') as handle:
+			vue_source = handle.read()
+		with open('static/css/ops-vue-pages.css', 'r') as handle:
+			css_source = handle.read()
+
+		self.assertEqual(data['alerts_url'], reverse('monitor:metric_query_alerts'))
+		self.assertEqual(data['alertmanager_configs'], [
+			{'id': primary.id, 'name': 'Primary Alerts'},
+			{'id': secondary.id, 'name': 'Secondary Alerts'},
+		])
+		self.assertEqual(data['selected_alertmanager_id'], primary.id)
+		for text in (
+			'metric-tab-alerts', 'metric-view-alerts', 'metricAlertmanagerConfigs',
+			'selectedMetricAlertmanagerId', 'canExecuteMetricAlerts',
+			"form.set(kind === 'alerts' ? 'alertmanager_id' : 'prometheus_id'",
+			'v-for="config in metricAlertmanagerConfigs"', 'normalizeMetricAlerts',
+		):
+			self.assertIn(text, vue_source)
+		self.assertEqual(vue_source.count('id="metric-tab-'), 4)
+		self.assertIn('grid-template-columns: repeat(4, minmax(0, 1fr));', css_source)
+
+
+class MonitorDashboardTests(TestCase):
+	def setUp(self):
+		self.user = User.objects.create(
+			user='dashboard-user', email='dashboard@example.com',
+			password='plain-password', confirm_pwd='plain-password',
+		)
+		session = self.client.session
+		session['is_login'] = True
+		session['user_id'] = self.user.id
+		session['user_name'] = self.user.user
+		session.save()
+
+	def vue_data(self, response):
+		return json.loads(response.context['vue_page_payload'])['data']
+
+	def test_dashboard_page_requires_login_and_lists_enabled_prometheus_only(self):
+		enabled = PrometheusConfig.objects.create(name='主集群', prometheus_url='http://prometheus.local', enabled=True)
+		PrometheusConfig.objects.create(name='停用', prometheus_url='http://disabled.local', enabled=False)
+		response = self.client.get(reverse('monitor:monitor_dashboard'))
+		data = self.vue_data(response)
+
+		self.assertEqual(response.status_code, 200)
+		self.assertEqual(response.context['vue_page_kind'], 'monitor-dashboard')
+		self.assertEqual(data['prometheus_configs'], [{'id': enabled.id, 'name': '主集群'}])
+		self.assertEqual(data['selected_prometheus_id'], enabled.id)
+		self.assertEqual(data['dashboard_url'], reverse('monitor:monitor_dashboard_data'))
+
+		session = self.client.session
+		session.clear()
+		session.save()
+		unauthorized = self.client.get(reverse('monitor:monitor_dashboard'))
+		self.assertEqual(unauthorized.status_code, 302)
+
+	def test_dashboard_frontend_shows_node_resource_details_and_single_row_options(self):
+		with open('static/js/ops-vue-pages.js', 'r') as handle:
+			vue_source = handle.read()
+		with open('static/css/monitor-command-center.css', 'r') as handle:
+			css_source = handle.read()
+
+		fcc_target = vue_source.split('class="fcc-target"', 1)[1].split('</article>', 1)[0]
+		for text in ('CPU 使用率', '总核数 [[ resource.total ]]', 'fcc-resource-grid',
+					 '使用率 [[ dashboardMetricText(resource.key === \'memory\' ? row.memory : row.disk) ]]',
+					 '总量 <strong>[[ resource.total ]]</strong>', '已用 <strong>[[ resource.used ]]</strong>',
+					 '剩余 <strong>[[ resource.remaining ]]</strong>', '磁盘 I/O', '[[ row.io.read ]]',
+					 '[[ row.io.write ]]'):
+			self.assertIn(text, fcc_target)
+		self.assertIn('.fcc-resource-grid {', css_source)
+		self.assertIn('.fcc-io {', css_source)
+		self.assertIn('.ops-dashboard-node-option {', css_source)
+		self.assertIn('display: flex;', css_source)
+		self.assertIn('width: 100%;', css_source)
+		self.assertIn('white-space: nowrap;', css_source)
+
+	@mock.patch('monitor.views.query_prometheus_dashboard')
+	def test_dashboard_data_requires_post_and_selected_enabled_config(self, query_dashboard):
+		config = PrometheusConfig.objects.create(name='Prometheus', prometheus_url='http://prometheus.local', enabled=True)
+		self.assertEqual(self.client.get(reverse('monitor:monitor_dashboard_data')).status_code, 405)
+
+		invalid = self.client.post(reverse('monitor:monitor_dashboard_data'), {'prometheus_id': config.id + 99})
+		self.assertEqual(invalid.status_code, 400)
+		self.assertEqual(invalid.json(), {'ok': False, 'message': '选择的 Prometheus 对接不可用'})
+		query_dashboard.assert_not_called()
+
+		query_dashboard.return_value = {
+			'ok': True, 'hosts': [{'instance': 'node-a', 'cpu': 12.5}],
+			'pods': [{'namespace': 'ops', 'pod': 'api-0', 'status': 'Running'}],
+			'errors': ['Pod 内存指标暂时不可用'],
+		}
+		response = self.client.post(reverse('monitor:monitor_dashboard_data'), {'prometheus_id': config.id})
+		self.assertEqual(response.status_code, 200)
+		self.assertEqual(response.json()['prometheus_id'], config.id)
+		self.assertEqual(response.json()['hosts'][0]['instance'], 'node-a')
+		self.assertEqual(response.json()['errors'], ['Pod 内存指标暂时不可用'])
+		query_dashboard.assert_called_once_with(config)
+
+	@mock.patch('monitor.views.query_prometheus_dashboard')
+	def test_dashboard_data_returns_safe_502_only_when_all_metric_groups_fail(self, query_dashboard):
+		config = PrometheusConfig.objects.create(name='Prometheus', prometheus_url='http://prometheus.local', enabled=True)
+		query_dashboard.return_value = {
+			'ok': True, 'hosts': [], 'pods': [],
+			'errors': ['指标%s不可用' % index for index in range(len(services.PROMETHEUS_DASHBOARD_QUERIES))],
+		}
+
+		response = self.client.post(reverse('monitor:monitor_dashboard_data'), {'prometheus_id': config.id})
+
+		self.assertEqual(response.status_code, 502)
+		self.assertEqual(response.json(), {
+			'ok': False,
+			'message': '监控看板数据暂时不可用，请稍后刷新',
+		})
+
+	@mock.patch('monitor.services.query_prometheus')
+	def test_dashboard_service_normalizes_safe_partial_metric_data(self, query_prometheus_mock):
+		config = PrometheusConfig(name='主集群', prometheus_url='http://prometheus.local', enabled=True)
+
+		def response(rows):
+			return {'ok': True, 'body': {'status': 'success', 'data': {'resultType': 'vector', 'result': rows}}}
+
+		query_prometheus_mock.side_effect = [
+			response([{'metric': {'instance': 'node-a:9100', 'apiToken': 'hidden'}, 'value': [1, '27.25']}]),
+			response([{'metric': {'instance': 'node-a:9100'}, 'value': [1, '63']}]),
+			{'ok': False, 'message': 'http://private.internal/secret'},
+			response([{'metric': {'instance': 'node-a:9100'}, 'value': [1, '8']}]),
+			response([{'metric': {'instance': 'node-a:9100'}, 'value': [1, '16000']}]),
+			response([{'metric': {'instance': 'node-a:9100'}, 'value': [1, '5920']}]),
+			response([{'metric': {'instance': 'node-a:9100'}, 'value': [1, '100000']}]),
+			response([{'metric': {'instance': 'node-a:9100'}, 'value': [1, '25000']}]),
+			response([{'metric': {'instance': 'node-a:9100'}, 'value': [1, '1048576.5']}]),
+			response([{'metric': {'instance': 'node-a:9100'}, 'value': [1, '2097152.25']}]),
+			response([{'metric': {'instance': 'node-a:9100'}, 'value': [1, '1.5']}]),
+			response([{'metric': {'instance': 'node-a:9100'}, 'value': [1, '1.25']}]),
+			response([{'metric': {'instance': 'node-a:9100'}, 'value': [1, '0.75']}]),
+			response([{'metric': {'namespace': 'ops', 'pod': 'api-0', 'kubernetes_cluster': 'cluster-a'}, 'value': [1, '2.5']}]),
+			response([{'metric': {'namespace': 'ops', 'pod': 'api-0', 'cluster_name': 'ignored-lower-priority'}, 'value': [1, '48.8']}]),
+			response([{'metric': {'namespace': 'ops', 'pod': 'api-0', 'phase': 'Running'}, 'value': [1, '1']}]),
+		]
+
+		result = services.query_prometheus_dashboard(config)
+
+		self.assertEqual(len(query_prometheus_mock.call_args_list), 16)
+		self.assertEqual(services.PROMETHEUS_DASHBOARD_QUERIES['host_io_read'],
+			'sum by (instance) (rate(node_disk_read_bytes_total[5m]))')
+		self.assertEqual(services.PROMETHEUS_DASHBOARD_QUERIES['host_io_write'],
+			'sum by (instance) (rate(node_disk_written_bytes_total[5m]))')
+		self.assertEqual(services.PROMETHEUS_DASHBOARD_QUERIES['host_load_one'], 'node_load1')
+		self.assertEqual(services.PROMETHEUS_DASHBOARD_QUERIES['host_load_five'], 'node_load5')
+		self.assertEqual(services.PROMETHEUS_DASHBOARD_QUERIES['host_load_fifteen'], 'node_load15')
+		self.assertEqual(result['hosts'], [{
+			'instance': 'node-a:9100', 'cpu': 27.25, 'memory': 63.0,
+			'io_read': 1048576.5, 'io_write': 2097152.25,
+			'load': {'one': 1.5, 'five': 1.25, 'fifteen': 0.75},
+			'capacity': {
+				'cpu': {'total': 8.0, 'used': 2.18, 'remaining': 5.82},
+				'memory': {'total': 16000.0, 'used': 10080.0, 'remaining': 5920.0},
+				'disk': {'total': 100000.0, 'used': 75000.0, 'remaining': 25000.0},
+			},
+		}])
+		self.assertEqual(result['pods'], [
+			{'cluster': 'cluster-a', 'namespace': 'ops', 'pod': 'api-0', 'cpu': 2.5},
+			{'cluster': 'ignored-lower-priority', 'namespace': 'ops', 'pod': 'api-0', 'memory': 48.8},
+			{'cluster': '主集群', 'namespace': 'ops', 'pod': 'api-0', 'status': 'Running'},
+		])
+		self.assertEqual(result['errors'], ['主机磁盘 指标暂时不可用'])
+		self.assertNotIn('hidden', json.dumps(result))
+		self.assertNotIn('private.internal', json.dumps(result))
+
+	@mock.patch('monitor.services.query_prometheus')
+	def test_dashboard_service_uses_cluster_label_priority_and_config_fallback(self, query_prometheus_mock):
+		config = PrometheusConfig(name='配置集群', prometheus_url='http://prometheus.local', enabled=True)
+
+		def response(rows):
+			return {'ok': True, 'body': {'status': 'success', 'data': {'resultType': 'vector', 'result': rows}}}
+
+		query_prometheus_mock.side_effect = [response([])] * 13 + [
+			response([{'metric': {
+				'namespace': 'ops', 'pod': 'api-0', 'cluster': 'primary',
+				'kubernetes_cluster': 'secondary', 'cluster_name': 'tertiary', 'token': 'private',
+			}, 'value': [1, '1']}]),
+			response([{'metric': {'namespace': 'ops', 'pod': 'worker-0'}, 'value': [1, '2']}]),
+			response([]),
+		]
+
+		result = services.query_prometheus_dashboard(config)
+
+		self.assertEqual(result['pods'], [
+			{'cluster': 'primary', 'namespace': 'ops', 'pod': 'api-0', 'cpu': 1.0},
+			{'cluster': '配置集群', 'namespace': 'ops', 'pod': 'worker-0', 'memory': 2.0},
+		])
+		self.assertNotIn('private', json.dumps(result))
 
 
 class PrometheusServiceTests(TestCase):
@@ -3030,6 +3514,23 @@ class PrometheusServiceTests(TestCase):
 
 
 class AlertmanagerServiceTests(TestCase):
+	@mock.patch('monitor.services.alertmanager_get_json')
+	def test_query_alerts_uses_v2_endpoint_and_normalizes_safe_bounded_rows(self, alertmanager_get_json):
+		config = AlertmanagerConfig(alertmanager_url='http://alertmanager.local:9093', enabled=True)
+		alertmanager_get_json.return_value = {'ok': True, 'body': [{
+			'status': {'state': 'firing'}, 'labels': {'alertname': 'DiskFull', 'apiToken': 'private'},
+			'annotations': {'summary': 'Disk full', 'webhook': 'private'},
+			'startsAt': '2025-01-01T00:00:00Z', 'updatedAt': 'bad-value', 'endsAt': '2025-01-02T00:00:00Z',
+		}]}
+
+		result = services.query_alertmanager_alerts(config)
+		payload = services.normalize_alertmanager_alerts(result['body'])
+
+		alertmanager_get_json.assert_called_once_with(config, '/api/v2/alerts')
+		self.assertEqual(payload['rows'][0]['labels'], {'alertname': 'DiskFull'})
+		self.assertEqual(payload['rows'][0]['annotations'], {'summary': 'Disk full'})
+		self.assertEqual(payload['rows'][0]['updated_at'], '')
+		self.assertNotIn('private', json.dumps(payload))
 	@mock.patch('monitor.services.urlrequest.urlopen')
 	def test_connection_can_test_disabled_config(self, urlopen):
 		urlopen.return_value.read.return_value = b'{"cluster": {"status": "ready"}}'

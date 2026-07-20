@@ -1,13 +1,18 @@
 from django.core.files.uploadedfile import SimpleUploadedFile
 from django.core.files.base import ContentFile
+from django.core.exceptions import ValidationError
+from django.conf import settings
 from django.core.management import call_command
+from django.core.management.base import CommandError
 from django.core.cache import cache, caches
 from django.core.cache.backends.filebased import FileBasedCache
 from django.test import TestCase, override_settings
 from django.urls import reverse
 from io import StringIO
+from datetime import timedelta
 import json
 import os
+import sys
 import shutil
 import socket
 import tempfile
@@ -28,8 +33,10 @@ from .models import (
     AuditLog,
     BatchTask,
     BatchTaskResult,
+    BackgroundJob,
     CommandExecution,
     DeploymentApp,
+    DevOpsProject,
     DeploymentRelease,
     DeploymentResult,
     DevOpsHostScope,
@@ -40,15 +47,22 @@ from .models import (
     FileDistributionResult,
     HostGroup,
     HostTag,
+    Incident,
+    IntegrationHealthEvent,
+    MaintenanceWindow,
     K8sCluster,
     MetricSample,
     NotificationChannel,
     NotificationLog,
+    NotificationTemplate,
+    AlertNotificationEscalation,
     ServiceOperation,
+    ServiceCatalog,
+    ServiceDependency,
     ComplianceBaseline,
     ComplianceResult,
 )
-from .services import cleanup_audit_logs, cleanup_metric_samples, deployment_risk_preview, enqueue_background_job, latest_metric_map, record_alert, record_metric_sample, run_background_job, send_notification_channel, validate_remote_path, scan_compliance_baseline
+from .services import active_maintenance_windows_for_host, active_maintenance_windows_for_release, cleanup_audit_logs, cleanup_metric_samples, deployment_risk_preview, enqueue_background_job, evaluate_worker_alert_thresholds, latest_metric_map, notify_alert, record_alert, record_metric_sample, run_background_job, send_notification_channel, validate_remote_path, scan_compliance_baseline, create_project_onboarding, claim_next_background_job, process_next_background_job, background_job_spec, fail_timed_out_background_jobs, require_deployment_maintenance_approval, summarize_background_jobs
 from .services import execute_batch_task, execute_command_record, execute_deployment_release, execute_deployment_rollback, execute_file_distribution
 from .services import COMMAND_ALLOWED, COMMAND_BLOCKED, evaluate_command_policy
 from .services import (
@@ -2140,6 +2154,117 @@ class DevOpsViewTests(TestCase):
         self.assertIn('将清理 1 条审计日志', output.getvalue())
         self.assertTrue(AuditLog.objects.filter(id=old_log.id).exists())
 
+    @override_settings(
+        DATABASES={'default': {'ENGINE': 'django.db.backends.mysql', 'NAME': 'ops', 'HOST': 'db.internal', 'PORT': '3306', 'USER': 'backup', 'PASSWORD': 'secret'}},
+        DATA_ENCRYPTION_KEY='test-backup-key',
+    )
+    @mock.patch('devops.management.commands.backup_runtime.subprocess.run')
+    def test_backup_runtime_mysql_uses_argument_list_and_password_environment(self, run):
+        def write_dump(command, **kwargs):
+            output = command[command.index('--result-file') + 1]
+            with open(output, 'w') as handle:
+                handle.write('controlled dump')
+        with tempfile.TemporaryDirectory(dir=settings.BASE_DIR) as directory:
+            output_path = os.path.join(directory, 'ops.tar.gz.enc')
+            run.side_effect = write_dump
+            call_command('backup_runtime', '--output=%s' % output_path)
+
+        command = run.call_args[0][0]
+        environment = run.call_args[1]['env']
+        self.assertEqual(command[0], 'mysqldump')
+        self.assertIn('--host', command)
+        self.assertIn('db.internal', command)
+        self.assertIn('--result-file', command)
+        self.assertNotIn(output_path, command)
+        self.assertNotIn('secret', command)
+        self.assertEqual(environment['MYSQL_PWD'], 'secret')
+
+    @override_settings(
+        DATABASES={'default': {'ENGINE': 'django.db.backends.postgresql', 'NAME': 'ops', 'HOST': 'db.internal', 'PORT': '5432', 'USER': 'backup', 'PASSWORD': 'secret'}},
+        DATA_ENCRYPTION_KEY='test-backup-key',
+    )
+    @mock.patch('devops.management.commands.backup_runtime.subprocess.run')
+    def test_backup_runtime_postgresql_uses_custom_dump_and_password_environment(self, run):
+        def write_dump(command, **kwargs):
+            output = command[command.index('--file') + 1]
+            with open(output, 'w') as handle:
+                handle.write('controlled dump')
+        with tempfile.TemporaryDirectory(dir=settings.BASE_DIR) as directory:
+            output_path = os.path.join(directory, 'ops.tar.gz.enc')
+            run.side_effect = write_dump
+            call_command('backup_runtime', '--output=%s' % output_path)
+
+        command = run.call_args[0][0]
+        environment = run.call_args[1]['env']
+        self.assertEqual(command[0], 'pg_dump')
+        self.assertIn('--format=custom', command)
+        self.assertIn('--dbname', command)
+        self.assertIn('ops', command)
+        self.assertNotIn('secret', command)
+        self.assertEqual(environment['PGPASSWORD'], 'secret')
+
+    @override_settings(
+        DATABASES={'default': {'ENGINE': 'django.db.backends.mysql', 'NAME': 'ops'}},
+        DATA_ENCRYPTION_KEY='test-backup-key',
+    )
+    @mock.patch('devops.management.commands.backup_runtime.subprocess.run')
+    def test_backup_runtime_dry_run_does_not_run_dump(self, run):
+        with tempfile.TemporaryDirectory(dir=settings.BASE_DIR) as directory:
+            output = StringIO()
+            call_command('backup_runtime', '--output=%s' % os.path.join(directory, 'ops.tar.gz.enc'), '--dry-run', stdout=output)
+
+        run.assert_not_called()
+        self.assertIn('no local changes', output.getvalue())
+
+    @override_settings(
+        DATABASES={'default': {'ENGINE': 'django.db.backends.mysql', 'NAME': 'ops'}},
+        DATA_ENCRYPTION_KEY='test-backup-key',
+        BACKUP_S3_CONFIG={'enabled': False},
+    )
+    @mock.patch('devops.management.commands.backup_runtime.subprocess.run')
+    def test_backup_runtime_dry_run_validates_s3_configuration(self, run):
+        with tempfile.TemporaryDirectory(dir=settings.BASE_DIR) as directory:
+            with self.assertRaises(CommandError):
+                call_command(
+                    'backup_runtime', '--output=%s' % os.path.join(directory, 'ops.tar.gz.enc'),
+                    '--upload-s3', '--dry-run',
+                )
+
+        run.assert_not_called()
+
+    @override_settings(
+        DATABASES={'default': {'ENGINE': 'django.db.backends.mysql', 'NAME': 'ops'}},
+        DATA_ENCRYPTION_KEY='test-backup-key',
+        BACKUP_S3_CONFIG={'enabled': True, 'bucket': 'pylinux-backups', 'prefix': 'daily', 'endpoint_url': '', 'region_name': ''},
+    )
+    @mock.patch('devops.management.commands.backup_runtime.subprocess.run')
+    def test_backup_runtime_uploads_only_encrypted_archive_to_s3(self, run):
+        def write_dump(command, **kwargs):
+            if command[0] != 'mysqldump':
+                return
+            output = command[command.index('--result-file') + 1]
+            with open(output, 'w') as handle:
+                handle.write('controlled dump')
+        with tempfile.TemporaryDirectory(dir=settings.BASE_DIR) as directory:
+            output_path = os.path.join(directory, 'ops.tar.gz.enc')
+            run.side_effect = write_dump
+            call_command('backup_runtime', '--output=%s' % output_path, '--upload-s3')
+
+        s3_command = run.call_args_list[1][0][0]
+        self.assertTrue(output_path.endswith('.tar.gz.enc'))
+        self.assertEqual(s3_command[0], sys.executable)
+        self.assertIn('backup_s3.py', s3_command[1])
+        self.assertIn('--archive', s3_command)
+        self.assertIn(output_path, s3_command)
+
+    @override_settings(
+        DATABASES={'default': {'ENGINE': 'django.db.backends.mysql', 'NAME': 'ops'}},
+    )
+    def test_backup_runtime_rejects_unencrypted_non_sqlite_output(self):
+        with tempfile.TemporaryDirectory(dir=settings.BASE_DIR) as directory:
+            with self.assertRaises(CommandError):
+                call_command('backup_runtime', '--output=%s' % os.path.join(directory, 'ops.sql'))
+
     def test_api_command_post_creates_record(self):
         response = self.client.post(
             reverse('devops:api_commands'),
@@ -2706,6 +2831,137 @@ class DevOpsViewTests(TestCase):
         self.assertIsNone(result)
         self.assertEqual(state, ['done'])
 
+    @override_settings(DEVOPS_SYNC_TASKS=False)
+    def test_background_job_persists_only_vetted_target_reference(self):
+        record = CommandExecution.objects.create(
+            host=self.host,
+            command='uptime',
+            created_by=self.user.user,
+        )
+
+        job = enqueue_background_job(execute_command_record, record, DevOpsRole.ROLE_OPERATOR)
+
+        self.assertEqual(job.job_type, BackgroundJob.TYPE_COMMAND)
+        self.assertEqual(job.target_id, record.id)
+        self.assertEqual(job.role, DevOpsRole.ROLE_OPERATOR)
+        self.assertEqual(job.status, BackgroundJob.STATUS_PENDING)
+        self.assertEqual(job.attempts, 0)
+        self.assertFalse(hasattr(job, 'command'))
+
+    def test_background_job_spec_supports_file_and_deployment_operations(self):
+        distribution = FileDistribution.objects.create(
+            name='queue file',
+            source_file=ContentFile(b'payload', name='queue.txt'),
+            remote_path='/tmp/queue.txt',
+            created_by=self.user.user,
+        )
+        app = DeploymentApp.objects.create(name='queue app')
+        release = DeploymentRelease.objects.create(
+            app=app,
+            version='v1',
+            deploy_script='uptime',
+            rollback_script='uptime',
+            created_by=self.user.user,
+        )
+
+        file_spec = background_job_spec(execute_file_distribution, (distribution,), {})
+        deploy_spec = background_job_spec(
+            execute_deployment_release, (release, DevOpsRole.ROLE_ADMIN), {},
+        )
+        rollback_spec = background_job_spec(execute_deployment_rollback, (release,), {})
+
+        self.assertEqual(file_spec, (BackgroundJob.TYPE_FILE_DISTRIBUTION, distribution.id, ''))
+        self.assertEqual(deploy_spec, (BackgroundJob.TYPE_DEPLOYMENT, release.id, DevOpsRole.ROLE_ADMIN))
+        self.assertEqual(rollback_spec, (BackgroundJob.TYPE_ROLLBACK, release.id, ''))
+
+    def test_claim_next_background_job_is_atomic_from_worker_perspective(self):
+        job = BackgroundJob.objects.create(
+            job_type=BackgroundJob.TYPE_COMMAND,
+            target_id=999999,
+        )
+
+        first = claim_next_background_job()
+        second = claim_next_background_job()
+
+        self.assertEqual(first.id, job.id)
+        self.assertIsNone(second)
+        job.refresh_from_db()
+        self.assertEqual(job.status, BackgroundJob.STATUS_RUNNING)
+        self.assertEqual(job.attempts, 1)
+        self.assertIsNotNone(job.started_at)
+
+    @mock.patch('devops.services.execute_command_record')
+    def test_worker_once_processes_persisted_job(self, execute):
+        record = CommandExecution.objects.create(
+            host=self.host,
+            command='uptime',
+            created_by=self.user.user,
+        )
+        job = BackgroundJob.objects.create(
+            job_type=BackgroundJob.TYPE_COMMAND,
+            target_id=record.id,
+            role=DevOpsRole.ROLE_OPERATOR,
+        )
+
+        call_command('devops_worker', '--once', stdout=StringIO())
+
+        execute.assert_called_once_with(record, DevOpsRole.ROLE_OPERATOR)
+        job.refresh_from_db()
+        self.assertEqual(job.status, BackgroundJob.STATUS_SUCCESS)
+        self.assertEqual(job.attempts, 1)
+        self.assertIsNotNone(job.finished_at)
+
+    @mock.patch('devops.services.execute_command_record', side_effect=RuntimeError('worker crashed'))
+    def test_worker_failure_marks_job_and_parent_failed(self, execute):
+        record = CommandExecution.objects.create(
+            host=self.host,
+            command='uptime',
+            status=CommandExecution.STATUS_RUNNING,
+            created_by=self.user.user,
+        )
+        job = BackgroundJob.objects.create(
+            job_type=BackgroundJob.TYPE_COMMAND,
+            target_id=record.id,
+        )
+
+        processed = process_next_background_job()
+
+        self.assertEqual(processed.id, job.id)
+        job.refresh_from_db()
+        record.refresh_from_db()
+        self.assertEqual(job.status, BackgroundJob.STATUS_FAILED)
+        self.assertIn('worker crashed', job.error)
+        self.assertEqual(record.status, CommandExecution.STATUS_FAILED)
+        self.assertTrue(AuditLog.objects.filter(
+            action='后台任务异常', target_id=str(record.id),
+        ).exists())
+
+    def test_timed_out_worker_job_marks_parent_failed_without_replay(self):
+        record = CommandExecution.objects.create(
+            host=self.host,
+            command='uptime',
+            status=CommandExecution.STATUS_RUNNING,
+            created_by=self.user.user,
+        )
+        job = BackgroundJob.objects.create(
+            job_type=BackgroundJob.TYPE_COMMAND,
+            target_id=record.id,
+            status=BackgroundJob.STATUS_RUNNING,
+            started_at=timezone.now() - timedelta(seconds=30),
+        )
+
+        failed = fail_timed_out_background_jobs(1)
+
+        self.assertEqual(failed, 1)
+        job.refresh_from_db()
+        record.refresh_from_db()
+        self.assertEqual(job.status, BackgroundJob.STATUS_FAILED)
+        self.assertEqual(record.status, CommandExecution.STATUS_FAILED)
+        self.assertIn('未自动重放', job.error)
+        self.assertTrue(AuditLog.objects.filter(
+            action='后台任务异常', target_id=str(record.id),
+        ).exists())
+
     @mock.patch('devops.services.print')
     def test_background_job_marks_command_failed_on_unhandled_exception(self, print_mock):
         record = CommandExecution.objects.create(
@@ -2928,6 +3184,126 @@ class DevOpsViewTests(TestCase):
         self.assertEqual(response.status_code, 200)
         self.assertFalse(CommandExecution.objects.filter(command__contains='nginx; reboot').exists())
         self.assertFalse(ServiceOperation.objects.exists())
+
+    def test_service_topology_crud_audits_and_scopes_hosts(self):
+        self.set_role(DevOpsRole.ROLE_OPERATOR)
+        allowed_group = HostGroup.objects.create(name='topology-allowed')
+        allowed_group.hosts.add(self.host)
+        blocked_host = NewLinux.objects.create(
+            linux_name='topology-blocked', linux_ip='127.0.0.8', linux_hostname='blocked',
+            linux_port='22', linux_user='root', linux_passwd='bad-password', linux_app='',
+        )
+        scope = DevOpsHostScope.objects.create(user=self.user)
+        scope.groups.add(allowed_group)
+        upstream = ServiceCatalog.objects.create(name='mysql', environment=ServiceCatalog.ENV_PRODUCTION)
+
+        response = self.client.post(reverse('devops:service_topology_create'), {
+            'name': 'orders-api', 'owner': 'platform', 'environment': 'production',
+            'description': 'orders', 'hosts': [self.host.id], 'upstream_services': [upstream.id],
+        })
+
+        self.assertEqual(response.status_code, 302)
+        service = ServiceCatalog.objects.get(name='orders-api')
+        self.assertEqual(list(service.hosts.all()), [self.host])
+        self.assertTrue(ServiceDependency.objects.filter(service=service, upstream_service=upstream).exists())
+        self.assertTrue(AuditLog.objects.filter(action='创建服务拓扑', target_id=str(service.id)).exists())
+
+        denied = self.client.post(reverse('devops:service_topology_update', args=[service.id]), {
+            'name': 'orders-api', 'owner': 'platform', 'environment': 'production',
+            'hosts': [blocked_host.id],
+        })
+        self.assertEqual(denied.status_code, 400)
+        service.refresh_from_db()
+        self.assertEqual(list(service.hosts.all()), [self.host])
+
+        update = self.client.post(reverse('devops:service_topology_update', args=[service.id]), {
+            'name': 'orders-api-v2', 'owner': 'operations', 'environment': 'staging',
+            'description': 'updated', 'hosts': [self.host.id],
+        })
+        self.assertEqual(update.status_code, 302)
+        service.refresh_from_db()
+        self.assertEqual(service.name, 'orders-api-v2')
+        self.assertFalse(service.upstream_links.exists())
+        delete = self.client.post(reverse('devops:service_topology_delete', args=[service.id]))
+        self.assertEqual(delete.status_code, 302)
+        self.assertFalse(ServiceCatalog.objects.filter(id=service.id).exists())
+
+    def test_api_service_topology_requires_permission_and_hides_out_of_scope_services(self):
+        allowed = ServiceCatalog.objects.create(name='topology-api-allowed')
+        allowed.hosts.add(self.host)
+        hidden_host = NewLinux.objects.create(
+            linux_name='topology-api-hidden', linux_ip='127.0.0.9', linux_hostname='hidden',
+            linux_port='22', linux_user='root', linux_passwd='bad-password', linux_app='',
+        )
+        hidden = ServiceCatalog.objects.create(name='topology-api-hidden')
+        hidden.hosts.add(hidden_host)
+        group = HostGroup.objects.create(name='topology-api-group')
+        group.hosts.add(self.host)
+        scope = DevOpsHostScope.objects.create(user=self.user)
+        scope.groups.add(group)
+
+        self.set_role(DevOpsRole.ROLE_VIEWER)
+        DevOpsModulePermission.objects.create(
+            user=self.user,
+            module=DevOpsModulePermission.MODULE_SERVICE,
+            role='none',
+        )
+        forbidden = self.client.get(reverse('devops:api_service_topology'))
+        self.assertEqual(forbidden.status_code, 403)
+        DevOpsModulePermission.objects.filter(
+            user=self.user,
+            module=DevOpsModulePermission.MODULE_SERVICE,
+        ).update(role=DevOpsRole.ROLE_VIEWER)
+        response = self.client.get(reverse('devops:api_service_topology'))
+        self.assertEqual(response.status_code, 200)
+        data = response.json()
+        self.assertTrue(data['ok'])
+        self.assertEqual([item['name'] for item in data['results']], ['topology-api-allowed'])
+        self.assertEqual(data['results'][0]['hosts'][0]['id'], self.host.id)
+
+    def test_service_topology_hides_out_of_scope_associations_and_rejects_forged_dependency(self):
+        self.set_role(DevOpsRole.ROLE_OPERATOR)
+        group = HostGroup.objects.create(name='topology-visible-associations')
+        group.hosts.add(self.host)
+        scope = DevOpsHostScope.objects.create(user=self.user)
+        scope.groups.add(group)
+        hidden_host = NewLinux.objects.create(
+            linux_name='topology-hidden-associated-host', linux_ip='127.0.0.10', linux_hostname='hidden',
+            linux_port='22', linux_user='root', linux_passwd='bad-password', linux_app='',
+        )
+        service = ServiceCatalog.objects.create(name='topology-visible-service')
+        service.hosts.add(self.host, hidden_host)
+        hidden_service = ServiceCatalog.objects.create(name='topology-hidden-dependency')
+        hidden_service.hosts.add(hidden_host)
+        ServiceDependency.objects.create(service=service, upstream_service=hidden_service)
+
+        response = self.client.get(reverse('devops:service_topology'))
+
+        self.assertEqual(response.status_code, 200)
+        self.assertContains(response, self.host.linux_name)
+        self.assertNotContains(response, hidden_host.linux_name)
+        self.assertNotContains(response, hidden_service.name)
+
+        forged = self.client.post(reverse('devops:service_topology_update', args=[service.id]), {
+            'name': 'forged-topology-name',
+            'owner': 'platform',
+            'environment': 'production',
+            'hosts': [self.host.id],
+            'upstream_services': [hidden_service.id],
+        })
+
+        self.assertEqual(forged.status_code, 400)
+        service.refresh_from_db()
+        self.assertEqual(service.name, 'topology-visible-service')
+        self.assertTrue(ServiceDependency.objects.filter(
+            service=service, upstream_service=hidden_service
+        ).exists())
+
+        self.set_role(DevOpsRole.ROLE_VIEWER)
+        api_response = self.client.get(reverse('devops:api_service_topology'))
+        api_service = api_response.json()['results'][0]
+        self.assertEqual([host['id'] for host in api_service['hosts']], [self.host.id])
+        self.assertEqual(api_service['upstream_dependencies'], [])
 
     def test_alerts_are_deduplicated_by_host_and_metric(self):
         with mock.patch('devops.services.notify_alert') as notify:
@@ -3671,11 +4047,14 @@ class DevOpsViewTests(TestCase):
             webhook_url='https://example.com/hook',
         )
 
-        with mock.patch('devops.services.requests.post', side_effect=Exception('network down')):
+        with mock.patch('devops.services.requests.post', side_effect=Exception('network down https://secret.example/token')):
             log = send_notification_channel(channel, NotificationLog.EVENT_TEST, 'test', 'content')
 
         self.assertEqual(log.status, NotificationLog.STATUS_FAILED)
-        self.assertIn('network down', log.response)
+        self.assertEqual(log.failure_category, 'request_error')
+        self.assertEqual(log.attempt_count, 1)
+        self.assertEqual(log.response, '请求异常')
+        self.assertNotIn('secret.example', log.response)
 
     @mock.patch('devops.services.settings.NOTIFICATION_RETRY_COUNT', 1)
     @mock.patch('devops.services.settings.NOTIFICATION_TIMEOUT_SECONDS', 3)
@@ -3694,6 +4073,56 @@ class DevOpsViewTests(TestCase):
         self.assertIn('已尝试 2 次', log.response)
         self.assertEqual(post.call_count, 2)
         self.assertEqual(post.call_args[1]['timeout'], 3)
+        self.assertEqual(log.attempt_count, 2)
+
+    def test_notification_template_uses_fixed_placeholders_only(self):
+        NotificationTemplate.objects.create(
+            event_type=NotificationLog.EVENT_ALERT,
+            title_template='{{host}} {{unknown}} {{title}}',
+            content_template='{{message}} {{__class__}} {{content}}',
+        )
+        channel = NotificationChannel.objects.create(
+            name='template webhook', channel_type=NotificationChannel.TYPE_WEBHOOK,
+            webhook_url='https://example.com/hook',
+        )
+        alert = AlertEvent.objects.create(host=self.host, level=AlertEvent.LEVEL_WARNING, metric='cpu', message='load high')
+        response = mock.Mock(status_code=200, text='ok')
+
+        with mock.patch('devops.services.requests.post', return_value=response) as post:
+            notify_alert(alert)
+
+        payload = post.call_args[1]['json']
+        self.assertEqual(payload['title'], 'test-host {{unknown}} 告警通知：test-host cpu')
+        self.assertIn('load high {{__class__}}', payload['content'])
+        self.assertNotIn('AlertEvent', payload['content'])
+
+    def test_alert_escalation_routes_enabled_channel_once(self):
+        normal = NotificationChannel.objects.create(
+            name='normal alert', channel_type=NotificationChannel.TYPE_WEBHOOK,
+            webhook_url='https://example.com/normal', notify_alert=True,
+        )
+        escalation = NotificationChannel.objects.create(
+            name='critical alert', channel_type=NotificationChannel.TYPE_WEBHOOK,
+            webhook_url='https://example.com/critical', notify_alert=False,
+        )
+        AlertNotificationEscalation.objects.create(
+            enabled=True, minimum_level=AlertEvent.LEVEL_CRITICAL, channel=escalation,
+        )
+        alert = AlertEvent.objects.create(host=self.host, level=AlertEvent.LEVEL_CRITICAL, metric='cpu', message='critical')
+        response = mock.Mock(status_code=200, text='ok')
+
+        with mock.patch('devops.services.requests.post', return_value=response) as post:
+            logs = notify_alert(alert)
+
+        self.assertEqual(post.call_count, 2)
+        self.assertEqual(set(log.channel_id for log in logs), set([normal.id, escalation.id]))
+        normal.notify_alert = False
+        normal.save()
+        NotificationLog.objects.all().delete()
+        with mock.patch('devops.services.requests.post', return_value=response) as post:
+            logs = notify_alert(alert)
+        self.assertEqual(post.call_count, 1)
+        self.assertEqual(logs[0].channel_id, escalation.id)
 
     def test_api_notifications_filters_logs_and_omits_channel_secrets(self):
         alert_channel = NotificationChannel.objects.create(
@@ -3830,6 +4259,28 @@ class DevOpsViewTests(TestCase):
         self.assertEqual(response.status_code, 200)
         self.assertContains(response, '通知渠道')
 
+    def test_notification_page_filters_valid_values(self):
+        channel = NotificationChannel.objects.create(
+            name='page filter', channel_type=NotificationChannel.TYPE_WEBHOOK,
+            webhook_url='https://example.com/filter',
+        )
+        matched = NotificationLog.objects.create(channel=channel, event_type=NotificationLog.EVENT_ALERT,
+                                                 title='matched', content='x', status=NotificationLog.STATUS_FAILED)
+        NotificationLog.objects.create(channel=channel, event_type=NotificationLog.EVENT_TEST,
+                                       title='other', content='x', status=NotificationLog.STATUS_SUCCESS)
+
+        response = self.client.get(reverse('devops:notification_channels'), {
+            'channel': channel.id, 'event_type': 'alert', 'status': 'failed',
+        })
+
+        self.assertContains(response, matched.title)
+        self.assertNotContains(response, 'other')
+
+    def test_notification_page_rejects_invalid_filters(self):
+        response = self.client.get(reverse('devops:notification_channels'), {'event_type': 'unknown'})
+
+        self.assertEqual(response.status_code, 400)
+
     def test_admin_can_create_notification_channel(self):
         self.set_role(DevOpsRole.ROLE_ADMIN)
 
@@ -3963,3 +4414,885 @@ class DevOpsViewTests(TestCase):
 
         self.assertEqual(response.status_code, 200)
         self.assertIsNone(response.context['compliance_edit_baseline'])
+
+    def test_incident_api_closed_loop_records_audit_and_omits_command_output(self):
+        command = CommandExecution.objects.create(
+            host=self.host,
+            command='cat /etc/important.conf',
+            output='credential-like-output-must-not-leak',
+            error='sensitive-command-error',
+        )
+        response = self.client.post(
+            reverse('devops:api_incidents'),
+            data=json.dumps({
+                'title': 'database latency',
+                'severity': Incident.SEVERITY_HIGH,
+                'description': 'latency observed',
+                'host_id': self.host.id,
+                'command_execution_id': command.id,
+            }),
+            content_type='application/json',
+        )
+        self.assertEqual(response.status_code, 201)
+        incident_id = response.json()['incident']['id']
+        serialized = json.dumps(response.json())
+        self.assertNotIn('credential-like-output-must-not-leak', serialized)
+        self.assertNotIn('sensitive-command-error', serialized)
+
+        timeline_response = self.client.post(
+            reverse('devops:api_incident_timeline', args=[incident_id]),
+            data=json.dumps({'note': 'operator started diagnosis'}),
+            content_type='application/json',
+        )
+        self.assertEqual(timeline_response.status_code, 201)
+        status_response = self.client.post(
+            reverse('devops:api_incident_status', args=[incident_id]),
+            data=json.dumps({'status': Incident.STATUS_RESOLVED}),
+            content_type='application/json',
+        )
+        self.assertEqual(status_response.status_code, 200)
+        postmortem_response = self.client.post(
+            reverse('devops:api_incident_postmortem', args=[incident_id]),
+            data=json.dumps({
+                'root_cause': 'undersized database pool',
+                'resolution': 'increased pool size',
+                'follow_up': 'add saturation alarm',
+            }),
+            content_type='application/json',
+        )
+        self.assertEqual(postmortem_response.status_code, 200)
+        incident = Incident.objects.get(id=incident_id)
+        self.assertEqual(incident.root_cause, 'undersized database pool')
+        self.assertIsNotNone(incident.resolved_at)
+        self.assertEqual(incident.timeline.count(), 1)
+        for action in ('创建事件工单', '追加事件时间线', '更新事件状态', '记录事件复盘'):
+            self.assertTrue(AuditLog.objects.filter(action=action, target_id=str(incident_id)).exists())
+
+    def test_incident_api_requires_alert_operator_for_mutation_and_viewer_can_read(self):
+        self.set_role(DevOpsRole.ROLE_VIEWER)
+        DevOpsModulePermission.objects.create(
+            user=self.user,
+            module=DevOpsModulePermission.MODULE_ALERT,
+            role=DevOpsRole.ROLE_VIEWER,
+        )
+        incident = Incident.objects.create(title='readonly incident', host=self.host)
+        self.assertEqual(self.client.get(reverse('devops:api_incidents')).status_code, 200)
+        response = self.client.post(
+            reverse('devops:api_incident_timeline', args=[incident.id]),
+            data=json.dumps({'note': 'should fail'}),
+            content_type='application/json',
+        )
+        self.assertEqual(response.status_code, 403)
+        self.assertEqual(response.json()['code'], 'forbidden')
+        self.assertEqual(incident.timeline.count(), 0)
+
+    def test_incident_api_hides_out_of_scope_references_and_rejects_creation(self):
+        allowed_group = HostGroup.objects.create(name='incident-allowed')
+        allowed_group.hosts.add(self.host)
+        other = NewLinux.objects.create(
+            linux_name='incident-hidden', linux_ip='127.0.2.20', linux_hostname='hidden',
+            linux_port='22', linux_user='root', linux_passwd='hidden-password', linux_app='',
+        )
+        hidden_command = CommandExecution.objects.create(host=other, command='hidden command', output='hidden output')
+        hidden_incident = Incident.objects.create(title='hidden incident', command_execution=hidden_command)
+        scope = DevOpsHostScope.objects.create(user=self.user)
+        scope.groups.add(allowed_group)
+
+        list_response = self.client.get(reverse('devops:api_incidents'))
+        self.assertEqual(list_response.status_code, 200)
+        self.assertEqual(list_response.json()['results'], [])
+        detail_response = self.client.get(reverse('devops:api_incident_detail', args=[hidden_incident.id]))
+        self.assertEqual(detail_response.status_code, 404)
+        create_response = self.client.post(
+            reverse('devops:api_incidents'),
+            data=json.dumps({'title': 'cannot reference hidden', 'command_execution_id': hidden_command.id}),
+            content_type='application/json',
+        )
+        self.assertEqual(create_response.status_code, 403)
+        self.assertEqual(create_response.json()['code'], 'host_forbidden')
+        self.assertEqual(Incident.objects.filter(title='cannot reference hidden').count(), 0)
+
+    def test_incident_postmortem_requires_resolved_status(self):
+        incident = Incident.objects.create(title='open incident', host=self.host)
+        response = self.client.post(
+            reverse('devops:api_incident_postmortem', args=[incident.id]),
+            data=json.dumps({'root_cause': 'x', 'resolution': 'y', 'follow_up': 'z'}),
+            content_type='application/json',
+        )
+        self.assertEqual(response.status_code, 400)
+        self.assertEqual(response.json()['code'], 'validation_error')
+
+    def test_incident_page_requires_alert_viewer_and_renders_api_client(self):
+        response = self.client.get(reverse('devops:incidents_page'))
+        self.assertEqual(response.status_code, 200)
+        self.assertContains(response, '事件工单')
+        self.assertContains(response, '/devops/api/incidents/')
+
+        self.set_role(DevOpsRole.ROLE_VIEWER)
+        DevOpsModulePermission.objects.update_or_create(
+            user=self.user,
+            module=DevOpsModulePermission.MODULE_ALERT,
+            defaults={'role': 'none'},
+        )
+        self.assertEqual(self.client.get(reverse('devops:incidents_page')).status_code, 403)
+
+
+class ProjectOnboardingTests(TestCase):
+    def setUp(self):
+        self.user = User.objects.create(
+            user='project-admin', email='project-admin@example.com',
+            password='plain-password', confirm_pwd='plain-password',
+        )
+        self.host = NewLinux.objects.create(
+            linux_name='project-host', linux_ip='127.0.3.1', linux_hostname='project-host',
+            linux_port='22', linux_user='root', linux_passwd='not-rendered', linux_app='',
+        )
+        DevOpsRole.objects.create(user=self.user, role=DevOpsRole.ROLE_ADMIN)
+        session = self.client.session
+        session['is_login'] = True
+        session['user_id'] = self.user.id
+        session['user_name'] = self.user.user
+        session.save()
+
+    def onboarding_data(self, **overrides):
+        data = {
+            'name': 'payments', 'owner': 'platform', 'description': 'payments project',
+            'monitoring_enabled': 'on', 'monitor_cpu': '75%', 'monitor_memory': '80',
+            'monitor_disk': '85%', 'hosts': [self.host.id], 'create_group_name': 'payments-prod',
+            'create_tag_name': 'payments', 'create_service_name': 'payments-api',
+            'create_app_name': 'payments-app', 'create_app_repository': 'Acme/Payments',
+        }
+        data.update(overrides)
+        return data
+
+    def test_admin_onboarding_creates_project_resources_monitoring_and_audit(self):
+        response = self.client.post(reverse('devops:project_onboarding'), self.onboarding_data())
+
+        self.assertEqual(response.status_code, 302)
+        project = DevOpsProject.objects.get(name='payments')
+        self.assertEqual(project.owner, 'platform')
+        self.assertEqual(project.monitor_cpu, '75%')
+        self.assertEqual(project.monitor_memory, '80%')
+        self.assertEqual(project.monitor_disk, '85%')
+        self.assertEqual(list(project.hosts.all()), [self.host])
+        self.assertEqual(project.groups.get().name, 'payments-prod')
+        self.assertEqual(list(project.groups.get().hosts.all()), [self.host])
+        self.assertEqual(project.tags.get().name, 'payments')
+        self.assertEqual(project.services.get().name, 'payments-api')
+        app = project.deployment_apps.get()
+        self.assertEqual(app.repository, 'acme/payments')
+        self.assertTrue(AuditLog.objects.filter(action='项目接入', target_id=str(project.id)).exists())
+
+    def test_onboarding_links_existing_resources_and_rejects_out_of_scope_host(self):
+        group = HostGroup.objects.create(name='existing-project-group')
+        group.hosts.add(self.host)
+        tag = HostTag.objects.create(name='existing-project-tag')
+        tag.hosts.add(self.host)
+        service = ServiceCatalog.objects.create(name='existing-project-service')
+        service.hosts.add(self.host)
+        app = DeploymentApp.objects.create(name='existing-project-app', repository='acme/existing')
+
+        response = self.client.post(reverse('devops:project_onboarding'), self.onboarding_data(
+            name='catalog-project', create_group_name='', create_tag_name='', create_service_name='',
+            create_app_name='', create_app_repository='', groups=[group.id], tags=[tag.id],
+            services=[service.id], deployment_apps=[app.id],
+        ))
+
+        self.assertEqual(response.status_code, 302)
+        project = DevOpsProject.objects.get(name='catalog-project')
+        self.assertEqual(list(project.groups.all()), [group])
+        self.assertEqual(list(project.tags.all()), [tag])
+        self.assertEqual(list(project.services.all()), [service])
+        self.assertEqual(list(project.deployment_apps.all()), [app])
+
+        scope = DevOpsHostScope.objects.create(user=self.user)
+        request = mock.Mock()
+        request.session = {'user_id': self.user.id, 'user_name': self.user.user}
+        from .views import project_onboarding_form
+        scoped_form = project_onboarding_form(request, self.onboarding_data(name='blocked-project'))
+        self.assertFalse(scoped_form.is_valid())
+        self.assertFalse(DevOpsProject.objects.filter(name='blocked-project').exists())
+
+    def test_onboarding_rejects_invalid_repository_and_rolls_back_on_failure(self):
+        from .forms import ProjectOnboardingForm
+        invalid = ProjectOnboardingForm(self.onboarding_data(
+            create_app_repository='https://token@example.com/acme/payments?token=bad',
+        ))
+        self.assertFalse(invalid.is_valid())
+        self.assertIn('create_app_repository', invalid.errors)
+        self.assertFalse(DevOpsProject.objects.exists())
+
+        from devops.services import HostTag as ServiceHostTag
+        request = mock.Mock()
+        request.session = {'user_name': self.user.user}
+        request.META = {}
+        with mock.patch.object(ServiceHostTag.objects, 'create', side_effect=RuntimeError('write failed')):
+            with self.assertRaises(RuntimeError):
+                create_project_onboarding(request, {
+                    'name': 'rollback-project', 'owner': '', 'description': '',
+                    'monitoring_enabled': True, 'monitor_cpu': '80%', 'monitor_memory': '80%',
+                    'monitor_disk': '80%', 'hosts': [self.host], 'groups': [], 'tags': [],
+                    'services': [], 'deployment_apps': [], 'create_group_name': '',
+                    'create_tag_name': 'rollback-tag', 'create_service_name': '',
+                    'create_app_name': '', 'create_app_repository': '',
+                })
+        self.assertFalse(DevOpsProject.objects.filter(name='rollback-project').exists())
+
+    def test_project_onboarding_requires_admin_security_permission(self):
+        DevOpsRole.objects.filter(user=self.user).update(role=DevOpsRole.ROLE_OPERATOR)
+
+        response = self.client.get(reverse('devops:project_onboarding'))
+
+        self.assertEqual(response.status_code, 403)
+
+
+class IntegrationHealthApiTests(TestCase):
+    def setUp(self):
+        self.user = User.objects.create(
+            user='integration-admin', email='integration-admin@example.com',
+            password='plain-password', confirm_pwd='plain-password',
+        )
+        DevOpsRole.objects.create(user=self.user, role=DevOpsRole.ROLE_ADMIN)
+        DevOpsModulePermission.objects.create(
+            user=self.user,
+            module=DevOpsModulePermission.MODULE_SECURITY,
+            role=DevOpsRole.ROLE_ADMIN,
+        )
+        session = self.client.session
+        session['is_login'] = True
+        session['user_id'] = self.user.id
+        session['user_name'] = self.user.user
+        session.save()
+
+    def test_health_api_requires_login(self):
+        self.client.session.flush()
+
+        response = self.client.get(reverse('devops:api_integration_health'))
+
+        self.assertEqual(response.status_code, 401)
+        self.assertEqual(response.json()['code'], 'unauthorized')
+
+    def test_health_page_requires_login(self):
+        self.client.session.flush()
+
+        response = self.client.get(reverse('devops:integration_health'))
+
+        self.assertEqual(response.status_code, 302)
+        self.assertIn('/login/', response['Location'])
+
+    def test_health_api_and_page_require_security_admin(self):
+        DevOpsRole.objects.filter(user=self.user).update(role=DevOpsRole.ROLE_VIEWER)
+        DevOpsModulePermission.objects.filter(user=self.user).update(role=DevOpsRole.ROLE_VIEWER)
+
+        api_response = self.client.get(reverse('devops:api_integration_health'))
+        page_response = self.client.get(reverse('devops:integration_health'))
+
+        self.assertEqual(api_response.status_code, 403)
+        self.assertEqual(api_response.json()['code'], 'forbidden')
+        self.assertEqual(page_response.status_code, 403)
+
+    def test_health_api_aggregates_safe_github_and_notification_outcomes(self):
+        from monitor.models import AlertmanagerConfig, PrometheusConfig
+        IntegrationHealthEvent.objects.create(
+            integration_type=IntegrationHealthEvent.TYPE_GITHUB_INBOUND,
+            source_name=IntegrationHealthEvent.SOURCE_GITHUB_INBOUND,
+            status=IntegrationHealthEvent.STATUS_SUCCESS,
+            category=IntegrationHealthEvent.CATEGORY_OK,
+            summary='Accepted inbound GitHub delivery.',
+        )
+        prometheus = PrometheusConfig.objects.create(
+            name='metrics primary', prometheus_url='https://prometheus.example.com/private-token',
+        )
+        alertmanager = AlertmanagerConfig.objects.create(
+            name='alerts primary', alertmanager_url='https://alerts.example.com/private-token',
+        )
+        IntegrationHealthEvent.objects.create(
+            integration_type=IntegrationHealthEvent.TYPE_PROMETHEUS,
+            source_id=prometheus.id, source_name=prometheus.name,
+            status=IntegrationHealthEvent.STATUS_SUCCESS,
+            category=IntegrationHealthEvent.CATEGORY_OK, summary='Prometheus healthy.',
+        )
+        IntegrationHealthEvent.objects.create(
+            integration_type=IntegrationHealthEvent.TYPE_ALERTMANAGER,
+            source_id=alertmanager.id, source_name=alertmanager.name,
+            status=IntegrationHealthEvent.STATUS_FAILED,
+            category=IntegrationHealthEvent.CATEGORY_TIMEOUT, summary='Alertmanager timed out.',
+        )
+        channel = NotificationChannel.objects.create(
+            name='operations channel', channel_type=NotificationChannel.TYPE_WEBHOOK,
+            webhook_url='https://example.com/private-webhook', secret='private-secret',
+        )
+        NotificationLog.objects.create(
+            channel=channel, event_type=NotificationLog.EVENT_ALERT, title='private title',
+            content='private content', status=NotificationLog.STATUS_SUCCESS,
+        )
+        NotificationLog.objects.create(
+            channel=channel, event_type=NotificationLog.EVENT_ALERT, title='private title',
+            content='private content', status=NotificationLog.STATUS_FAILED,
+            response='private response', failure_category='timeout',
+        )
+
+        response = self.client.get(reverse('devops:api_integration_health'))
+
+        self.assertEqual(response.status_code, 200)
+        payload = response.json()
+        self.assertTrue(payload['ok'])
+        self.assertEqual(payload['github_inbound']['current_status'], 'success')
+        self.assertEqual(payload['prometheus'][0]['name'], prometheus.name)
+        self.assertEqual(payload['prometheus'][0]['current_status'], 'success')
+        self.assertEqual(payload['alertmanager'][0]['name'], alertmanager.name)
+        self.assertEqual(payload['alertmanager'][0]['current_status'], 'failed')
+        notification = payload['notifications'][0]
+        self.assertEqual(notification['success_count'], 1)
+        self.assertEqual(notification['failed_count'], 1)
+        self.assertEqual(notification['failure_categories'], {'timeout': 1})
+        serialized = json.dumps(payload)
+        for value in (
+                'private-webhook', 'private-secret', 'private title', 'private content',
+                'private response', 'prometheus.example.com', 'alerts.example.com',
+        ):
+            self.assertNotIn(value, serialized)
+
+    def test_health_page_is_admin_only_and_omits_notification_secrets(self):
+        from monitor.models import PrometheusConfig
+        NotificationChannel.objects.create(
+            name='page channel', channel_type=NotificationChannel.TYPE_WEBHOOK,
+            webhook_url='https://example.com/page-private-webhook', secret='page-private-secret',
+        )
+        PrometheusConfig.objects.create(
+            name='page metrics', prometheus_url='https://example.com/page-private-prometheus',
+        )
+
+        response = self.client.get(reverse('devops:integration_health'))
+
+        self.assertEqual(response.status_code, 200)
+        self.assertContains(response, '集成健康')
+        self.assertNotContains(response, 'page-private-webhook')
+        self.assertNotContains(response, 'page-private-secret')
+        self.assertNotContains(response, 'page-private-prometheus')
+
+
+class IntegrationHealthCoreContractTests(TestCase):
+    def test_health_events_redact_caller_data_and_summarize_recent_failures(self):
+        from .services import record_integration_health_event, summarize_integration_health
+        now = timezone.now()
+        unsafe_source = 'https://metrics.example.com/query?token=source-secret'
+        unsafe_summary = 'raw response token=summary-secret'
+
+        safe_event = record_integration_health_event(
+            IntegrationHealthEvent.TYPE_PROMETHEUS,
+            source_name=unsafe_source,
+            status=IntegrationHealthEvent.STATUS_FAILED,
+            category=IntegrationHealthEvent.CATEGORY_TIMEOUT,
+            summary=unsafe_summary,
+        )
+        record_integration_health_event(
+            IntegrationHealthEvent.TYPE_GITHUB_INBOUND,
+            source_name=IntegrationHealthEvent.SOURCE_GITHUB_INBOUND,
+            status=IntegrationHealthEvent.STATUS_SUCCESS,
+            category=IntegrationHealthEvent.CATEGORY_OK,
+            summary=unsafe_summary,
+            occurred_at=now - timedelta(minutes=30),
+        )
+        record_integration_health_event(
+            IntegrationHealthEvent.TYPE_GITHUB_INBOUND,
+            source_name=IntegrationHealthEvent.SOURCE_GITHUB_INBOUND,
+            status=IntegrationHealthEvent.STATUS_FAILED,
+            category=IntegrationHealthEvent.CATEGORY_REJECTED,
+            summary=unsafe_summary,
+            occurred_at=now - timedelta(minutes=20),
+        )
+        record_integration_health_event(
+            IntegrationHealthEvent.TYPE_GITHUB_INBOUND,
+            source_name=IntegrationHealthEvent.SOURCE_GITHUB_INBOUND,
+            status=IntegrationHealthEvent.STATUS_FAILED,
+            category=IntegrationHealthEvent.CATEGORY_VALIDATION_ERROR,
+            summary=unsafe_summary,
+            occurred_at=now - timedelta(minutes=10),
+        )
+
+        summary = summarize_integration_health(
+            IntegrationHealthEvent.TYPE_GITHUB_INBOUND,
+            source_name=IntegrationHealthEvent.SOURCE_GITHUB_INBOUND,
+            recent_since=now - timedelta(hours=1),
+        )
+
+        self.assertEqual(safe_event.source_name, '')
+        self.assertEqual(safe_event.summary, '请求超时')
+        stored = '\n'.join('%s %s' % row for row in IntegrationHealthEvent.objects.values_list(
+            'source_name', 'summary'
+        ))
+        self.assertNotIn('source-secret', stored)
+        self.assertNotIn('summary-secret', stored)
+        self.assertEqual(summary['current_status'], IntegrationHealthEvent.STATUS_FAILED)
+        self.assertEqual(summary['consecutive_failures'], 2)
+        self.assertEqual(summary['recent_event_counts']['total'], 3)
+        self.assertEqual(summary['recent_event_counts']['success'], 1)
+        self.assertEqual(summary['recent_event_counts']['failed'], 2)
+
+
+class BackgroundJobSummaryTests(TestCase):
+    def create_job(self, status, **kwargs):
+        return BackgroundJob.objects.create(
+            job_type=BackgroundJob.TYPE_COMMAND,
+            target_id=1,
+            status=status,
+            **kwargs
+        )
+
+    def test_summary_returns_zeroes_for_an_empty_queue(self):
+        summary = summarize_background_jobs(now=timezone.now())
+
+        self.assertEqual(summary, {
+            'pending': 0,
+            'running': 0,
+            'success': 0,
+            'failed': 0,
+            'timed_out': 0,
+            'recent_completed': 0,
+            'recent_failed': 0,
+            'recent_failure_rate': 0.0,
+        })
+
+    def test_summary_aggregates_statuses_and_uses_strict_timeout_boundary(self):
+        now = timezone.now()
+        self.create_job(BackgroundJob.STATUS_PENDING)
+        boundary_job = self.create_job(
+            BackgroundJob.STATUS_RUNNING,
+            started_at=now - timedelta(seconds=300),
+        )
+        expired_job = self.create_job(
+            BackgroundJob.STATUS_RUNNING,
+            started_at=now - timedelta(seconds=301),
+        )
+        self.create_job(
+            BackgroundJob.STATUS_SUCCESS,
+            finished_at=now - timedelta(minutes=15),
+        )
+        self.create_job(
+            BackgroundJob.STATUS_FAILED,
+            finished_at=now - timedelta(minutes=30),
+        )
+        self.create_job(
+            BackgroundJob.STATUS_FAILED,
+            finished_at=now - timedelta(hours=2),
+        )
+
+        summary = summarize_background_jobs(timeout_seconds=300, now=now)
+
+        self.assertEqual(summary, {
+            'pending': 1,
+            'running': 2,
+            'success': 1,
+            'failed': 2,
+            'timed_out': 1,
+            'recent_completed': 2,
+            'recent_failed': 1,
+            'recent_failure_rate': 0.5,
+        })
+        boundary_job.refresh_from_db()
+        expired_job.refresh_from_db()
+        self.assertEqual(boundary_job.status, BackgroundJob.STATUS_RUNNING)
+        self.assertEqual(expired_job.status, BackgroundJob.STATUS_RUNNING)
+
+    @override_settings(DEVOPS_WORKER_JOB_TIMEOUT_SECONDS='invalid')
+    def test_summary_falls_back_for_invalid_or_nonpositive_timeout_and_is_numeric_only(self):
+        now = timezone.now()
+        self.create_job(
+            BackgroundJob.STATUS_RUNNING,
+            started_at=now - timedelta(seconds=301),
+        )
+
+        configured_summary = summarize_background_jobs(now=now)
+        invalid_summary = summarize_background_jobs(timeout_seconds='invalid', now=now)
+        nonpositive_summary = summarize_background_jobs(timeout_seconds=0, now=now)
+
+        for summary in (configured_summary, invalid_summary, nonpositive_summary):
+            self.assertEqual(summary['timed_out'], 1)
+            self.assertEqual(set(summary), {
+                'pending', 'running', 'success', 'failed', 'timed_out',
+                'recent_completed', 'recent_failed', 'recent_failure_rate',
+            })
+            for value in summary.values():
+                self.assertIsInstance(value, (int, float))
+
+
+class BackgroundJobAlertThresholdTests(TestCase):
+    @override_settings(
+        DEVOPS_WORKER_ALERT_PENDING_THRESHOLD=2,
+        DEVOPS_WORKER_ALERT_FAILURE_RATE_PERCENT_THRESHOLD=50,
+        DEVOPS_WORKER_ALERT_TIMED_OUT_THRESHOLD=1,
+    )
+    @mock.patch('devops.services.notify_alert')
+    def test_thresholds_create_reuse_and_resolve_system_alerts(self, notify):
+        breached = {
+            'pending': 2,
+            'recent_failure_rate': 0.5,
+            'timed_out': 1,
+        }
+
+        first = evaluate_worker_alert_thresholds(breached)
+        second = evaluate_worker_alert_thresholds(breached)
+
+        self.assertEqual(AlertEvent.objects.filter(host__isnull=True).count(), 3)
+        self.assertTrue(all(item['triggered'] for item in first.values()))
+        self.assertTrue(all(not item['created'] for item in second.values()))
+        self.assertEqual(notify.call_count, 3)
+        self.assertEqual(
+            set(AlertEvent.objects.values_list('metric', flat=True)),
+            {'worker:pending', 'worker:failure_rate', 'worker:timed_out'},
+        )
+
+        recovered = evaluate_worker_alert_thresholds({
+            'pending': 1,
+            'recent_failure_rate': 0.49,
+            'timed_out': 0,
+        })
+
+        self.assertTrue(all(not item['triggered'] for item in recovered.values()))
+        self.assertEqual(
+            set(AlertEvent.objects.values_list('status', flat=True)),
+            {AlertEvent.STATUS_RESOLVED},
+        )
+        self.assertEqual(AlertHistory.objects.filter(
+            to_status=AlertEvent.STATUS_RESOLVED,
+            handler='system',
+        ).count(), 3)
+
+    @override_settings(
+        DEVOPS_WORKER_ALERT_PENDING_THRESHOLD=0,
+        DEVOPS_WORKER_ALERT_FAILURE_RATE_PERCENT_THRESHOLD='invalid',
+        DEVOPS_WORKER_ALERT_TIMED_OUT_THRESHOLD=-1,
+    )
+    def test_nonpositive_or_invalid_thresholds_are_disabled(self):
+        alerts = evaluate_worker_alert_thresholds({
+            'pending': 999,
+            'recent_failure_rate': 1.0,
+            'timed_out': 999,
+        })
+
+        self.assertEqual(alerts, {
+            'worker:pending': None,
+            'worker:failure_rate': None,
+            'worker:timed_out': None,
+        })
+        self.assertFalse(AlertEvent.objects.exists())
+
+    @override_settings(
+        DEVOPS_WORKER_ALERT_PENDING_THRESHOLD=float('inf'),
+        DEVOPS_WORKER_ALERT_FAILURE_RATE_PERCENT_THRESHOLD='nan',
+        DEVOPS_WORKER_ALERT_TIMED_OUT_THRESHOLD=0,
+    )
+    def test_nonfinite_thresholds_are_disabled(self):
+        alerts = evaluate_worker_alert_thresholds({
+            'pending': 999,
+            'recent_failure_rate': 1.0,
+            'timed_out': 999,
+        })
+
+        self.assertTrue(all(value is None for value in alerts.values()))
+        self.assertFalse(AlertEvent.objects.exists())
+
+    @override_settings(DEVOPS_WORKER_ALERT_PENDING_THRESHOLD=1)
+    def test_invalid_supplied_summary_is_rejected_before_alert_writes(self):
+        with self.assertRaises(ValueError):
+            evaluate_worker_alert_thresholds({'pending': 'not-a-number'})
+
+        with self.assertRaises(ValueError):
+            evaluate_worker_alert_thresholds({'pending': float('nan')})
+
+        self.assertFalse(AlertEvent.objects.exists())
+
+
+class WorkerObservabilityTests(TestCase):
+    def setUp(self):
+        self.user = User.objects.create(
+            user='worker-observer', email='worker-observer@example.com',
+            password='plain-password', confirm_pwd='plain-password',
+        )
+        DevOpsRole.objects.create(user=self.user, role=DevOpsRole.ROLE_ADMIN)
+        DevOpsModulePermission.objects.create(
+            user=self.user,
+            module=DevOpsModulePermission.MODULE_SECURITY,
+            role=DevOpsRole.ROLE_ADMIN,
+        )
+        session = self.client.session
+        session['is_login'] = True
+        session['user_id'] = self.user.id
+        session['user_name'] = self.user.user
+        session.save()
+
+    def create_job(self, status, **kwargs):
+        return BackgroundJob.objects.create(
+            job_type=BackgroundJob.TYPE_COMMAND,
+            target_id=1,
+            status=status,
+            **kwargs
+        )
+
+    def test_worker_api_requires_login_and_security_admin_permission(self):
+        self.client.session.flush()
+        response = self.client.get(reverse('devops:api_worker_observability'))
+        self.assertEqual(response.status_code, 401)
+        self.assertEqual(response.json()['code'], 'unauthorized')
+
+        session = self.client.session
+        session['is_login'] = True
+        session['user_id'] = self.user.id
+        session['user_name'] = self.user.user
+        session.save()
+        self.client.cookies[settings.SESSION_COOKIE_NAME] = session.session_key
+        DevOpsRole.objects.filter(user=self.user).update(role=DevOpsRole.ROLE_VIEWER)
+        DevOpsModulePermission.objects.filter(user=self.user).update(role=DevOpsRole.ROLE_VIEWER)
+
+        response = self.client.get(reverse('devops:api_worker_observability'))
+        self.assertEqual(response.status_code, 403)
+        self.assertEqual(response.json()['code'], 'forbidden')
+
+    @override_settings(
+        DEVOPS_WORKER_ALERT_PENDING_THRESHOLD=2,
+        DEVOPS_WORKER_ALERT_FAILURE_RATE_PERCENT=20,
+        DEVOPS_WORKER_ALERT_TIMED_OUT_THRESHOLD=1,
+    )
+    def test_worker_api_and_page_show_safe_summary_and_threshold_state(self):
+        now = timezone.now()
+        self.create_job(BackgroundJob.STATUS_PENDING, error='worker-private-input')
+        self.create_job(
+            BackgroundJob.STATUS_RUNNING,
+            started_at=now - timedelta(seconds=301),
+            error='worker-private-error',
+        )
+        self.create_job(
+            BackgroundJob.STATUS_FAILED,
+            finished_at=now - timedelta(minutes=5),
+            error='worker-private-failure',
+        )
+        self.create_job(
+            BackgroundJob.STATUS_SUCCESS,
+            finished_at=now - timedelta(minutes=5),
+        )
+
+        api_response = self.client.get(reverse('devops:api_worker_observability'))
+        self.assertEqual(api_response.status_code, 200)
+        payload = api_response.json()
+        self.assertTrue(payload['ok'])
+        self.assertEqual(payload['worker']['summary']['pending'], 1)
+        self.assertEqual(payload['worker']['summary']['timed_out'], 1)
+        self.assertEqual(payload['worker']['summary']['recent_failure_rate'], 0.5)
+        self.assertEqual(payload['worker']['thresholds']['failure_rate']['current'], 50.0)
+        self.assertTrue(payload['worker']['thresholds']['failure_rate']['breached'])
+        self.assertFalse(payload['worker']['thresholds']['pending']['breached'])
+        serialized = json.dumps(payload)
+        for private_value in ('worker-private-input', 'worker-private-error', 'worker-private-failure'):
+            self.assertNotIn(private_value, serialized)
+
+        page_response = self.client.get(reverse('devops:worker_observability'))
+        self.assertEqual(page_response.status_code, 200)
+        self.assertContains(page_response, 'Worker观测')
+        self.assertContains(page_response, '已触发')
+        self.assertNotContains(page_response, 'worker-private-failure')
+
+
+class MaintenanceWindowServiceTests(TestCase):
+    def setUp(self):
+        self.host = NewLinux.objects.create(
+            linux_name='maintenance-host',
+            linux_ip='127.0.0.201',
+            linux_hostname='maintenance-host',
+        )
+        self.other_host = NewLinux.objects.create(
+            linux_name='maintenance-other-host',
+            linux_ip='127.0.0.202',
+            linux_hostname='maintenance-other-host',
+        )
+        self.now = timezone.now()
+
+    def create_window(self, **kwargs):
+        defaults = {
+            'name': 'production maintenance',
+            'reason': 'routine maintenance',
+            'starts_at': self.now - timedelta(minutes=10),
+            'ends_at': self.now + timedelta(minutes=10),
+            'created_by': 'operator',
+        }
+        defaults.update(kwargs)
+        return MaintenanceWindow.objects.create(**defaults)
+
+    def create_release(self, hosts=None):
+        app = DeploymentApp.objects.create(name='maintenance-app')
+        release = DeploymentRelease.objects.create(
+            app=app,
+            version='v1',
+            deploy_script='echo deploy',
+        )
+        if hosts:
+            release.hosts.add(*hosts)
+        return release
+
+    def test_model_rejects_non_increasing_window_times(self):
+        window = MaintenanceWindow(
+            name='invalid maintenance',
+            starts_at=self.now,
+            ends_at=self.now,
+        )
+
+        with self.assertRaises(ValidationError):
+            window.full_clean()
+
+    def test_active_windows_match_direct_hosts_and_service_topology_only_while_active(self):
+        direct = self.create_window(name='direct host')
+        direct.hosts.add(self.host)
+        service = ServiceCatalog.objects.create(name='topology maintenance service')
+        service.hosts.add(self.host)
+        topology = self.create_window(name='service topology')
+        topology.services.add(service)
+        disabled = self.create_window(name='disabled maintenance', enabled=False)
+        disabled.hosts.add(self.host)
+        expired = self.create_window(
+            name='expired maintenance',
+            starts_at=self.now - timedelta(hours=2),
+            ends_at=self.now - timedelta(hours=1),
+        )
+        expired.hosts.add(self.host)
+
+        windows = active_maintenance_windows_for_host(self.host, now=self.now)
+
+        self.assertEqual(set(windows.values_list('id', flat=True)), {direct.id, topology.id})
+        self.assertFalse(active_maintenance_windows_for_host(self.other_host, now=self.now).exists())
+
+    def test_release_matches_service_linked_through_existing_project_mapping(self):
+        release = self.create_release()
+        service = ServiceCatalog.objects.create(name='project mapped service')
+        window = self.create_window(name='project service window')
+        window.services.add(service)
+        project = DevOpsProject.objects.create(name='maintenance project')
+        project.services.add(service)
+        project.deployment_apps.add(release.app)
+
+        windows = active_maintenance_windows_for_release(release, now=self.now)
+
+        self.assertEqual(list(windows.values_list('id', flat=True)), [window.id])
+
+    def test_active_window_creates_and_reuses_deployment_approval(self):
+        release = self.create_release(hosts=[self.host])
+        window = self.create_window(name='approval required window')
+        window.hosts.add(self.host)
+
+        with mock.patch('devops.services.notify_approval') as notify:
+            approval = require_deployment_maintenance_approval(
+                release, requester='release-operator', now=self.now,
+            )
+            retry = require_deployment_maintenance_approval(
+                release, requester='release-operator', now=self.now,
+            )
+
+        self.assertIsNotNone(approval)
+        self.assertEqual(retry.id, approval.id)
+        self.assertEqual(approval.request_type, ApprovalRequest.TYPE_DEPLOYMENT)
+        self.assertEqual(approval.status, ApprovalRequest.STATUS_PENDING)
+        self.assertEqual(approval.deployment_release_id, release.id)
+        self.assertIn('approval required window', approval.reason)
+        self.assertEqual(ApprovalRequest.objects.count(), 1)
+        notify.assert_called_once_with(approval, '创建')
+
+    def test_no_window_does_not_create_deployment_approval(self):
+        release = self.create_release(hosts=[self.host])
+
+        approval = require_deployment_maintenance_approval(release, now=self.now)
+
+        self.assertIsNone(approval)
+        self.assertFalse(ApprovalRequest.objects.exists())
+
+
+class MaintenanceWindowViewTests(TestCase):
+    def setUp(self):
+        self.user = User.objects.create(
+            user='maintenance-admin', email='maintenance-admin@example.com',
+            password='plain-password', confirm_pwd='plain-password',
+        )
+        self.host = NewLinux.objects.create(
+            linux_name='maintenance-ui-host', linux_ip='127.0.0.211',
+            linux_hostname='maintenance-ui-host',
+        )
+        session = self.client.session
+        session['is_login'] = True
+        session['user_id'] = self.user.id
+        session['user_name'] = self.user.user
+        session.save()
+        DevOpsRole.objects.create(user=self.user, role=DevOpsRole.ROLE_ADMIN)
+
+    def test_admin_can_create_window_and_read_safe_api_calendar(self):
+        response = self.client.post(reverse('devops:maintenance_windows'), {
+            'name': 'release maintenance',
+            'reason': 'planned work',
+            'starts_at': '2026-07-20T09:00',
+            'ends_at': '2026-07-20T10:00',
+            'hosts': [self.host.id],
+            'enabled': 'on',
+        })
+
+        self.assertEqual(response.status_code, 302)
+        window = MaintenanceWindow.objects.get(name='release maintenance')
+        self.assertEqual(list(window.hosts.values_list('id', flat=True)), [self.host.id])
+        self.assertTrue(AuditLog.objects.filter(action='创建维护窗口', target_id=str(window.id)).exists())
+
+        response = self.client.get(reverse('devops:api_maintenance_windows'))
+
+        self.assertEqual(response.status_code, 200)
+        payload = response.json()['results'][0]
+        self.assertEqual(payload['name'], 'release maintenance')
+        self.assertEqual(payload['hosts'][0]['id'], self.host.id)
+        self.assertNotIn('linux_passwd', payload['hosts'][0])
+
+    def test_window_creation_rejects_unscoped_or_unbounded_targets(self):
+        other = NewLinux.objects.create(
+            linux_name='maintenance-hidden-host', linux_ip='127.0.0.212',
+            linux_hostname='maintenance-hidden-host',
+        )
+        group = HostGroup.objects.create(name='maintenance-window-scope')
+        group.hosts.add(self.host)
+        scope = DevOpsHostScope.objects.create(user=self.user)
+        scope.groups.add(group)
+        payload = {
+            'name': 'blocked maintenance',
+            'starts_at': '2026-07-20T09:00',
+            'ends_at': '2026-07-20T10:00',
+            'hosts': [other.id],
+            'enabled': 'on',
+        }
+
+        response = self.client.post(reverse('devops:maintenance_windows'), payload)
+
+        self.assertEqual(response.status_code, 400)
+        self.assertFalse(MaintenanceWindow.objects.exists())
+
+    def test_active_window_forces_release_approval_without_enqueuing_execution(self):
+        app = DeploymentApp.objects.create(name='maintenance-ui-app')
+        window = MaintenanceWindow.objects.create(
+            name='active release window', starts_at=timezone.now() - timedelta(minutes=5),
+            ends_at=timezone.now() + timedelta(minutes=5),
+        )
+        window.hosts.add(self.host)
+
+        with mock.patch('devops.views.enqueue_background_job') as enqueue:
+            response = self.client.post(reverse('devops:deployments'), {
+                'form_type': 'release', 'submit_mode': 'execute', 'app': app.id,
+                'version': 'v-maintenance', 'deploy_script': 'echo deploy',
+                'rollback_script': 'echo rollback', 'hosts': [self.host.id],
+            })
+
+        self.assertEqual(response.status_code, 302)
+        release = DeploymentRelease.objects.get(version='v-maintenance')
+        approval = ApprovalRequest.objects.get(deployment_release=release)
+        self.assertEqual(release.status, DeploymentRelease.STATUS_PENDING)
+        self.assertEqual(approval.status, ApprovalRequest.STATUS_PENDING)
+        self.assertIn('维护窗口要求审批', approval.reason)
+        enqueue.assert_not_called()
+
+    def test_calendar_api_requires_security_administrator(self):
+        DevOpsRole.objects.filter(user=self.user).update(role=DevOpsRole.ROLE_VIEWER)
+
+        response = self.client.get(reverse('devops:api_maintenance_windows'))
+
+        self.assertEqual(response.status_code, 403)
+        self.assertEqual(response.json()['code'], 'forbidden')

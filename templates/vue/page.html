@@ -4,7 +4,20 @@
 {% block title %}{{ vue_page_title }}{% endblock %}
 
 {% block extra_css %}
-<link rel="stylesheet" href="{% static 'css/ops-vue-pages.css' %}?v=20260715-integration-filter">
+{% if vue_page_kind == 'monitor-dashboard' %}
+<link rel="stylesheet" href="{% static 'css/ops-vue-pages.css' %}?v=20260717-fcc-node-resources-01">
+{% else %}
+<link rel="stylesheet" href="{% static 'css/ops-vue-pages.css' %}?v=20260716-alerts">
+{% endif %}
+{# PromQL native-scroll cache baseline: 20260714-promql-scroll-width-sync #}
+{% if vue_page_kind == "monitor-dashboard" %}
+<link rel="stylesheet" href="{% static 'css/monitor-command-center.css' %}?v=20260717-fcc-node-resources-01">
+<style>
+body { background: #02060b !important; }
+.main-content { background-color: #02060b !important; }
+.ops-vue-page { position: relative; min-height: calc(100vh - 48px); background-color: #02060b; }
+</style>
+{% endif %}
 {% if vue_page_kind == "webssh" %}
 <link rel="stylesheet" href="{% static 'xterm/css/xterm.css' %}">
 {% endif %}
@@ -28,5 +41,9 @@
 <script src="{% static 'xterm/js/xterm.js' %}"></script>
 {% endif %}
 <script src="{% static 'vendor/vue.global.prod.js' %}?v=3"></script>
-<script src="{% static 'js/ops-vue-pages.js' %}?v=20260715-integration-filter"></script>
+{% if vue_page_kind == 'monitor-dashboard' %}
+<script src="{% static 'js/ops-vue-pages.js' %}?v=20260717-fcc-node-resources-01"></script>
+{% else %}
+<script src="{% static 'js/ops-vue-pages.js' %}?v=20260716-alerts"></script>
+{% endif %}
 {% endblock %}

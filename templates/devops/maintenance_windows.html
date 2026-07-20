@@ -1,0 +1,48 @@
+{% extends "base.html" %}
+
+{% block title %}维护窗口 - DevOps平台{% endblock %}
+
+{% block content %}
+<div class="container-fluid px-4">
+    <h1 class="h3 mb-3">维护窗口</h1>
+    {% include "devops/_nav.html" %}
+
+    <div class="card mb-3">
+        <div class="card-header">新建维护窗口</div>
+        <div class="card-body">
+            <form method="post">
+                {% csrf_token %}
+                <div class="row g-3">
+                    <div class="col-md-4"><label class="form-label" for="window-name">名称</label><input class="form-control" id="window-name" name="name" maxlength="120" required></div>
+                    <div class="col-md-4"><label class="form-label" for="window-starts">开始时间</label><input class="form-control" id="window-starts" name="starts_at" type="datetime-local" required></div>
+                    <div class="col-md-4"><label class="form-label" for="window-ends">结束时间</label><input class="form-control" id="window-ends" name="ends_at" type="datetime-local" required></div>
+                    <div class="col-md-6"><label class="form-label" for="window-reason">原因</label><input class="form-control" id="window-reason" name="reason" maxlength="500"></div>
+                    <div class="col-md-3"><label class="form-label">目标主机</label><div class="border p-2" style="max-height: 10rem; overflow-y: auto;">{% for host in hosts %}<div class="form-check"><input class="form-check-input" id="window-host-{{ host.id }}" name="hosts" type="checkbox" value="{{ host.id }}"><label class="form-check-label" for="window-host-{{ host.id }}">{{ host.linux_name }}</label></div>{% empty %}<span class="text-muted">无可用主机</span>{% endfor %}</div></div>
+                    <div class="col-md-3"><label class="form-label">关联服务</label><div class="border p-2" style="max-height: 10rem; overflow-y: auto;">{% for service in services %}<div class="form-check"><input class="form-check-input" id="window-service-{{ service.id }}" name="services" type="checkbox" value="{{ service.id }}"><label class="form-check-label" for="window-service-{{ service.id }}">{{ service.name }}</label></div>{% empty %}<span class="text-muted">无服务</span>{% endfor %}</div></div>
+                </div>
+                <div class="form-check mt-3"><input class="form-check-input" id="window-enabled" name="enabled" type="checkbox" checked><label class="form-check-label" for="window-enabled">启用</label></div>
+                <button class="btn btn-primary mt-3" type="submit">创建窗口</button>
+            </form>
+        </div>
+    </div>
+
+    <div class="card">
+        <div class="card-header">变更日历</div>
+        <div class="card-body table-responsive">
+            <table class="table table-hover align-middle">
+                <tr><th>窗口</th><th>时间</th><th>目标</th><th>原因</th><th>状态</th><th>操作</th></tr>
+                {% for window in windows %}
+                <tr>
+                    <td>{{ window.name }}</td>
+                    <td>{{ window.starts_at|date:"Y-m-d H:i" }}<br>{{ window.ends_at|date:"Y-m-d H:i" }}</td>
+                    <td>{% for host in window.hosts.all %}{{ host.linux_name }}{% if not forloop.last %}、{% endif %}{% endfor %}{% if window.hosts.all and window.services.all %}<br>{% endif %}{% for service in window.services.all %}{{ service.name }}{% if not forloop.last %}、{% endif %}{% endfor %}</td>
+                    <td>{{ window.reason|default:"-" }}</td>
+                    <td>{% if window.enabled %}<span class="badge text-bg-success">已启用</span>{% else %}<span class="badge text-bg-secondary">已停用</span>{% endif %}</td>
+                    <td><form method="post" action="{% url 'devops:maintenance_window_toggle' window.id %}">{% csrf_token %}<button class="btn btn-sm btn-outline-secondary" type="submit">{% if window.enabled %}停用{% else %}启用{% endif %}</button></form></td>
+                </tr>
+                {% empty %}<tr><td colspan="6" class="text-muted">暂无维护窗口</td></tr>{% endfor %}
+            </table>
+        </div>
+    </div>
+</div>
+{% endblock %}

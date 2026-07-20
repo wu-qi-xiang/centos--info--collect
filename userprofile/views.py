@@ -1,14 +1,18 @@
+import secrets
+
 from django.shortcuts import render, redirect
 from django.contrib.auth.hashers import check_password, identify_hasher, make_password
 from django.contrib.auth.password_validation import validate_password
 from django.core.exceptions import ValidationError
 from django.middleware.csrf import get_token
 from django.core.validators import validate_email
+from django.utils.crypto import constant_time_compare
 from django.utils import timezone
 
 from PyLinux.vue import render_vue_page
 from RemoteLinux.forms import UserForm
 from RemoteLinux.models import User
+from . import external_auth
 # Create your views here.
 
 LOGIN_FAILURE_LIMIT = 5
@@ -96,12 +100,72 @@ def login(request):
 		return _render_login(request)
 
 
+def oidc_login_start(request):
+	if request.session.get('is_login', None):
+		return redirect('index')
+	if not external_auth.oidc_is_available():
+		return _render_login(request, '外部认证暂不可用')
+
+	state = secrets.token_urlsafe(32)
+	nonce = secrets.token_urlsafe(32)
+	request.session['external_oidc_state'] = state
+	request.session['external_oidc_nonce'] = nonce
+	try:
+		authorization_url = external_auth.build_oidc_authorization_url(state, nonce)
+	except Exception:
+		request.session.pop('external_oidc_state', None)
+		request.session.pop('external_oidc_nonce', None)
+		return _render_login(request, '外部认证暂不可用')
+	return redirect(authorization_url)
+
+
+def oidc_login_callback(request):
+	# Pop before validation so a callback state can never be replayed.
+	expected_state = request.session.pop('external_oidc_state', None)
+	nonce = request.session.pop('external_oidc_nonce', None)
+	provided_state = request.GET.get('state') or ''
+	code = request.GET.get('code') or ''
+	if not expected_state or not nonce or not code or not constant_time_compare(expected_state, provided_state):
+		return _render_login(request, '外部认证失败，请重试')
+
+	try:
+		user = external_auth.authenticate_oidc_callback(request, code, nonce)
+	except Exception:
+		user = None
+	if user is None:
+		return _render_login(request, '外部认证失败，请重试')
+	return login_success(request, user)
+
+
+def ldap_login(request):
+	if request.session.get('is_login', None):
+		return redirect('index')
+	if request.method != 'POST' or not external_auth.ldap_is_available():
+		return _render_login(request, '外部认证暂不可用')
+
+	username = (request.POST.get('username') or '').strip()
+	password = request.POST.get('password') or ''
+	if not username or not password:
+		return _render_login(request, '外部认证失败，请重试')
+	try:
+		user = external_auth.authenticate_ldap(request, username, password)
+	except Exception:
+		user = None
+	if user is None:
+		return _render_login(request, '外部认证失败，请重试')
+	return login_success(request, user)
+
+
 def _render_login(request, error_msg=''):
 	return render_vue_page(request, 'auth-login', '登录', {
 		'subtitle': '进入 Linux 运维管理平台',
 		'csrf': get_token(request),
 		'errors': [error_msg] if error_msg else [],
 		'form': {'user': (request.POST.get('user') or '').strip()},
+		'external_auth': {
+			'oidc_available': external_auth.oidc_is_available(),
+			'ldap_available': external_auth.ldap_is_available(),
+		},
 	}, {'error': error_msg})
 
 

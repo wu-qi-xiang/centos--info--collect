@@ -1,6 +1,6 @@
 ---
 name: centos-info-collect-dev
-description: Broad project development guide for centos--info--collect, a legacy Django 2.1/Python 3.6 operations platform for server inventory, SSH collection, alerting, WebSSH, login, password management, DevOps automation, and AIOps. Use for repository-wide analysis, modification, debugging, testing, running, containerizing, or review.
+description: Broad project development guide for centos--info--collect, a Python 3.11/Django 4.2.16 operations platform with legacy application conventions for server inventory, SSH collection, alerting, WebSSH, login, password management, DevOps automation, and AIOps. Use for repository-wide analysis, modification, debugging, testing, running, containerizing, or review.
 ---
 
 # Centos Info Collect Dev
@@ -54,7 +54,7 @@ The README may mention running from `PyLinux`, but `manage.py` is at the reposit
 
 ## Legacy Constraints
 
-- Keep Django 2.1 compatibility unless modernization is explicitly requested.
+- Keep Python 3.11/Django 4.2.16 compatibility and preserve established application conventions unless modernization is explicitly requested.
 - Preserve explicit legacy table names such as `linux-info`, `monitor-info`, `password_manage`, and `user`.
 - Match function-based views, ModelForms, direct templates, and local static assets unless a safer helper is already established.
 - Do not casually rename URLs, tables, session keys, or deployment paths.
@@ -68,7 +68,7 @@ The README may mention running from `PyLinux`, but `manage.py` is at the reposit
 
 ## Validation
 
-Use the focused commands in `../centos-feature-dev/references/test-matrix.md`. If the legacy dependency set cannot run locally, report the failure and avoid claiming runtime verification.
+Use the focused commands in `../centos-feature-dev/references/test-matrix.md`. If the configured dependency set cannot run locally, report the failure and avoid claiming runtime verification.
 
 ## Shared References
 

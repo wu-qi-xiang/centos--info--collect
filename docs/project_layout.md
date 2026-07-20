@@ -2,6 +2,7 @@
 
 This repository keeps Django runtime code at the top level to preserve the
 legacy import paths used by `manage.py`, migrations, templates, and WSGI.
+The verified runtime baseline is Python 3.11 and Django 4.2.16.
 
 ## Runtime Code
 

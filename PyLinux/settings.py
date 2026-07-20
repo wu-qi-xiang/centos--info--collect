@@ -10,8 +10,11 @@ For the full list of settings and their values, see
 https://docs.djangoproject.com/en/2.1/ref/settings/
 """
 
+import json
 import os
+import re
 import sys
+from urllib.parse import urlparse
 from django.core.exceptions import ImproperlyConfigured
 
 # Build paths inside the project like this: os.path.join(BASE_DIR, ...)
@@ -91,6 +94,168 @@ def env_int(environ, key, default):
 		return int(value)
 	except (TypeError, ValueError):
 		raise ImproperlyConfigured('%s 必须是整数' % key)
+
+
+EXTERNAL_AUTH_ROLES = ('viewer', 'operator', 'admin')
+OIDC_REQUIRED_ENV = (
+	'OIDC_DISCOVERY_URL', 'OIDC_CLIENT_ID', 'OIDC_CLIENT_SECRET', 'OIDC_REDIRECT_URI',
+)
+LDAP_REQUIRED_ENV = (
+	'LDAP_SERVER_URI', 'LDAP_BIND_DN', 'LDAP_BIND_PASSWORD', 'LDAP_BASE_DN',
+	'LDAP_USER_FILTER', 'LDAP_GROUP_ATTRIBUTE', 'LDAP_STARTTLS',
+)
+LDAP_ATTRIBUTE_RE = re.compile(r'^[A-Za-z][A-Za-z0-9_.-]*$')
+S3_BUCKET_RE = re.compile(r'^[a-z0-9][a-z0-9.-]{1,61}[a-z0-9]$')
+
+
+def _external_auth_value(environ, key):
+	return str(environ.get(key, '')).strip()
+
+
+def _external_auth_uri(value, key, schemes):
+	parsed = urlparse(value)
+	if (
+		parsed.scheme not in schemes or not parsed.hostname or parsed.username or
+		parsed.password or parsed.params or parsed.query or parsed.fragment
+	):
+		raise ImproperlyConfigured('%s 必须是安全的绝对 URL。' % key)
+	return value
+
+
+def external_auth_config_from_env(environ):
+	"""Return optional external-auth configuration without accepting partial sources."""
+	role_map_raw = _external_auth_value(environ, 'EXTERNAL_AUTH_ROLE_MAP')
+	if role_map_raw:
+		try:
+			role_map = json.loads(role_map_raw)
+		except (TypeError, ValueError):
+			raise ImproperlyConfigured('EXTERNAL_AUTH_ROLE_MAP 必须是 JSON 对象。')
+		if not isinstance(role_map, dict):
+			raise ImproperlyConfigured('EXTERNAL_AUTH_ROLE_MAP 必须是 JSON 对象。')
+		validated_role_map = {}
+		for group, role in role_map.items():
+			if not isinstance(group, str) or not group.strip() or any(ord(char) < 32 for char in group):
+				raise ImproperlyConfigured('EXTERNAL_AUTH_ROLE_MAP 的组名无效。')
+			if role not in EXTERNAL_AUTH_ROLES:
+				raise ImproperlyConfigured('EXTERNAL_AUTH_ROLE_MAP 只支持 viewer、operator、admin 角色。')
+			validated_role_map[group] = role
+	else:
+		validated_role_map = {}
+
+	oidc_values = {key: _external_auth_value(environ, key) for key in OIDC_REQUIRED_ENV}
+	if any(oidc_values.values()):
+		missing = [key for key, value in oidc_values.items() if not value]
+		if missing:
+			raise ImproperlyConfigured('启用 OIDC 时必须完整配置：%s。' % ', '.join(missing))
+		oidc_config = {
+			'enabled': True,
+			'discovery_url': _external_auth_uri(
+				oidc_values['OIDC_DISCOVERY_URL'], 'OIDC_DISCOVERY_URL', ('https',),
+			),
+			'client_id': oidc_values['OIDC_CLIENT_ID'],
+			'client_secret': oidc_values['OIDC_CLIENT_SECRET'],
+			'redirect_uri': _external_auth_uri(
+				oidc_values['OIDC_REDIRECT_URI'], 'OIDC_REDIRECT_URI', ('https',),
+			),
+		}
+	else:
+		oidc_config = {'enabled': False}
+
+	ldap_values = {key: _external_auth_value(environ, key) for key in LDAP_REQUIRED_ENV}
+	if any(ldap_values.values()):
+		missing = [key for key, value in ldap_values.items() if not value]
+		if missing:
+			raise ImproperlyConfigured('启用 LDAP 时必须完整配置：%s。' % ', '.join(missing))
+		starttls_raw = ldap_values['LDAP_STARTTLS'].lower()
+		if starttls_raw not in ('1', 'true', 'yes', 'on', '0', 'false', 'no', 'off'):
+			raise ImproperlyConfigured('LDAP_STARTTLS 必须是布尔值。')
+		user_filter = ldap_values['LDAP_USER_FILTER']
+		if user_filter.count('{username}') != 1 or user_filter.replace('{username}', '').count('{'):
+			raise ImproperlyConfigured('LDAP_USER_FILTER 必须且只能包含一个 {username} 占位符。')
+		if not LDAP_ATTRIBUTE_RE.match(ldap_values['LDAP_GROUP_ATTRIBUTE']):
+			raise ImproperlyConfigured('LDAP_GROUP_ATTRIBUTE 格式无效。')
+		ldap_config = {
+			'enabled': True,
+			'server_uri': _external_auth_uri(
+				ldap_values['LDAP_SERVER_URI'], 'LDAP_SERVER_URI', ('ldap', 'ldaps'),
+			),
+			'bind_dn': ldap_values['LDAP_BIND_DN'],
+			'bind_password': ldap_values['LDAP_BIND_PASSWORD'],
+			'base_dn': ldap_values['LDAP_BASE_DN'],
+			'user_filter': user_filter,
+			'group_attribute': ldap_values['LDAP_GROUP_ATTRIBUTE'],
+			'starttls': starttls_raw in ('1', 'true', 'yes', 'on'),
+		}
+	else:
+		ldap_config = {'enabled': False}
+
+	if (oidc_config['enabled'] or ldap_config['enabled']) and not validated_role_map:
+		raise ImproperlyConfigured('启用外部认证时必须配置 EXTERNAL_AUTH_ROLE_MAP。')
+	return validated_role_map, oidc_config, ldap_config
+
+
+EXTERNAL_AUTH_ROLE_MAP, OIDC_CONFIG, LDAP_CONFIG = external_auth_config_from_env(os.environ)
+
+
+def _env_bool(environ, key, default):
+	value = str(environ.get(key, '')).strip().lower()
+	if not value:
+		return default
+	if value in ('1', 'true', 'yes', 'on'):
+		return True
+	if value in ('0', 'false', 'no', 'off'):
+		return False
+	raise ImproperlyConfigured('%s 必须是布尔值。' % key)
+
+
+def backup_s3_config_from_env(environ):
+	"""Return a validated optional S3-compatible backup destination.
+
+	Credentials intentionally remain optional so AWS instance profiles, IRSA and
+	other provider credential chains can be used without placing secrets in env.
+	"""
+	bucket = str(environ.get('BACKUP_S3_BUCKET', '')).strip()
+	if not bucket:
+		return {'enabled': False}
+	if not S3_BUCKET_RE.match(bucket) or '..' in bucket or bucket.replace('.', '').isdigit():
+		raise ImproperlyConfigured('BACKUP_S3_BUCKET 格式无效。')
+
+	prefix = str(environ.get('BACKUP_S3_PREFIX', 'pylinux')).strip().strip('/')
+	if not prefix or any(part in ('.', '..') for part in prefix.split('/')):
+		raise ImproperlyConfigured('BACKUP_S3_PREFIX 必须是安全的对象键前缀。')
+
+	endpoint_url = str(environ.get('BACKUP_S3_ENDPOINT_URL', '')).strip()
+	if endpoint_url:
+		parsed = urlparse(endpoint_url)
+		if (
+			parsed.scheme not in ('http', 'https') or not parsed.hostname or
+			parsed.username or parsed.password or parsed.params or parsed.query or parsed.fragment
+		):
+			raise ImproperlyConfigured('BACKUP_S3_ENDPOINT_URL 必须是安全的绝对 HTTP(S) URL。')
+		endpoint_url = endpoint_url.rstrip('/')
+
+	access_key_id = str(environ.get('BACKUP_S3_ACCESS_KEY_ID', '')).strip()
+	secret_access_key = str(environ.get('BACKUP_S3_SECRET_ACCESS_KEY', '')).strip()
+	session_token = str(environ.get('BACKUP_S3_SESSION_TOKEN', '')).strip()
+	if bool(access_key_id) != bool(secret_access_key):
+		raise ImproperlyConfigured('BACKUP_S3_ACCESS_KEY_ID 和 BACKUP_S3_SECRET_ACCESS_KEY 必须同时配置。')
+	if session_token and not access_key_id:
+		raise ImproperlyConfigured('BACKUP_S3_SESSION_TOKEN 需要访问密钥 ID 和密钥。')
+
+	return {
+		'enabled': True,
+		'bucket': bucket,
+		'prefix': prefix,
+		'endpoint_url': endpoint_url,
+		'region_name': str(environ.get('BACKUP_S3_REGION', '')).strip(),
+		'access_key_id': access_key_id,
+		'secret_access_key': secret_access_key,
+		'session_token': session_token,
+		'verify_ssl': _env_bool(environ, 'BACKUP_S3_VERIFY_SSL', True),
+	}
+
+
+BACKUP_S3_CONFIG = backup_s3_config_from_env(os.environ)
 
 
 def k8s_cache_config_from_env(environ, base_dir=BASE_DIR):
@@ -221,6 +386,9 @@ EMAIL_SSL_KEYFILE = None
 DEFAULT_FROM_EMAIL = EMAIL_HOST_USER
 EMAIL_TIMEOUT = 8
 
+# Preserve legacy primary-key columns when running on Django 4.2.
+DEFAULT_AUTO_FIELD = 'django.db.models.AutoField'
+
 
 CRONJOBS = [
 	('*/1 * * * *', 'monitor.crontab.monitor_send_email', '>>/tmp/test.log'),
@@ -230,6 +398,30 @@ CRONJOBS = [
 
 DEVOPS_SYNC_TASKS = 'test' in sys.argv
 DEVOPS_TASK_RETRY_COUNT = int(os.environ.get('DEVOPS_TASK_RETRY_COUNT', '0'))
+DEVOPS_WORKER_POLL_SECONDS = env_int(os.environ, 'DEVOPS_WORKER_POLL_SECONDS', 1)
+if DEVOPS_WORKER_POLL_SECONDS <= 0:
+	raise ImproperlyConfigured('DEVOPS_WORKER_POLL_SECONDS 必须是正整数')
+DEVOPS_WORKER_MAX_ATTEMPTS = env_int(os.environ, 'DEVOPS_WORKER_MAX_ATTEMPTS', 1)
+if DEVOPS_WORKER_MAX_ATTEMPTS <= 0:
+	raise ImproperlyConfigured('DEVOPS_WORKER_MAX_ATTEMPTS 必须是正整数')
+DEVOPS_WORKER_JOB_TIMEOUT_SECONDS = env_int(os.environ, 'DEVOPS_WORKER_JOB_TIMEOUT_SECONDS', 300)
+if DEVOPS_WORKER_JOB_TIMEOUT_SECONDS <= 0:
+	raise ImproperlyConfigured('DEVOPS_WORKER_JOB_TIMEOUT_SECONDS 必须是正整数')
+DEVOPS_WORKER_ALERT_PENDING_THRESHOLD = env_int(
+	os.environ, 'DEVOPS_WORKER_ALERT_PENDING_THRESHOLD', 0,
+)
+if DEVOPS_WORKER_ALERT_PENDING_THRESHOLD < 0:
+	raise ImproperlyConfigured('DEVOPS_WORKER_ALERT_PENDING_THRESHOLD 必须是非负整数')
+DEVOPS_WORKER_ALERT_FAILURE_RATE_PERCENT = env_int(
+	os.environ, 'DEVOPS_WORKER_ALERT_FAILURE_RATE_PERCENT', 0,
+)
+if not 0 <= DEVOPS_WORKER_ALERT_FAILURE_RATE_PERCENT <= 100:
+	raise ImproperlyConfigured('DEVOPS_WORKER_ALERT_FAILURE_RATE_PERCENT 必须在 0 到 100 之间')
+DEVOPS_WORKER_ALERT_TIMED_OUT_THRESHOLD = env_int(
+	os.environ, 'DEVOPS_WORKER_ALERT_TIMED_OUT_THRESHOLD', 0,
+)
+if DEVOPS_WORKER_ALERT_TIMED_OUT_THRESHOLD < 0:
+	raise ImproperlyConfigured('DEVOPS_WORKER_ALERT_TIMED_OUT_THRESHOLD 必须是非负整数')
 DEVOPS_SSH_CONNECT_TIMEOUT_SECONDS = int(os.environ.get('DEVOPS_SSH_CONNECT_TIMEOUT_SECONDS', '10'))
 DEVOPS_COMMAND_TIMEOUT_SECONDS = int(os.environ.get('DEVOPS_COMMAND_TIMEOUT_SECONDS', '60'))
 DEVOPS_COMMAND_OUTPUT_MAX_BYTES = int(os.environ.get('DEVOPS_COMMAND_OUTPUT_MAX_BYTES', '204800'))

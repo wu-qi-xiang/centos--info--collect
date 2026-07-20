@@ -1,7 +1,9 @@
 import json
 import re
+import math
 from datetime import timedelta
 
+from django.conf import settings
 from django.db import models
 from django.http import JsonResponse
 from django.shortcuts import get_object_or_404
@@ -19,9 +21,13 @@ from .models import (
     DevOpsRole,
     FileDistribution,
     HostGroup,
+    Incident,
+    IntegrationHealthEvent,
     MetricSample,
+    MaintenanceWindow,
     NotificationChannel,
     NotificationLog,
+    ServiceCatalog,
 )
 from .services import (
     COMMAND_ALLOWED,
@@ -34,12 +40,18 @@ from .services import (
     execute_approval_request,
     execute_batch_task,
     execute_command_record,
+    can_access_incident,
+    create_incident,
+    add_incident_timeline_note,
+    record_incident_postmortem,
+    update_incident_status,
     evaluate_command_policy,
     has_role,
     latest_metric_map,
     notify_approval,
     user_role,
     visible_hosts_for_request,
+    summarize_integration_health,
 )
 
 
@@ -51,6 +63,8 @@ MODULE_FILE = DevOpsModulePermission.MODULE_FILE
 MODULE_DEPLOYMENT = DevOpsModulePermission.MODULE_DEPLOYMENT
 MODULE_SECURITY = DevOpsModulePermission.MODULE_SECURITY
 MODULE_AUDIT = DevOpsModulePermission.MODULE_AUDIT
+MODULE_SERVICE = DevOpsModulePermission.MODULE_SERVICE
+MODULE_ALERT = DevOpsModulePermission.MODULE_ALERT
 NOTIFICATION_RESPONSE_PREVIEW_LENGTH = 300
 SENSITIVE_URL_RE = re.compile(r'https?://[^\s,;]+', re.IGNORECASE)
 SENSITIVE_ENC_RE = re.compile(r'\benc:[^\s,;]+', re.IGNORECASE)
@@ -194,6 +208,84 @@ def serialize_alert(alert):
     }
 
 
+def serialize_incident_reference(incident):
+    return {
+        'host': serialize_host(incident.host) if incident.host_id else None,
+        'alert': {
+            'id': incident.alert_id,
+            'message': incident.alert.message,
+            'status': incident.alert.status,
+        } if incident.alert_id else None,
+        'deployment': {
+            'id': incident.deployment_release_id,
+            'app': incident.deployment_release.app.name,
+            'version': incident.deployment_release.version,
+            'status': incident.deployment_release.status,
+        } if incident.deployment_release_id else None,
+        # Command output and error are deliberately excluded from incident APIs.
+        'command': {
+            'id': incident.command_execution_id,
+            'command': incident.command_execution.command,
+            'status': incident.command_execution.status,
+        } if incident.command_execution_id else None,
+    }
+
+
+def serialize_incident(incident, include_timeline=False):
+    item = {
+        'id': incident.id,
+        'title': incident.title,
+        'severity': incident.severity,
+        'severity_label': label(incident, 'severity'),
+        'description': incident.description,
+        'status': incident.status,
+        'status_label': label(incident, 'status'),
+        'references': serialize_incident_reference(incident),
+        'postmortem': {
+            'root_cause': incident.root_cause,
+            'resolution': incident.resolution,
+            'follow_up': incident.follow_up,
+        },
+        'created_by': incident.created_by,
+        'created_at': iso(incident.created_at),
+        'updated_at': iso(incident.updated_at),
+        'resolved_at': iso(incident.resolved_at),
+    }
+    if include_timeline:
+        item['timeline'] = [{
+            'id': entry.id,
+            'note': entry.note,
+            'created_by': entry.created_by,
+            'created_at': iso(entry.created_at),
+        } for entry in incident.timeline.all()]
+    return item
+
+
+def scoped_incidents(request):
+    incidents = Incident.objects.select_related(
+        'host', 'alert__host', 'deployment_release__app', 'command_execution__host'
+    ).prefetch_related('deployment_release__hosts', 'timeline')
+    return [incident for incident in incidents if can_access_incident(request, incident)]
+
+
+def limit_items(request, items, default=50, maximum=200):
+    try:
+        limit = int(request.GET.get('limit', default))
+    except (TypeError, ValueError):
+        limit = default
+    return items[:max(1, min(limit, maximum))]
+
+
+def incident_from_payload(payload, field, model):
+    value = payload.get(field)
+    if value in (None, ''):
+        return None, None
+    try:
+        return model.objects.get(id=int(value)), None
+    except (TypeError, ValueError, model.DoesNotExist):
+        return None, '%s 无效或不存在' % field
+
+
 def serialize_approval(approval):
     return {
         'id': approval.id,
@@ -232,6 +324,36 @@ def serialize_release(release, visible_hosts=None):
     }
 
 
+def serialize_maintenance_window(window, visible_hosts):
+    visible_ids = set(visible_hosts.values_list('id', flat=True))
+    hosts = [serialize_host(host) for host in window.hosts.all() if host.id in visible_ids]
+    services = []
+    for service in window.services.all():
+        service_host_ids = set(service.hosts.values_list('id', flat=True))
+        if service_host_ids.issubset(visible_ids):
+            services.append({'id': service.id, 'name': service.name, 'environment': service.environment})
+    return {
+        'id': window.id,
+        'name': window.name,
+        'reason': window.reason,
+        'starts_at': iso(window.starts_at),
+        'ends_at': iso(window.ends_at),
+        'enabled': window.enabled,
+        'hosts': hosts,
+        'services': services,
+    }
+
+
+def can_view_maintenance_window(request, window):
+    targets = list(window.hosts.all())
+    for service in window.services.all():
+        service_hosts = list(service.hosts.all())
+        if not service_hosts:
+            return False
+        targets.extend(service_hosts)
+    return bool(targets) and can_access_hosts(request, targets)
+
+
 def serialize_notification_log(log):
     return {
         'id': log.id,
@@ -242,9 +364,68 @@ def serialize_notification_log(log):
         'title': log.title,
         'status': log.status,
         'status_label': label(log, 'status'),
-        'response': truncate_text(log.response),
+        'response': truncate_text(redact_sensitive_text(log.response)),
+        'failure_category': log.failure_category,
+        'attempt_count': log.attempt_count,
         'created_at': iso(log.created_at),
     }
+
+
+def notification_health_summary():
+    """Aggregate delivery outcomes without reading notification content or secrets."""
+    channels = [{
+        'id': channel.id,
+        'name': channel.name,
+        'channel_type': channel.channel_type,
+        'total_count': 0,
+        'success_count': 0,
+        'failed_count': 0,
+        'last_sent_at': None,
+        'last_success_at': None,
+        'last_failure_at': None,
+        'failure_categories': {},
+    } for channel in NotificationChannel.objects.all()]
+    by_id = dict((item['id'], item) for item in channels)
+    logs = NotificationLog.objects.filter(channel__isnull=False).values(
+        'channel_id', 'status', 'failure_category', 'created_at'
+    )
+    for log in logs:
+        item = by_id.get(log['channel_id'])
+        if not item:
+            continue
+        item['total_count'] += 1
+        occurred_at = iso(log['created_at'])
+        if item['last_sent_at'] is None or occurred_at > item['last_sent_at']:
+            item['last_sent_at'] = occurred_at
+        if log['status'] == NotificationLog.STATUS_SUCCESS:
+            item['success_count'] += 1
+            if item['last_success_at'] is None or occurred_at > item['last_success_at']:
+                item['last_success_at'] = occurred_at
+        else:
+            item['failed_count'] += 1
+            if item['last_failure_at'] is None or occurred_at > item['last_failure_at']:
+                item['last_failure_at'] = occurred_at
+            category = log['failure_category'] or 'uncategorized'
+            item['failure_categories'][category] = item['failure_categories'].get(category, 0) + 1
+    return channels
+
+
+def configured_integration_health(configs, integration_type):
+    """Serialize configured monitor integrations without their endpoint fields."""
+    results = []
+    for config in configs:
+        summary = summarize_integration_health(integration_type, source=config)
+        results.append({
+            'id': config.id,
+            'name': config.name,
+            'enabled': config.enabled,
+            'current_status': summary['current_status'],
+            'latest_check': iso(summary['latest_check']),
+            'latest_category': summary['latest_category'],
+            'consecutive_failures': summary['consecutive_failures'],
+            'recent_event_counts': summary['recent_event_counts'],
+        })
+    return results
 
 
 def redact_sensitive_text(value):
@@ -268,6 +449,23 @@ def serialize_audit_log(log):
     }
 
 
+def serialize_topology_service(service, visible_host_ids, visible_service_ids):
+    return {
+        'id': service.id,
+        'name': service.name,
+        'owner': service.owner,
+        'environment': service.environment,
+        'environment_label': label(service, 'environment'),
+        'description': service.description,
+        'hosts': [serialize_host(host) for host in service.hosts.all() if host.id in visible_host_ids],
+        'upstream_dependencies': [
+            {'id': link.upstream_service.id, 'name': link.upstream_service.name}
+            for link in service.upstream_links.all()
+            if link.upstream_service_id in visible_service_ids
+        ],
+    }
+
+
 def limit_queryset(request, queryset, default=50, maximum=200):
     try:
         limit = int(request.GET.get('limit', default))
@@ -275,6 +473,55 @@ def limit_queryset(request, queryset, default=50, maximum=200):
         limit = default
     limit = max(1, min(limit, maximum))
     return queryset[:limit]
+
+
+def _worker_alert_threshold(value, maximum=None):
+    """Normalize a display-only Worker alert threshold without exposing config."""
+    try:
+        value = float(value)
+    except (TypeError, ValueError):
+        return None
+    if not math.isfinite(value) or value <= 0:
+        return None
+    if maximum is not None and value > maximum:
+        return None
+    return value
+
+
+def worker_observability_payload(summary=None):
+    """Return the safe, read-only data consumed by the Worker status page/API."""
+    from .services import summarize_background_jobs
+
+    summary = summary if summary is not None else summarize_background_jobs()
+    pending_threshold = _worker_alert_threshold(
+        getattr(settings, 'DEVOPS_WORKER_ALERT_PENDING_THRESHOLD', 0)
+    )
+    failure_rate_threshold = _worker_alert_threshold(
+        getattr(settings, 'DEVOPS_WORKER_ALERT_FAILURE_RATE_PERCENT', 0),
+        maximum=100,
+    )
+    timed_out_threshold = _worker_alert_threshold(
+        getattr(settings, 'DEVOPS_WORKER_ALERT_TIMED_OUT_THRESHOLD', 0)
+    )
+    failure_rate_percent = round(float(summary['recent_failure_rate']) * 100, 2)
+    thresholds = {
+        'pending': {
+            'threshold': pending_threshold,
+            'current': summary['pending'],
+            'breached': pending_threshold is not None and summary['pending'] >= pending_threshold,
+        },
+        'failure_rate': {
+            'threshold': failure_rate_threshold,
+            'current': failure_rate_percent,
+            'breached': failure_rate_threshold is not None and failure_rate_percent >= failure_rate_threshold,
+        },
+        'timed_out': {
+            'threshold': timed_out_threshold,
+            'current': summary['timed_out'],
+            'breached': timed_out_threshold is not None and summary['timed_out'] >= timed_out_threshold,
+        },
+    }
+    return {'summary': summary, 'thresholds': thresholds}
 
 
 @api_login_required
@@ -315,6 +562,23 @@ def bootstrap(request):
 def hosts(request):
     data = [serialize_host(host) for host in visible_hosts_for_request(request)]
     return JsonResponse({'ok': True, 'results': data})
+
+
+@api_login_required
+@require_http_methods(['GET'])
+def service_topology(request):
+    if not has_role(request, DevOpsRole.ROLE_VIEWER, MODULE_SERVICE):
+        return api_error('没有服务管理权限', status=403, code='forbidden')
+    hosts = visible_hosts_for_request(request)
+    visible_host_ids = set(hosts.values_list('id', flat=True))
+    services = list(ServiceCatalog.objects.filter(
+        models.Q(hosts__in=hosts) | models.Q(hosts__isnull=True)
+    ).distinct().prefetch_related('hosts', 'upstream_links__upstream_service'))
+    visible_service_ids = set(service.id for service in services)
+    return JsonResponse({
+        'ok': True,
+        'results': [serialize_topology_service(service, visible_host_ids, visible_service_ids) for service in services],
+    })
 
 
 @api_login_required
@@ -469,6 +733,145 @@ def alerts(request):
 
 
 @api_login_required
+@require_http_methods(['GET', 'POST'])
+def incidents(request):
+    if request.method == 'GET':
+        if not has_role(request, DevOpsRole.ROLE_VIEWER, MODULE_ALERT):
+            return api_error('没有事件查看权限', status=403, code='forbidden')
+        return JsonResponse({
+            'ok': True,
+            'results': [serialize_incident(item) for item in limit_items(request, scoped_incidents(request))],
+        })
+
+    if not has_role(request, DevOpsRole.ROLE_OPERATOR, MODULE_ALERT):
+        return api_error('没有事件操作权限', status=403, code='forbidden')
+    payload = request_json(request)
+    if payload is None:
+        return invalid_json_error()
+    if not isinstance(payload, dict):
+        return api_error('请求参数无效', status=400, code='validation_error')
+    title = payload.get('title')
+    if not isinstance(title, str) or not title.strip() or len(title.strip()) > 200:
+        return api_error('事件标题不能为空且不能超过 200 字符', status=400, code='validation_error')
+    severity = payload.get('severity', Incident.SEVERITY_MEDIUM)
+    if severity not in dict(Incident.SEVERITY_CHOICES):
+        return api_error('事件级别无效', status=400, code='validation_error')
+    description = payload.get('description', '')
+    if not isinstance(description, str) or len(description) > 10000:
+        return api_error('事件描述无效', status=400, code='validation_error')
+
+    from RemoteLinux.models import NewLinux
+    references = {}
+    for field, model in (
+        ('host_id', NewLinux),
+        ('alert_id', AlertEvent),
+        ('deployment_release_id', DeploymentRelease),
+        ('command_execution_id', CommandExecution),
+    ):
+        value, error = incident_from_payload(payload, field, model)
+        if error:
+            return api_error(error, status=400, code='validation_error')
+        references[field] = value
+    incident = create_incident(
+        request,
+        title.strip(),
+        severity,
+        description,
+        host=references['host_id'],
+        alert=references['alert_id'],
+        deployment_release=references['deployment_release_id'],
+        command_execution=references['command_execution_id'],
+    )
+    if not incident:
+        return api_error('关联资源不在当前用户授权范围内', status=403, code='host_forbidden')
+    incident = Incident.objects.select_related(
+        'host', 'alert__host', 'deployment_release__app', 'command_execution__host'
+    ).prefetch_related('deployment_release__hosts', 'timeline').get(id=incident.id)
+    return JsonResponse({'ok': True, 'incident': serialize_incident(incident, include_timeline=True)}, status=201)
+
+
+def get_scoped_incident_or_error(request, id):
+    for incident in scoped_incidents(request):
+        if incident.id == id:
+            return incident, None
+    return None, api_error('事件不存在', status=404, code='not_found')
+
+
+@api_login_required
+@require_http_methods(['GET'])
+def incident_detail(request, id):
+    if not has_role(request, DevOpsRole.ROLE_VIEWER, MODULE_ALERT):
+        return api_error('没有事件查看权限', status=403, code='forbidden')
+    incident, error = get_scoped_incident_or_error(request, id)
+    if error:
+        return error
+    return JsonResponse({'ok': True, 'incident': serialize_incident(incident, include_timeline=True)})
+
+
+def incident_operator(request, id):
+    if not has_role(request, DevOpsRole.ROLE_OPERATOR, MODULE_ALERT):
+        return None, api_error('没有事件操作权限', status=403, code='forbidden')
+    return get_scoped_incident_or_error(request, id)
+
+
+@api_login_required
+@require_http_methods(['POST'])
+def incident_timeline(request, id):
+    incident, error = incident_operator(request, id)
+    if error:
+        return error
+    payload = request_json(request)
+    if payload is None:
+        return invalid_json_error()
+    note = payload.get('note') if isinstance(payload, dict) else None
+    if not isinstance(note, str) or not note.strip() or len(note.strip()) > 10000:
+        return api_error('时间线内容不能为空且不能超过 10000 字符', status=400, code='validation_error')
+    entry = add_incident_timeline_note(request, incident, note.strip())
+    return JsonResponse({'ok': True, 'timeline': {
+        'id': entry.id, 'note': entry.note, 'created_by': entry.created_by, 'created_at': iso(entry.created_at),
+    }}, status=201)
+
+
+@api_login_required
+@require_http_methods(['POST'])
+def incident_status(request, id):
+    incident, error = incident_operator(request, id)
+    if error:
+        return error
+    payload = request_json(request)
+    if payload is None:
+        return invalid_json_error()
+    status = payload.get('status') if isinstance(payload, dict) else None
+    if status not in dict(Incident.STATUS_CHOICES):
+        return api_error('事件状态无效', status=400, code='validation_error')
+    incident = update_incident_status(request, incident, status)
+    return JsonResponse({'ok': True, 'incident': serialize_incident(incident)})
+
+
+@api_login_required
+@require_http_methods(['POST'])
+def incident_postmortem(request, id):
+    incident, error = incident_operator(request, id)
+    if error:
+        return error
+    if incident.status not in (Incident.STATUS_RESOLVED, Incident.STATUS_CLOSED):
+        return api_error('仅已解决或已关闭事件可记录复盘', status=400, code='validation_error')
+    payload = request_json(request)
+    if payload is None:
+        return invalid_json_error()
+    if not isinstance(payload, dict):
+        return api_error('请求参数无效', status=400, code='validation_error')
+    fields = []
+    for field in ('root_cause', 'resolution', 'follow_up'):
+        value = payload.get(field, '')
+        if not isinstance(value, str) or len(value) > 10000:
+            return api_error('%s 无效' % field, status=400, code='validation_error')
+        fields.append(value.strip())
+    incident = record_incident_postmortem(request, incident, *fields)
+    return JsonResponse({'ok': True, 'incident': serialize_incident(incident)})
+
+
+@api_login_required
 @require_http_methods(['GET'])
 def approvals(request):
     visible_hosts = visible_hosts_for_request(request)
@@ -536,6 +939,19 @@ def deployments(request):
 
 @api_login_required
 @require_http_methods(['GET'])
+def maintenance_windows(request):
+    if not has_role(request, DevOpsRole.ROLE_ADMIN, MODULE_SECURITY):
+        return api_error('没有维护窗口管理权限', status=403, code='forbidden')
+    visible_hosts = visible_hosts_for_request(request)
+    windows = MaintenanceWindow.objects.prefetch_related('hosts', 'services__hosts').all()[:100]
+    return JsonResponse({'ok': True, 'results': [
+        serialize_maintenance_window(item, visible_hosts) for item in windows
+        if can_view_maintenance_window(request, item)
+    ]})
+
+
+@api_login_required
+@require_http_methods(['GET'])
 def files(request):
     visible_hosts = visible_hosts_for_request(request)
     queryset = FileDistribution.objects.filter(hosts__in=visible_hosts).distinct()
@@ -594,6 +1010,44 @@ def notifications(request):
         } for channel in channels],
         'logs': [serialize_notification_log(log) for log in limit_queryset(request, logs)],
     })
+
+
+@api_login_required
+@require_http_methods(['GET'])
+def integration_health(request):
+    """Admin-only health summaries for configured inbound and notification integrations."""
+    if not has_role(request, DevOpsRole.ROLE_ADMIN, MODULE_SECURITY):
+        return api_error('没有集成健康管理权限', status=403, code='forbidden')
+    from monitor.models import AlertmanagerConfig, PrometheusConfig
+    github = summarize_integration_health(
+        IntegrationHealthEvent.TYPE_GITHUB_INBOUND,
+        source_name=IntegrationHealthEvent.SOURCE_GITHUB_INBOUND,
+    )
+    github['latest_check'] = iso(github['latest_check'])
+    github['recent_since'] = iso(github['recent_since'])
+    return JsonResponse({
+        'ok': True,
+        'github_inbound': github,
+        'prometheus': configured_integration_health(
+            PrometheusConfig.objects.only('id', 'name', 'enabled').order_by('id'),
+            IntegrationHealthEvent.TYPE_PROMETHEUS,
+        ),
+        'alertmanager': configured_integration_health(
+            AlertmanagerConfig.objects.only('id', 'name', 'enabled').order_by('id'),
+            IntegrationHealthEvent.TYPE_ALERTMANAGER,
+        ),
+        'notifications': notification_health_summary(),
+    })
+
+
+@api_login_required
+@require_http_methods(['GET'])
+def worker_observability(request):
+    """Admin-only, read-only aggregate state for the durable Worker queue."""
+    if not has_role(request, DevOpsRole.ROLE_ADMIN, MODULE_SECURITY):
+        return api_error('没有 Worker 观测管理权限', status=403, code='forbidden')
+    payload = worker_observability_payload()
+    return JsonResponse({'ok': True, 'worker': payload})
 
 
 @api_login_required

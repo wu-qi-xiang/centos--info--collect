@@ -33,7 +33,7 @@ Direct main-agent edits are exempt only for non-development housekeeping or a ti
 
 ## Project Constraints
 
-- This is a legacy Django 2.1 project. Keep changes compatible with existing function-based views, templates, forms, migrations, and direct static assets unless modernization is explicitly requested.
+- This project runs on Python 3.11 and Django 4.2.16. Preserve its established function-based views, templates, forms, migrations, and direct static assets unless modernization is explicitly requested.
 - `manage.py` is at the repository root.
 - Runtime code lives at the repository top level to preserve legacy imports.
 - Prefer focused changes that preserve existing table names, session keys, URL shapes, and deployment assumptions.
@@ -56,7 +56,7 @@ Direct main-agent edits are exempt only for non-development housekeeping or a ti
 - `references/task-router.md` - map user requests to read/edit/test paths.
 - `references/change-recipes.md` - repeatable implementation recipes.
 - `references/requirements-triage.md` - decide when to ask, plan, or compare options.
-- `references/django-legacy-standards.md` - coding standards for this Django 2.1 codebase.
+- `references/django-legacy-standards.md` - coding standards for this Django 4.2.16 codebase with legacy application conventions.
 - `references/devops-api-dictionary.md` - `/devops/api/*` contract and endpoint dictionary.
 - `references/devops-state-models.md` - DevOps workflow status models and transitions.
 - `references/aiops-llm-contract.md` - AIOps LLM, Alertmanager webhook, and analysis storage contract.

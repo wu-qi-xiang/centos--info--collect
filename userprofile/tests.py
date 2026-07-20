@@ -1,3 +1,6 @@
+import json
+from unittest.mock import ANY, patch
+
 from django.contrib.auth.hashers import check_password, identify_hasher
 from django.test import TestCase
 from django.urls import reverse
@@ -192,3 +195,138 @@ class InitialAdminTests(TestCase):
 		self.assertRedirects(response, reverse('index'))
 		self.assertTrue(self.client.session['is_login'])
 		self.assertEqual(self.client.session['user_name'], 'admin')
+
+
+class ExternalAuthenticationViewTests(TestCase):
+	def _login_payload(self, response):
+		return json.loads(response.context['vue_page_payload'])['data']
+
+	@patch('userprofile.external_auth.ldap_is_available', return_value=False)
+	@patch('userprofile.external_auth.oidc_is_available', return_value=False)
+	def test_login_payload_keeps_local_login_when_external_providers_are_unavailable(self, oidc_available, ldap_available):
+		response = self.client.get(reverse('userprofile:login'))
+
+		self.assertEqual(response.status_code, 200)
+		payload = self._login_payload(response)
+		self.assertEqual(payload['external_auth'], {
+			'oidc_available': False,
+			'ldap_available': False,
+		})
+		self.assertContains(response, '登录')
+
+	@patch('userprofile.external_auth.oidc_is_available', return_value=False)
+	def test_oidc_start_rejects_unavailable_provider(self, oidc_available):
+		response = self.client.get(reverse('userprofile:oidc_login_start'))
+
+		self.assertEqual(response.status_code, 200)
+		self.assertContains(response, '外部认证暂不可用')
+		self.assertNotIn('external_oidc_state', self.client.session)
+
+	@patch('userprofile.external_auth.build_oidc_authorization_url', return_value='https://identity.example.test/authorize')
+	@patch('userprofile.external_auth.oidc_is_available', return_value=True)
+	def test_oidc_start_stores_state_and_nonce_before_redirect(self, oidc_available, build_url):
+		response = self.client.get(reverse('userprofile:oidc_login_start'))
+
+		self.assertRedirects(response, 'https://identity.example.test/authorize', fetch_redirect_response=False)
+		session = self.client.session
+		self.assertTrue(session['external_oidc_state'])
+		self.assertTrue(session['external_oidc_nonce'])
+		build_url.assert_called_once_with(session['external_oidc_state'], session['external_oidc_nonce'])
+
+	def test_oidc_callback_rejects_mismatched_state_and_consumes_pending_values(self):
+		session = self.client.session
+		session['external_oidc_state'] = 'expected-state'
+		session['external_oidc_nonce'] = 'expected-nonce'
+		session.save()
+
+		response = self.client.get(reverse('userprofile:oidc_login_callback'), {
+			'state': 'different-state',
+			'code': 'authorization-code',
+		})
+
+		self.assertEqual(response.status_code, 200)
+		self.assertContains(response, '外部认证失败，请重试')
+		self.assertNotIn('external_oidc_state', self.client.session)
+		self.assertNotIn('external_oidc_nonce', self.client.session)
+
+	@patch('userprofile.external_auth.authenticate_oidc_callback')
+	def test_oidc_callback_logs_in_verified_user_and_consumes_pending_values(self, authenticate_callback):
+		user = User.objects.create(
+			user='oidc-user',
+			email='oidc-user@example.com',
+			password='external-placeholder',
+			confirm_pwd='external-placeholder',
+		)
+		authenticate_callback.return_value = user
+		session = self.client.session
+		session['external_oidc_state'] = 'expected-state'
+		session['external_oidc_nonce'] = 'expected-nonce'
+		session.save()
+
+		response = self.client.get(reverse('userprofile:oidc_login_callback'), {
+			'state': 'expected-state',
+			'code': 'authorization-code',
+		})
+
+		self.assertRedirects(response, reverse('index'))
+		authenticate_callback.assert_called_once_with(ANY, 'authorization-code', 'expected-nonce')
+		self.assertTrue(self.client.session['is_login'])
+		self.assertEqual(self.client.session['user_id'], user.id)
+		self.assertNotIn('external_oidc_state', self.client.session)
+		self.assertNotIn('external_oidc_nonce', self.client.session)
+
+	@patch('userprofile.external_auth.ldap_is_available', return_value=False)
+	def test_ldap_login_rejects_unavailable_provider(self, ldap_available):
+		response = self.client.post(reverse('userprofile:ldap_login'), {
+			'username': 'directory-user',
+			'password': 'directory-password',
+		})
+
+		self.assertEqual(response.status_code, 200)
+		self.assertContains(response, '外部认证暂不可用')
+
+	@patch('userprofile.external_auth.authenticate_ldap', return_value=None)
+	@patch('userprofile.external_auth.ldap_is_available', return_value=True)
+	def test_ldap_login_reports_generic_failure(self, ldap_available, authenticate_ldap):
+		response = self.client.post(reverse('userprofile:ldap_login'), {
+			'username': 'directory-user',
+			'password': 'directory-password',
+		})
+
+		self.assertEqual(response.status_code, 200)
+		self.assertContains(response, '外部认证失败，请重试')
+		authenticate_ldap.assert_called_once()
+
+	@patch('userprofile.external_auth.authenticate_ldap')
+	@patch('userprofile.external_auth.ldap_is_available', return_value=True)
+	def test_ldap_login_logs_in_verified_user(self, ldap_available, authenticate_ldap):
+		user = User.objects.create(
+			user='ldap-user',
+			email='ldap-user@example.com',
+			password='external-placeholder',
+			confirm_pwd='external-placeholder',
+		)
+		authenticate_ldap.return_value = user
+
+		response = self.client.post(reverse('userprofile:ldap_login'), {
+			'username': 'directory-user',
+			'password': 'directory-password',
+		})
+
+		self.assertRedirects(response, reverse('index'))
+		authenticate_ldap.assert_called_once()
+		self.assertTrue(self.client.session['is_login'])
+		self.assertEqual(self.client.session['user_id'], user.id)
+
+	@patch('userprofile.external_auth.ldap_is_available', return_value=True)
+	@patch('userprofile.external_auth.oidc_is_available', return_value=True)
+	def test_login_payload_exposes_only_external_provider_availability(self, oidc_available, ldap_available):
+		response = self.client.get(reverse('userprofile:login'))
+
+		payload = self._login_payload(response)
+		self.assertEqual(payload['external_auth'], {
+			'oidc_available': True,
+			'ldap_available': True,
+		})
+		self.assertNotIn('token', json.dumps(payload).lower())
+		self.assertNotIn('password', json.dumps(payload).lower())

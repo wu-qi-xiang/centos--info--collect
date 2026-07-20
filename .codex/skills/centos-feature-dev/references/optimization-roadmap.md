@@ -11,16 +11,19 @@ Use this to avoid repeating completed optimization work and to choose the next u
 - Metric sample retention with `METRIC_SAMPLE_RETENTION_DAYS`.
 - AIOps dashboard host-scope filtering for stored alert analysis.
 - DevOps Vue console module tabs filtered by bootstrap permissions and short status refresh for running work.
+- Notification retry handling, event-specific templates, and notification-log filtering.
+- Tag-based host-scope authorization.
+- Durable database-backed `devops_worker` execution with atomic job claiming.
+- MySQL/PostgreSQL database environment-variable configuration.
+- CI coverage for `manage.py check`, migration consistency, tests, and skill validation.
 - Skill workflow rule: main agent plans first, subagents perform development implementation, main agent reviews and validates.
 
 ## Recommended Next Work
 
 1. Shared sidebar permission context so classic navigation matches DevOps Vue permissions.
 2. Permission deletion/clear flows with audit details.
-3. Independent worker/Celery/RQ option for production task execution.
-4. CI pipeline for `manage.py check`, migration checks, focused tests, and skill validation.
-5. Nginx/static/media reverse-proxy example for production deployment.
-6. AIOps LLM key encryption and blank-update behavior.
+3. Nginx/static/media reverse-proxy example for production deployment.
+4. AIOps LLM key encryption and blank-update behavior.
 
 ## Selection Rules
 

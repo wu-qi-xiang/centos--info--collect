@@ -98,6 +98,137 @@
         }, []);
     }
 
+    function dashboardMetricValue(value) {
+        if (value === null || value === undefined || value === '' || typeof value === 'boolean') return null;
+        const numeric = Number(value);
+        if (!Number.isFinite(numeric)) return null;
+        return Math.max(0, Math.min(100, numeric));
+    }
+
+    function dashboardText(value, maxLength) {
+        return safeMetricResourceText(value, maxLength || 140);
+    }
+
+    function dashboardStatus(value) {
+        const status = dashboardText(value, 32).toLowerCase();
+        if (['running', 'ready', 'up', 'healthy', 'ok'].indexOf(status) !== -1) return 'healthy';
+        if (['pending', 'warning'].indexOf(status) !== -1) return 'warning';
+        if (['failed', 'error', 'down', 'unhealthy', 'critical'].indexOf(status) !== -1) return 'critical';
+        return 'unknown';
+    }
+
+    function normalizeDashboardRows(rows, kind) {
+        if (!Array.isArray(rows)) return [];
+        return rows.filter((row) => row && typeof row === 'object' && !Array.isArray(row)).slice(0, 500)
+            .map((row, index) => {
+                const item = {
+                    id: String(index) + '-' + dashboardText(kind === 'host' ? row.instance : row.pod, 160),
+                    cpu: dashboardMetricValue(row.cpu),
+                    memory: dashboardMetricValue(row.memory),
+                    disk: dashboardMetricValue(row.disk),
+                };
+                if (kind === 'host') {
+                    item.name = dashboardText(row.instance, 160) || '未命名主机';
+                    item.status = 'healthy';
+                    item.resources = dashboardNodeResources(row);
+                    item.io = {
+                        read: dashboardRateText(row.io_read),
+                        write: dashboardRateText(row.io_write),
+                    };
+                    item.ioRead = dashboardTelemetryNumber(row.io_read);
+                    item.ioWrite = dashboardTelemetryNumber(row.io_write);
+                    const load = row.load && typeof row.load === 'object' ? row.load : {};
+                    item.load = {
+                        one: dashboardLoadText(load.one !== undefined ? load.one : row.load_one),
+                        five: dashboardLoadText(load.five !== undefined ? load.five : row.load_five),
+                        fifteen: dashboardLoadText(load.fifteen !== undefined ? load.fifteen : row.load_fifteen),
+                    };
+                    item.loadRaw = {
+                        one: dashboardTelemetryNumber(load.one !== undefined ? load.one : row.load_one),
+                        five: dashboardTelemetryNumber(load.five !== undefined ? load.five : row.load_five),
+                        fifteen: dashboardTelemetryNumber(load.fifteen !== undefined ? load.fifteen : row.load_fifteen),
+                    };
+                } else {
+                    item.name = dashboardText(row.pod, 160) || '未命名 Pod';
+                    item.namespace = dashboardText(row.namespace, 80) || '-';
+                    item.cluster = dashboardText(row.cluster, 80) || '未标记集群';
+                    item.status = dashboardStatus(row.status);
+                }
+                return item;
+            });
+    }
+
+    function dashboardCapacityText(value, metric) {
+        if (value === null || value === undefined || value === '') return '-';
+        if (typeof value === 'number' && Number.isFinite(value)) {
+            if (metric === 'memory' || metric === 'disk') {
+                const units = ['B', 'KiB', 'MiB', 'GiB', 'TiB'];
+                let amount = value;
+                let unitIndex = 0;
+                while (amount >= 1024 && unitIndex < units.length - 1) {
+                    amount /= 1024;
+                    unitIndex += 1;
+                }
+                return String(Math.round(amount * 100) / 100) + ' ' + units[unitIndex];
+            }
+            return String(Math.round(value * 100) / 100) + (metric === 'cpu' ? ' 核' : '');
+        }
+        return dashboardText(String(value), 48) || '-';
+    }
+
+    function dashboardResourceValue(row, metric, key) {
+        const resource = row && row.resources && typeof row.resources === 'object' ? row.resources[metric] : null;
+        const capacity = row && row.capacity && typeof row.capacity === 'object' ? row.capacity[metric] : null;
+        const aliases = key === 'total' ? ['total', 'capacity'] : (key === 'used' ? ['used', 'usage'] : ['remaining', 'available', 'free']);
+        const sources = [resource, capacity, row];
+        for (let sourceIndex = 0; sourceIndex < sources.length; sourceIndex += 1) {
+            const source = sources[sourceIndex];
+            if (!source || typeof source !== 'object') continue;
+            for (let aliasIndex = 0; aliasIndex < aliases.length; aliasIndex += 1) {
+                const alias = aliases[aliasIndex];
+                const field = sourceIndex === 2 ? metric + '_' + alias : alias;
+                if (source[field] !== null && source[field] !== undefined && source[field] !== '') {
+                    return dashboardCapacityText(source[field], metric);
+                }
+            }
+        }
+        return '-';
+    }
+
+    function dashboardNodeResources(row) {
+        return ['cpu', 'memory', 'disk'].map((metric) => ({
+            key: metric,
+            label: { cpu: 'CPU', memory: '内存', disk: '磁盘' }[metric],
+            total: dashboardResourceValue(row, metric, 'total'),
+            used: dashboardResourceValue(row, metric, 'used'),
+            remaining: dashboardResourceValue(row, metric, 'remaining'),
+        }));
+    }
+
+    function dashboardTelemetryNumber(value) {
+        if (value === null || value === undefined || value === '' || typeof value === 'boolean') return null;
+        const numeric = Number(value);
+        return Number.isFinite(numeric) && numeric >= 0 ? numeric : null;
+    }
+
+    function dashboardRateText(value) {
+        const rate = dashboardTelemetryNumber(value);
+        return rate === null ? '-' : dashboardCapacityText(rate, 'disk') + '/s';
+    }
+
+    function dashboardLoadText(value) {
+        const load = dashboardTelemetryNumber(value);
+        return load === null ? '-' : String(Math.round(load * 100) / 100);
+    }
+
+    function normalizeDashboardData(source) {
+        const payload = source && typeof source === 'object' && !Array.isArray(source) ? source : {};
+        return {
+            hosts: normalizeDashboardRows(payload.hosts, 'host'),
+            pods: normalizeDashboardRows(payload.pods, 'pod'),
+        };
+    }
+
     function safeMetricResourceText(value, maxLength) {
         if (typeof value !== 'string') return '';
         const text = value.trim();
@@ -163,7 +294,9 @@
             rows: [],
             summary: kind === 'targets'
                 ? { total: 0, up: 0, down: 0, unknown: 0, with_errors: 0 }
-                : { total: 0, alerting: 0, recording: 0, unhealthy: 0, firing: 0, pending: 0 },
+                : kind === 'alerts'
+                    ? { total: 0, firing: 0, resolved: 0, other: 0 }
+                    : { total: 0, alerting: 0, recording: 0, unhealthy: 0, firing: 0, pending: 0 },
             totalRows: 0,
             truncated: false,
         };
@@ -243,6 +376,36 @@
         };
     }
 
+    function normalizeMetricAlerts(resource) {
+        const empty = emptyMetricResourceData('alerts');
+        if (!resource || typeof resource !== 'object' || Array.isArray(resource)) return empty;
+        const rawRows = Array.isArray(resource.rows) ? resource.rows : [];
+        const rows = rawRows.filter((row) => row && typeof row === 'object' && !Array.isArray(row))
+            .slice(0, 500).map((row) => ({
+                name: safeMetricResourceText(row.name, 240),
+                status: safeMetricResourceText(row.status, 32),
+                startsAt: safeMetricResourceText(row.starts_at, 80),
+                updatedAt: safeMetricResourceText(row.updated_at, 80),
+                endsAt: safeMetricResourceText(row.ends_at, 80),
+                labels: normalizeMetricResourceLabels(row.labels),
+                annotations: normalizeMetricResourceLabels(row.annotations),
+            }));
+        const rawSummary = resource.summary && typeof resource.summary === 'object' && !Array.isArray(resource.summary)
+            ? resource.summary : {};
+        const totalRows = safeMetricResourceCount(resource.total_rows, rawRows.length);
+        return {
+            rows,
+            summary: {
+                total: safeMetricResourceCount(rawSummary.total, totalRows),
+                firing: safeMetricResourceCount(rawSummary.firing, 0),
+                resolved: safeMetricResourceCount(rawSummary.resolved, 0),
+                other: safeMetricResourceCount(rawSummary.other, 0),
+            },
+            totalRows,
+            truncated: Boolean(resource.truncated || rawRows.length > rows.length || totalRows > rows.length),
+        };
+    }
+
     function metricResourceState(kind) {
         return Object.assign(emptyMetricResourceData(kind), {
             loading: false,
@@ -251,6 +414,25 @@
             durationMs: null,
             requestVersion: 0,
         });
+    }
+
+    function normalizeMonitorIntegrationHealth(health) {
+        const value = health && typeof health === 'object' && !Array.isArray(health) ? health : {};
+        const state = ['success', 'failed', 'unknown'].indexOf(value.state) >= 0 ? value.state : 'unknown';
+        const safeCount = (count) => {
+            const number = Number(count);
+            return Number.isSafeInteger(number) && number >= 0 ? number : 0;
+        };
+        return {
+            state,
+            stateLabel: state === 'success' ? '正常' : (state === 'failed' ? '失败' : '未检测'),
+            lastCheckedAt: typeof value.last_checked_at === 'string' ? value.last_checked_at : '',
+            category: typeof value.category === 'string' ? value.category : '',
+            summary: typeof value.summary === 'string' ? value.summary : '',
+            consecutiveFailures: safeCount(value.consecutive_failures),
+            recentFailures: safeCount(value.recent_failures),
+            recentSuccesses: safeCount(value.recent_successes),
+        };
     }
 
     function normalizeMonitorIntegrationList(integrations, expectedKind) {
@@ -273,6 +455,7 @@
                 name,
                 url: typeof integration.url === 'string' ? integration.url.trim() : '',
                 enabled: Boolean(integration.enabled),
+                health: normalizeMonitorIntegrationHealth(integration.health),
                 updatedAt: typeof integration.updated_at === 'string' ? integration.updated_at : '',
                 editUrl: typeof integration.edit_url === 'string' ? integration.edit_url : '',
                 deleteUrl: typeof integration.delete_url === 'string' ? integration.delete_url : '',
@@ -340,6 +523,11 @@
             const selectedMetricPrometheusId = metricPrometheusConfigs.some(
                 (config) => config.id === requestedPrometheusId
             ) ? requestedPrometheusId : '';
+            const metricAlertmanagerConfigs = normalizeMetricPrometheusConfigs(pageData.alertmanager_configs);
+            const requestedAlertmanagerId = normalizeMetricPrometheusId(pageData.selected_alertmanager_id);
+            const selectedMetricAlertmanagerId = metricAlertmanagerConfigs.some(
+                (config) => config.id === requestedAlertmanagerId
+            ) ? requestedAlertmanagerId : '';
             const monitorPrometheusIntegrations = monitorIntegrationList(
                 pageData, 'prometheus_integrations', 'prometheus'
             );
@@ -362,6 +550,11 @@
             const alertNotificationIntegrations = normalizeAlertNotificationIntegrations(
                 pageData.notification_integrations
             );
+            const dashboardPrometheusConfigs = normalizeMetricPrometheusConfigs(pageData.prometheus_configs);
+            const requestedDashboardPrometheusId = normalizeMetricPrometheusId(pageData.selected_prometheus_id);
+            const selectedDashboardPrometheusId = dashboardPrometheusConfigs.some(
+                (config) => config.id === requestedDashboardPrometheusId
+            ) ? requestedDashboardPrometheusId : (dashboardPrometheusConfigs[0] ? dashboardPrometheusConfigs[0].id : '');
             return {
                 kind: payload.kind,
                 title: payload.title,
@@ -377,12 +570,15 @@
                 metricResources: {
                     targets: metricResourceState('targets'),
                     rules: metricResourceState('rules'),
+                    alerts: metricResourceState('alerts'),
                 },
                 metricResourceFilters: { targets: '', rules: '' },
                 expandedTargetCells: { name: [], instance: [], job: [], scrapePool: [], labels: [] },
                 expandedRuleCells: { query: [], labels: [] },
                 metricPrometheusConfigs,
                 selectedMetricPrometheusId,
+                metricAlertmanagerConfigs,
+                selectedMetricAlertmanagerId,
                 monitorPrometheusIntegrations,
                 monitorAlertmanagerIntegrations,
                 monitorIntegrationKind: initialIntegrationKind,
@@ -400,6 +596,23 @@
                     ? 'feishu'
                     : 'wecom',
                 alertNotificationQuery: '',
+                dashboardPrometheusConfigs,
+                selectedDashboardPrometheusId,
+                dashboardData: normalizeDashboardData(pageData),
+                dashboardTab: 'nodes',
+                selectedDashboardNodes: [],
+                dashboardNodeMenuOpen: false,
+                dashboardNodeQuery: '',
+                dashboardSelectMenu: '',
+                dashboardMetric: 'cpu',
+                dashboardStatus: 'all',
+                dashboardSort: 'metric-desc',
+                dashboardCluster: 'all',
+                dashboardNamespace: 'all',
+                dashboardLoading: false,
+                dashboardLoaded: Boolean(Array.isArray(pageData.hosts) || Array.isArray(pageData.pods)),
+                dashboardError: false,
+                dashboardRequestVersion: 0,
             };
         },
         computed: {
@@ -411,7 +624,7 @@
                 return this.data.errors || [];
             },
             monitorIntegrations() {
-                return Array.isArray(this.data.integrations) ? this.data.integrations : [];
+                return this.monitorPrometheusIntegrations.concat(this.monitorAlertmanagerIntegrations);
             },
             monitorIntegrationGroups() {
                 return [
@@ -452,6 +665,14 @@
                         enabledText,
                     ].some((value) => String(value || '').toLowerCase().indexOf(query) !== -1);
                 });
+            },
+            monitorIntegrationEnabledCount() {
+                return this.monitorIntegrationGroups.reduce((count, group) => (
+                    count + group.items.filter((integration) => integration.enabled).length
+                ), 0);
+            },
+            monitorIntegrationTotalCount() {
+                return this.monitorIntegrationGroups.reduce((count, group) => count + group.items.length, 0);
             },
             canConfigureNotifications() {
                 if (this.data.can_manage_notifications !== undefined) {
@@ -530,11 +751,16 @@
                     (config) => config.id === this.selectedMetricPrometheusId
                 ) || null;
             },
+            selectedMetricAlertmanager() {
+                return this.metricAlertmanagerConfigs.find(
+                    (config) => config.id === this.selectedMetricAlertmanagerId
+                ) || null;
+            },
             metricQueryLoading() {
                 return this.queryPanels.some((panel) => panel.loading);
             },
             metricResourceLoading() {
-                return this.metricResources.targets.loading || this.metricResources.rules.loading;
+                return this.metricResources.targets.loading || this.metricResources.rules.loading || this.metricResources.alerts.loading;
             },
             metricSourceLocked() {
                 return this.metricQueryLoading || this.metricResourceLoading;
@@ -542,11 +768,71 @@
             canExecuteMetricQuery() {
                 return Boolean(this.data.prometheus_configured && this.selectedMetricPrometheus);
             },
+            canExecuteMetricAlerts() {
+                return Boolean(this.data.alertmanager_configured && this.selectedMetricAlertmanager);
+            },
             filteredMetricTargets() {
                 return this.filterMetricResourceRows('targets', this.metricResources.targets.rows);
             },
             filteredMetricRules() {
                 return this.filterMetricResourceRows('rules', this.metricResources.rules.rows);
+            },
+            filteredMetricAlerts() {
+                return this.filterMetricResourceRows('alerts', this.metricResources.alerts.rows);
+            },
+            selectedDashboardPrometheus() {
+                return this.dashboardPrometheusConfigs.find(
+                    (config) => config.id === this.selectedDashboardPrometheusId
+                ) || null;
+            },
+            dashboardClusters() {
+                return Array.from(new Set(this.dashboardData.pods.map((row) => row.cluster).filter(Boolean))).sort();
+            },
+            dashboardNodeOptions() {
+                // Keep Prometheus response order so the default is its first returned node.
+                return Array.from(new Set(this.dashboardData.hosts.map((row) => row.name).filter(Boolean)));
+            },
+            dashboardFilteredNodeOptions() {
+                const query = this.dashboardNodeQuery.trim().toLocaleLowerCase();
+                if (!query) return this.dashboardNodeOptions;
+                return this.dashboardNodeOptions.filter((node) => node.toLocaleLowerCase().indexOf(query) !== -1);
+            },
+            dashboardNodeSelectionLabel() {
+                const selected = this.selectedDashboardNodes.length;
+                if (!selected) return '未选择节点';
+                if (selected === 1) return this.selectedDashboardNodes[0];
+                return '已选择 ' + selected + ' 个节点';
+            },
+            dashboardMaxIoRate() {
+                return Math.max(1, ...this.dashboardData.hosts.reduce((values, row) => (
+                    values.concat([row.ioRead || 0, row.ioWrite || 0])
+                ), []));
+            },
+            dashboardNamespaces() {
+                return Array.from(new Set(this.dashboardData.pods.filter((row) => (
+                    this.dashboardCluster === 'all' || row.cluster === this.dashboardCluster
+                )).map((row) => row.namespace).filter(Boolean))).sort();
+            },
+            dashboardActiveRows() {
+                return this.dashboardRows(this.dashboardTab === 'nodes' ? 'hosts' : 'pods');
+            },
+            dashboardTotalRows() {
+                return this.dashboardActiveRows.length;
+            },
+            dashboardHealthyPods() {
+                return this.dashboardData.pods.filter((row) => dashboardStatus(row && row.status) === 'healthy').length;
+            },
+            dashboardMetricLabel() {
+                return { cpu: 'CPU', memory: '内存', disk: '磁盘' }[this.dashboardMetric] || 'CPU';
+            },
+            dashboardPodFilterDefinitions() {
+                return [
+                    { key: 'cluster', label: '集群' },
+                    { key: 'namespace', label: '命名空间' },
+                    { key: 'metric', label: '指标类型' },
+                    { key: 'status', label: 'Pod 状态' },
+                    { key: 'sort', label: '排序方式' },
+                ];
             },
         },
         methods: {
@@ -587,6 +873,170 @@
             metric(value) {
                 if (value === null || value === undefined || value === '') return '-';
                 return value;
+            },
+            dashboardRows(kind) {
+                const rows = kind === 'hosts' ? this.dashboardData.hosts : this.dashboardData.pods;
+                const metric = this.dashboardMetric;
+                const status = this.dashboardStatus;
+                const sorted = rows.filter((row) => {
+                    if (kind === 'hosts') return this.selectedDashboardNodes.indexOf(row.name) !== -1;
+                    return (status === 'all' || row.status === status)
+                        && (this.dashboardCluster === 'all' || row.cluster === this.dashboardCluster)
+                        && (this.dashboardNamespace === 'all' || row.namespace === this.dashboardNamespace);
+                }).slice();
+                sorted.sort((left, right) => {
+                    if (kind === 'hosts') return left.name.localeCompare(right.name, 'zh-CN');
+                    if (this.dashboardSort === 'name-asc') return left.name.localeCompare(right.name, 'zh-CN');
+                    if (this.dashboardSort === 'name-desc') return right.name.localeCompare(left.name, 'zh-CN');
+                    const leftValue = left[metric] === null ? -1 : left[metric];
+                    const rightValue = right[metric] === null ? -1 : right[metric];
+                    return this.dashboardSort === 'metric-asc' ? leftValue - rightValue : rightValue - leftValue;
+                });
+                return sorted;
+            },
+            dashboardMetricText(value) {
+                return value === null || value === undefined ? '-' : Number(value).toFixed(1).replace(/\.0$/, '') + '%';
+            },
+            dashboardBarWidth(value) {
+                return value === null || value === undefined ? 0 : Math.max(0, Math.min(100, Number(value)));
+            },
+            dashboardGaugeStyle(value, color) {
+                const percent = this.dashboardBarWidth(value);
+                return { background: 'conic-gradient(' + color + ' ' + percent + '%, #12303e ' + percent + '%)' };
+            },
+            dashboardIoHeight(value) {
+                if (value === null || value === undefined) return '2%';
+                return Math.max(6, Math.min(100, Number(value) / this.dashboardMaxIoRate * 100)) + '%';
+            },
+            dashboardLoadWidth(row, period) {
+                const value = row.loadRaw && row.loadRaw[period];
+                const cpu = row.resources && row.resources.find((item) => item.key === 'cpu');
+                const cores = cpu && Number(String(cpu.total || '').replace(/[^0-9.]/g, ''));
+                if (value === null || value === undefined) return '0%';
+                return Math.max(4, Math.min(100, Number(value) / (cores || 1) * 100)) + '%';
+            },
+            dashboardStatusLabel(status) {
+                return { healthy: '正常', warning: '待确认', critical: '异常', unknown: '未知' }[status] || '未知';
+            },
+            dashboardStatusClass(status) {
+                return status === 'healthy' ? 'is-healthy' : status === 'warning' ? 'is-warning'
+                    : status === 'critical' ? 'is-critical' : 'is-unknown';
+            },
+            dashboardFilterOptions(key) {
+                if (key === 'prometheus') return this.dashboardPrometheusConfigs.map((config) => ({ value: config.id, label: config.name }));
+                if (key === 'cluster') return [{ value: 'all', label: '全部集群' }].concat(this.dashboardClusters.map((value) => ({ value, label: value })));
+                if (key === 'namespace') return [{ value: 'all', label: '全部命名空间' }].concat(this.dashboardNamespaces.map((value) => ({ value, label: value })));
+                if (key === 'metric') return [{ value: 'cpu', label: 'CPU' }, { value: 'memory', label: '内存' }, { value: 'disk', label: '磁盘' }];
+                if (key === 'status') return [{ value: 'all', label: '全部状态' }, { value: 'healthy', label: '正常' }, { value: 'warning', label: '待确认' }, { value: 'critical', label: '异常' }, { value: 'unknown', label: '未知' }];
+                if (key === 'sort') return [{ value: 'metric-desc', label: '指标从高到低' }, { value: 'metric-asc', label: '指标从低到高' }, { value: 'name-asc', label: '名称 A-Z' }, { value: 'name-desc', label: '名称 Z-A' }];
+                return [];
+            },
+            dashboardFilterValue(key) {
+                return key === 'prometheus' ? this.selectedDashboardPrometheusId : this['dashboard' + key.charAt(0).toUpperCase() + key.slice(1)];
+            },
+            dashboardFilterLabel(key) {
+                const selected = this.dashboardFilterOptions(key).find((option) => option.value === this.dashboardFilterValue(key));
+                return selected ? selected.label : '请选择';
+            },
+            toggleDashboardSelect(key) {
+                this.dashboardSelectMenu = this.dashboardSelectMenu === key ? '' : key;
+            },
+            closeDashboardSelect() {
+                this.dashboardSelectMenu = '';
+            },
+            chooseDashboardFilter(key, value) {
+                if (key === 'prometheus') {
+                    this.selectedDashboardPrometheusId = value;
+                    this.changeDashboardPrometheus();
+                } else {
+                    this['dashboard' + key.charAt(0).toUpperCase() + key.slice(1)] = value;
+                    if (key === 'cluster') this.changeDashboardCluster();
+                }
+                this.closeDashboardSelect();
+            },
+            syncDashboardNodeSelection() {
+                const available = this.dashboardNodeOptions;
+                const selected = this.selectedDashboardNodes.filter((node) => available.indexOf(node) !== -1);
+                this.selectedDashboardNodes = selected.length ? selected : (available.length ? [available[0]] : []);
+            },
+            toggleDashboardNodeMenu() {
+                this.dashboardNodeMenuOpen = !this.dashboardNodeMenuOpen;
+                if (this.dashboardNodeMenuOpen) {
+                    this.$nextTick(() => {
+                        const input = this.$refs.dashboardNodeSearch;
+                        if (input) input.focus();
+                    });
+                }
+            },
+            closeDashboardNodeMenu() {
+                this.dashboardNodeMenuOpen = false;
+                this.dashboardNodeQuery = '';
+            },
+            selectAllDashboardNodes() {
+                this.selectedDashboardNodes = this.dashboardNodeOptions.slice();
+            },
+            clearDashboardNodes() {
+                this.selectedDashboardNodes = [];
+            },
+            handleDashboardDocumentClick(event) {
+                if (this.dashboardNodeMenuOpen) {
+                    const menu = this.$refs.dashboardNodeMultiSelect;
+                    if (menu && !menu.contains(event.target)) this.closeDashboardNodeMenu();
+                }
+                if (this.dashboardSelectMenu && !event.target.closest('.ops-dashboard-select')) this.closeDashboardSelect();
+            },
+            setDashboardTab(tab) {
+                this.dashboardTab = tab === 'pods' ? 'pods' : 'nodes';
+            },
+            changeDashboardCluster() {
+                if (this.dashboardNamespace !== 'all' && this.dashboardNamespaces.indexOf(this.dashboardNamespace) === -1) {
+                    this.dashboardNamespace = 'all';
+                }
+            },
+            async loadDashboard(force) {
+                if (this.kind !== 'monitor-dashboard' || this.dashboardLoading) return;
+                if (!force && this.dashboardLoaded) return;
+                const selected = this.selectedDashboardPrometheus;
+                if (!selected || typeof this.data.dashboard_url !== 'string' || !this.data.dashboard_url) {
+                    this.dashboardError = true;
+                    this.dashboardLoaded = true;
+                    return;
+                }
+                const requestVersion = this.dashboardRequestVersion + 1;
+                this.dashboardRequestVersion = requestVersion;
+                this.dashboardLoading = true;
+                this.dashboardError = false;
+                const form = new URLSearchParams();
+                form.set('prometheus_id', selected.id);
+                try {
+                    const body = await this.fetchMetricJson(this.data.dashboard_url, form, 'dashboard');
+                    if (this.dashboardRequestVersion !== requestVersion
+                            || this.selectedDashboardPrometheusId !== selected.id
+                            || normalizeMetricPrometheusId(body.prometheus_id) !== selected.id) return;
+                    this.dashboardData = normalizeDashboardData(body.dashboard || body);
+                    this.syncDashboardNodeSelection();
+                    this.dashboardLoaded = true;
+                } catch (error) {
+                    if (this.dashboardRequestVersion !== requestVersion) return;
+                    this.dashboardData = normalizeDashboardData({});
+                    this.dashboardLoaded = true;
+                    this.dashboardError = true;
+                } finally {
+                    if (this.dashboardRequestVersion === requestVersion) this.dashboardLoading = false;
+                }
+            },
+            changeDashboardPrometheus() {
+                const selectedId = normalizeMetricPrometheusId(this.selectedDashboardPrometheusId);
+                this.selectedDashboardPrometheusId = this.dashboardPrometheusConfigs.some((item) => item.id === selectedId)
+                    ? selectedId : (this.dashboardPrometheusConfigs[0] ? this.dashboardPrometheusConfigs[0].id : '');
+                this.dashboardLoaded = false;
+                this.dashboardError = false;
+                this.dashboardData = normalizeDashboardData({});
+                this.selectedDashboardNodes = [];
+                this.dashboardNodeMenuOpen = false;
+                this.dashboardNodeQuery = '';
+                this.dashboardSelectMenu = '';
+                this.loadDashboard(true);
             },
             addMetricQueryPanel() {
                 const panel = metricQueryPanel(this.nextQueryPanelId, '', null, '');
@@ -686,9 +1136,9 @@
             metricSuggestionCatalog(metrics, token) {
                 const state = this.metricMetadataState(this.selectedMetricPrometheusId);
                 const labels = state && Array.isArray(state.labels) ? state.labels : [];
-                const normalizedToken = typeof token === 'string' ? token.toLowerCase() : '';
-                const matches = (item) => !normalizedToken
-                    || item.query.toLowerCase().indexOf(normalizedToken) !== -1;
+                token = typeof token === 'string' ? token.toLowerCase() : '';
+                const matches = (item) => !token
+                    || item.query.toLowerCase().indexOf(token) !== -1;
                 const metricSuggestions = (Array.isArray(metrics) ? metrics : [])
                     .map((name) => ({ kind: 'metric', label: '指标', query: name }));
                 const supportingSuggestions = labels
@@ -702,8 +1152,7 @@
                 if (!selectedPrometheus) return;
                 const id = selectedPrometheus.id;
                 const existing = this.metricMetadataState(id);
-                if (existing && existing.loaded) return;
-                if (existing && existing.loading) return this.metricMetadataRequests[id];
+                if (existing && (existing.loading || existing.loaded)) return;
                 const state = { loading: true, loaded: false, metrics: [], labels: [], error: '' };
                 this.metricMetadataCache[id] = state;
                 const form = new URLSearchParams();
@@ -901,7 +1350,7 @@
                 });
             },
             changeMetricView(view) {
-                if (['promql', 'targets', 'rules'].indexOf(view) === -1) return;
+                if (['promql', 'targets', 'rules', 'alerts'].indexOf(view) === -1) return;
                 this.metricView = view;
                 if (view !== 'promql' && !this.metricResources[view].loaded
                         && !this.metricResources[view].loading) {
@@ -910,7 +1359,7 @@
             },
             handleMetricTabKeydown(event, currentView) {
                 if (!event) return;
-                const views = ['promql', 'targets', 'rules'];
+                const views = ['promql', 'targets', 'rules', 'alerts'];
                 const currentIndex = views.indexOf(currentView);
                 if (currentIndex === -1) return;
                 let nextIndex = null;
@@ -950,13 +1399,25 @@
                 });
                 this.clearMetricResource('targets');
                 this.clearMetricResource('rules');
+                if (this.metricView === 'alerts') return;
                 if (this.metricView !== 'promql' && this.selectedMetricPrometheus) {
                     this.loadMetricResource(this.metricView, true);
+                }
+            },
+            changeMetricAlertmanager() {
+                const selectedId = normalizeMetricPrometheusId(this.selectedMetricAlertmanagerId);
+                this.selectedMetricAlertmanagerId = this.metricAlertmanagerConfigs.some(
+                    (config) => config.id === selectedId
+                ) ? selectedId : '';
+                this.clearMetricResource('alerts');
+                if (this.metricView === 'alerts' && this.selectedMetricAlertmanager) {
+                    this.loadMetricResource('alerts', true);
                 }
             },
             async fetchMetricJson(url, form, context) {
                 const queryContext = context === 'query';
                 const metadataContext = context === 'metadata';
+                const dashboardContext = context === 'dashboard';
                 const messages = queryContext ? {
                     missing: '指标查询接口不可用，请刷新页面后重试',
                     forbidden: '当前账号无权执行指标查询',
@@ -969,6 +1430,12 @@
                     format: '指标提示响应格式异常',
                     unavailable: '指标提示服务暂时不可用',
                     failed: '指标提示加载失败',
+                } : dashboardContext ? {
+                    missing: '监控看板接口不可用，请刷新页面后重试',
+                    forbidden: '当前账号无权查看监控看板',
+                    format: '监控看板响应格式异常，请稍后重试',
+                    unavailable: '监控看板暂时不可用，请稍后重试',
+                    failed: '监控看板加载失败',
                 } : {
                     missing: '指标资源接口不可用，请刷新页面后重试',
                     forbidden: '当前账号无权查看指标资源',
@@ -1028,13 +1495,22 @@
                 );
             },
             async loadMetricResource(kind, force) {
-                if (kind !== 'targets' && kind !== 'rules') return;
+                if (['targets', 'rules', 'alerts'].indexOf(kind) === -1) return;
                 const state = this.metricResources[kind];
                 if (state.loading || (state.loaded && !force)) return;
                 if (force) this.resetMetricResourceUi(kind);
                 const selectedPrometheus = this.selectedMetricPrometheus;
+                const selectedAlertmanager = this.selectedMetricAlertmanager;
                 const empty = emptyMetricResourceData(kind);
-                if (!this.data.prometheus_configured || !this.metricPrometheusConfigs.length) {
+                if (kind === 'alerts' && (!this.data.alertmanager_configured || !this.metricAlertmanagerConfigs.length)) {
+                    Object.assign(state, empty, { loaded: true, error: '请先配置并启用 Alertmanager 对接', durationMs: null });
+                    return;
+                }
+                if (kind === 'alerts' && !selectedAlertmanager) {
+                    Object.assign(state, empty, { loaded: true, error: '请选择 Alertmanager 连接', durationMs: null });
+                    return;
+                }
+                if (kind !== 'alerts' && (!this.data.prometheus_configured || !this.metricPrometheusConfigs.length)) {
                     Object.assign(state, empty, {
                         loaded: true,
                         error: '请先配置并启用 Prometheus 对接',
@@ -1042,7 +1518,7 @@
                     });
                     return;
                 }
-                if (!selectedPrometheus) {
+                if (kind !== 'alerts' && !selectedPrometheus) {
                     Object.assign(state, empty, {
                         loaded: true,
                         error: '请选择 Prometheus 连接',
@@ -1051,8 +1527,8 @@
                     return;
                 }
 
-                const endpoint = kind === 'targets' ? this.data.targets_url : this.data.rules_url;
-                const requestedPrometheusId = selectedPrometheus.id;
+                const endpoint = kind === 'targets' ? this.data.targets_url : kind === 'rules' ? this.data.rules_url : this.data.alerts_url;
+                const requestedSourceId = kind === 'alerts' ? selectedAlertmanager.id : selectedPrometheus.id;
                 const requestVersion = state.requestVersion + 1;
                 const startedAt = Date.now();
                 Object.assign(state, empty, {
@@ -1063,16 +1539,17 @@
                     requestVersion,
                 });
                 const form = new URLSearchParams();
-                form.set('prometheus_id', requestedPrometheusId);
+                form.set(kind === 'alerts' ? 'alertmanager_id' : 'prometheus_id', requestedSourceId);
                 try {
                     const body = await this.fetchMetricJson(endpoint, form, 'resource');
                     if (state.requestVersion !== requestVersion) return;
-                    if (!this.metricResponseSourceIsCurrent(body, requestedPrometheusId)) {
+                    const sourceKey = kind === 'alerts' ? 'alertmanager_id' : 'prometheus_id';
+                    const selectedSource = kind === 'alerts' ? this.selectedMetricAlertmanagerId : this.selectedMetricPrometheusId;
+                    if (normalizeMetricPrometheusId(body[sourceKey]) !== requestedSourceId || selectedSource !== requestedSourceId) {
                         throw new Error('指标资源来源不一致，请重新加载');
                     }
-                    const normalized = kind === 'targets'
-                        ? normalizeMetricTargets(body.targets)
-                        : normalizeMetricRules(body.rules);
+                    const normalized = kind === 'targets' ? normalizeMetricTargets(body.targets)
+                        : kind === 'rules' ? normalizeMetricRules(body.rules) : normalizeMetricAlerts(body.alerts);
                     Object.assign(state, normalized, { loaded: true, error: '' });
                 } catch (error) {
                     if (state.requestVersion !== requestVersion) return;
@@ -1186,7 +1663,10 @@
                     : '';
                 const fields = kind === 'targets'
                     ? [row.name, row.instance, row.job, row.scrapePool, row.health, labels]
-                    : [row.group, row.name, row.type, row.state, row.health, row.query, labels];
+                    : kind === 'alerts'
+                        ? [row.name, row.status, row.startsAt, row.updatedAt, row.endsAt, labels,
+                            Array.isArray(row.annotations) ? row.annotations.map((label) => label.name + '=' + label.value).join(' ') : '']
+                        : [row.group, row.name, row.type, row.state, row.health, row.query, labels];
                 return fields.map((value) => value || '').join(' ').toLocaleLowerCase();
             },
             filterMetricResourceRows(kind, rows) {
@@ -1272,6 +1752,15 @@
                         <button class="btn btn-primary" type="submit">登录</button>
                         <a href="/register/">注册账号</a>
                     </form>
+                    <div v-if="data.external_auth && (data.external_auth.oidc_available || data.external_auth.ldap_available)" class="ops-auth-external">
+                        <a v-if="data.external_auth.oidc_available" class="btn btn-outline-primary" href="/auth/oidc/start/">使用企业单点登录</a>
+                        <form v-if="data.external_auth.ldap_available" class="ops-form" method="post" action="/auth/ldap/" @submit="submitForm">
+                            <input type="hidden" name="csrfmiddlewaretoken" :value="data.csrf">
+                            <div><label class="form-label">LDAP 用户名</label><input class="form-control" name="username" autocomplete="username"></div>
+                            <div><label class="form-label">LDAP 密码</label><input class="form-control" name="password" type="password" autocomplete="current-password"></div>
+                            <button class="btn btn-outline-primary" type="submit">使用 LDAP 登录</button>
+                        </form>
+                    </div>
                 </section>
 
                 <section v-else-if="kind === 'auth-register'" class="ops-panel">
@@ -1297,6 +1786,75 @@
 
                 <section v-else-if="kind === 'local-linux'" class="ops-grid three">
                     <div class="ops-card" v-for="item in data.items" :key="item.label"><div class="ops-card-label">[[ item.label ]]</div><div class="ops-card-value">[[ item.value ]]</div></div>
+                </section>
+
+                <section v-else-if="kind === 'monitor-dashboard'" class="fcc-shell" :aria-busy="dashboardLoading ? 'true' : 'false'">
+                    <aside class="fcc-rail">
+                        <div class="fcc-brand"><span class="fcc-brand-mark"><i class="fas fa-atom" aria-hidden="true"></i></span><div><b>中枢</b><span>控制台 / 01</span></div></div>
+                        <div class="fcc-rail-line"></div>
+                        <div class="fcc-source"><span class="fcc-label">信号源</span><div class="ops-dashboard-select" :class="{ 'is-open': dashboardSelectMenu === 'prometheus' }" @keydown.esc="closeDashboardSelect"><button type="button" class="ops-dashboard-select-trigger" :disabled="dashboardLoading || !dashboardPrometheusConfigs.length" :aria-expanded="dashboardSelectMenu === 'prometheus' ? 'true' : 'false'" aria-haspopup="listbox" @click="toggleDashboardSelect('prometheus')"><span>[[ dashboardFilterLabel('prometheus') ]]</span><i class="fas fa-chevron-down" aria-hidden="true"></i></button><div v-if="dashboardSelectMenu === 'prometheus'" class="ops-dashboard-select-menu" role="listbox"><button v-for="option in dashboardFilterOptions('prometheus')" :key="option.value" type="button" class="ops-dashboard-select-option" :class="{ 'is-selected': option.value === dashboardFilterValue('prometheus') }" role="option" :aria-selected="option.value === dashboardFilterValue('prometheus') ? 'true' : 'false'" @click="chooseDashboardFilter('prometheus', option.value)">[[ option.label ]]</button></div></div></div>
+                        <div class="fcc-mode"><span class="fcc-label">视图层</span><button type="button" :class="{ 'is-active': dashboardTab === 'nodes' }" @click="setDashboardTab('nodes')"><i class="fas fa-server" aria-hidden="true"></i><span>节点矩阵</span></button><button type="button" :class="{ 'is-active': dashboardTab === 'pods' }" @click="setDashboardTab('pods')"><i class="fas fa-cubes" aria-hidden="true"></i><span>Pod 阵列</span></button></div>
+                        <div class="fcc-rail-stats"><div><span>主机</span><strong>[[ dashboardData.hosts.length ]]</strong></div><div><span>Pod</span><strong>[[ dashboardData.pods.length ]]</strong></div><div><span>可见资源</span><strong>[[ dashboardTotalRows ]]</strong></div></div>
+                        <button type="button" class="fcc-refresh" :disabled="dashboardLoading || !selectedDashboardPrometheus" @click="loadDashboard(true)"><i class="fas" :class="dashboardLoading ? 'fa-spinner fa-spin' : 'fa-sync-alt'" aria-hidden="true"></i><span>同步遥测</span></button>
+                    </aside>
+                    <main class="fcc-main">
+                        <header class="fcc-hero"><div><span class="fcc-kicker"><i class="fas fa-circle" aria-hidden="true"></i> 实时基础设施信号</span><h1>运行态势总览</h1><p>实时观测每一条计算资源与工作负载信号</p></div><div class="fcc-link"><span>遥测链路</span><strong>[[ dashboardLoading ? '同步中' : '稳定' ]]</strong><i class="fas fa-satellite-dish" aria-hidden="true"></i></div></header>
+                        <section class="fcc-metrics"><article><i class="fas fa-microchip" aria-hidden="true"></i><span>节点容量</span><strong>[[ dashboardData.hosts.length ]]</strong><em>已登记节点</em></article><article><i class="fas fa-cubes" aria-hidden="true"></i><span>工作负载</span><strong>[[ dashboardData.pods.length ]]</strong><em>活跃 Pod</em></article><article><i class="fas fa-shield-alt" aria-hidden="true"></i><span>健康 Pod</span><strong>[[ dashboardHealthyPods ]]</strong><em>就绪信号</em></article><article><i class="fas fa-eye" aria-hidden="true"></i><span>当前视图</span><strong>[[ dashboardTotalRows ]]</strong><em>筛选资源</em></article></section>
+                        <section class="fcc-filter-zone" aria-label="看板筛选">
+                            <div v-if="dashboardTab === 'nodes'" ref="dashboardNodeMultiSelect" class="ops-dashboard-node-filter fcc-node-filter" @keydown.esc="closeDashboardNodeMenu"><span class="fcc-label">目标节点</span><button type="button" class="ops-dashboard-node-trigger" :aria-expanded="dashboardNodeMenuOpen ? 'true' : 'false'" aria-haspopup="true" @click="toggleDashboardNodeMenu"><i class="fas fa-crosshairs" aria-hidden="true"></i><span>[[ dashboardNodeSelectionLabel ]]</span><i class="fas fa-chevron-down ops-dashboard-node-chevron" :class="{ 'is-open': dashboardNodeMenuOpen }" aria-hidden="true"></i></button><div v-if="dashboardNodeMenuOpen" class="ops-dashboard-node-menu" role="group" aria-label="选择节点"><div class="ops-dashboard-node-menu-actions"><button type="button" @click="selectAllDashboardNodes">全选</button><button type="button" @click="clearDashboardNodes">清空</button></div><div class="ops-dashboard-node-search"><i class="fas fa-search" aria-hidden="true"></i><input ref="dashboardNodeSearch" v-model="dashboardNodeQuery" type="search" autocomplete="off" placeholder="搜索节点"></div><label v-for="node in dashboardFilteredNodeOptions" :key="node" class="ops-dashboard-node-option"><input v-model="selectedDashboardNodes" type="checkbox" :value="node"><span>[[ node ]]</span></label><div v-if="!dashboardNodeOptions.length" class="ops-dashboard-node-menu-empty">暂无可用节点</div><div v-else-if="!dashboardFilteredNodeOptions.length" class="ops-dashboard-node-menu-empty">未找到匹配节点</div></div></div>
+                            <div v-if="dashboardTab === 'pods'" v-for="filter in dashboardPodFilterDefinitions" :key="filter.key" class="ops-dashboard-select fcc-pod-filter" :class="{ 'is-open': dashboardSelectMenu === filter.key }" @keydown.esc="closeDashboardSelect"><span class="fcc-label">[[ filter.label ]]</span><button type="button" class="ops-dashboard-select-trigger" :aria-expanded="dashboardSelectMenu === filter.key ? 'true' : 'false'" aria-haspopup="listbox" @click="toggleDashboardSelect(filter.key)"><span>[[ dashboardFilterLabel(filter.key) ]]</span><i class="fas fa-chevron-down" aria-hidden="true"></i></button><div v-if="dashboardSelectMenu === filter.key" class="ops-dashboard-select-menu" role="listbox"><button v-for="option in dashboardFilterOptions(filter.key)" :key="option.value" type="button" class="ops-dashboard-select-option" :class="{ 'is-selected': option.value === dashboardFilterValue(filter.key) }" role="option" :aria-selected="option.value === dashboardFilterValue(filter.key) ? 'true' : 'false'" @click="chooseDashboardFilter(filter.key, option.value)">[[ option.label ]]</button></div></div>
+                        </section>
+                        <section v-if="dashboardLoading" class="fcc-state"><i class="fas fa-satellite-dish fa-spin" aria-hidden="true"></i><span>正在接收遥测信号</span></section><section v-else-if="dashboardError" class="fcc-state is-error"><i class="fas fa-triangle-exclamation" aria-hidden="true"></i><span>遥测链路暂时不可用</span></section><section v-else-if="!dashboardPrometheusConfigs.length" class="fcc-state"><i class="fas fa-plug" aria-hidden="true"></i><span>暂无已启用的 Prometheus 对接</span></section>
+                        <section v-else class="fcc-target-zone"><header><div><span class="fcc-kicker">[[ dashboardTab === 'nodes' ? '计算资源域' : '工作负载域' ]]</span><h2>[[ dashboardTab === 'nodes' ? '节点资源矩阵' : 'Pod 工作负载矩阵' ]]</h2></div><span>[[ dashboardActiveRows.length ]] 个目标</span></header><div v-if="dashboardActiveRows.length" class="fcc-target-grid"><article v-for="row in dashboardActiveRows" :key="row.id" class="fcc-target"><div class="fcc-target-head"><div><span class="fcc-target-type">[[ dashboardTab === 'nodes' ? '节点' : 'Pod' ]]</span><strong>[[ row.name ]]</strong><small>[[ dashboardTab === 'nodes' ? '计算实例' : row.cluster + ' / ' + row.namespace ]]</small></div><span class="fcc-health" :class="dashboardStatusClass(row.status)">[[ dashboardStatusLabel(row.status) ]]</span></div><template v-if="dashboardTab === 'nodes'"><div class="fcc-node-cpu"><div class="fcc-ring" :style="dashboardGaugeStyle(row.cpu, '#4df3e1')"><strong>[[ dashboardMetricText(row.cpu) ]]</strong></div><div><b>CPU 使用率</b><strong>[[ dashboardMetricText(row.cpu) ]]</strong><span v-for="resource in row.resources.filter((item) => item.key === 'cpu')" :key="resource.key">总核数 [[ resource.total ]]</span></div></div><div class="fcc-resource-grid"><section v-for="resource in row.resources.filter((item) => item.key === 'memory' || item.key === 'disk')" :key="resource.key" class="fcc-resource"><div class="fcc-resource-head"><b>[[ resource.label ]]</b><strong>使用率 [[ dashboardMetricText(resource.key === 'memory' ? row.memory : row.disk) ]]</strong></div><i><b :style="{ width: dashboardBarWidth(resource.key === 'memory' ? row.memory : row.disk) + '%' }"></b></i><div class="fcc-resource-values"><span>总量 <strong>[[ resource.total ]]</strong></span><span>已用 <strong>[[ resource.used ]]</strong></span><span>剩余 <strong>[[ resource.remaining ]]</strong></span></div></section></div><section class="fcc-io"><div><b>磁盘 I/O</b><span>实时读写速率</span></div><dl><div><dt>读</dt><dd>[[ row.io.read ]]</dd></div><div><dt>写</dt><dd>[[ row.io.write ]]</dd></div></dl></section><div class="fcc-footer"><span>系统负载</span><strong>1m [[ row.load.one ]] / 5m [[ row.load.five ]] / 15m [[ row.load.fifteen ]]</strong></div></template><template v-else><div class="fcc-gauge"><div class="fcc-ring" :style="dashboardGaugeStyle(row.cpu, '#4df3e1')"><strong>[[ dashboardMetricText(row.cpu) ]]</strong></div><span>CPU 使用率</span></div><div class="fcc-bars"><div><span>内存</span><i><b :style="{ width: dashboardBarWidth(row.memory) + '%' }"></b></i><strong>[[ dashboardMetricText(row.memory) ]]</strong></div></div><div class="fcc-footer"><span>[[ dashboardMetricLabel ]]</span><strong>[[ dashboardMetricText(row[dashboardMetric]) ]]</strong></div></template></article></div><div v-else class="fcc-empty">当前筛选条件下没有可展示的资源</div></section>
+                    </main>
+                </section>
+
+                <section v-else-if="kind === 'monitor-dashboard-legacy'" class="ops-monitor-dashboard" :aria-busy="dashboardLoading ? 'true' : 'false'">
+                    <header class="cc-masthead">
+                        <div class="cc-masthead-mark"><i class="fas fa-broadcast-tower" aria-hidden="true"></i><span>NETWORK OPERATIONS CENTER</span></div>
+                        <div class="cc-masthead-title"><span>OBSERVABILITY / 01</span><h1>系统态势指挥台</h1><p>实时资源遥测与工作负载健康状态</p></div>
+                        <div class="cc-masthead-state"><i class="fas fa-circle" aria-hidden="true"></i><div><span>TELEMETRY LINK</span><strong>[[ dashboardLoading ? 'SYNCHRONIZING' : 'ONLINE' ]]</strong></div></div>
+                    </header>
+                    <div class="ops-dashboard-controlbar cc-consolebar">
+                        <div class="ops-dashboard-source"><label id="monitor-dashboard-prometheus-label"><i class="fas fa-satellite-dish" aria-hidden="true"></i>数据源 / PROMETHEUS</label><div class="ops-dashboard-select" :class="{ 'is-open': dashboardSelectMenu === 'prometheus' }" @keydown.esc="closeDashboardSelect"><button type="button" class="ops-dashboard-select-trigger" :disabled="dashboardLoading || !dashboardPrometheusConfigs.length" :aria-expanded="dashboardSelectMenu === 'prometheus' ? 'true' : 'false'" aria-haspopup="listbox" aria-labelledby="monitor-dashboard-prometheus-label" @click="toggleDashboardSelect('prometheus')"><span>[[ dashboardFilterLabel('prometheus') ]]</span><i class="fas fa-chevron-down" aria-hidden="true"></i></button><div v-if="dashboardSelectMenu === 'prometheus'" class="ops-dashboard-select-menu" role="listbox" aria-labelledby="monitor-dashboard-prometheus-label"><button v-for="option in dashboardFilterOptions('prometheus')" :key="option.value" type="button" class="ops-dashboard-select-option" :class="{ 'is-selected': option.value === dashboardFilterValue('prometheus') }" role="option" :aria-selected="option.value === dashboardFilterValue('prometheus') ? 'true' : 'false'" @click="chooseDashboardFilter('prometheus', option.value)">[[ option.label ]]</button></div></div></div>
+                        <div class="ops-dashboard-control-actions"><div class="ops-dashboard-tabs" role="tablist" aria-label="看板资源类型"><button type="button" class="ops-dashboard-tab" :class="{ 'is-active': dashboardTab === 'nodes' }" role="tab" :aria-selected="dashboardTab === 'nodes' ? 'true' : 'false'" @click="setDashboardTab('nodes')"><i class="fas fa-server" aria-hidden="true"></i>节点</button><button type="button" class="ops-dashboard-tab" :class="{ 'is-active': dashboardTab === 'pods' }" role="tab" :aria-selected="dashboardTab === 'pods' ? 'true' : 'false'" @click="setDashboardTab('pods')"><i class="fas fa-cubes" aria-hidden="true"></i>Pod</button></div><button type="button" class="btn btn-sm btn-outline-secondary ops-dashboard-refresh" :disabled="dashboardLoading || !selectedDashboardPrometheus" title="刷新看板" aria-label="刷新看板" @click="loadDashboard(true)"><i class="fas" :class="dashboardLoading ? 'fa-spinner fa-spin' : 'fa-sync-alt'" aria-hidden="true"></i></button></div>
+                    </div>
+                    <div class="ops-dashboard-filters" aria-label="看板筛选与排序">
+                        <div v-if="dashboardTab === 'nodes'" ref="dashboardNodeMultiSelect" class="ops-dashboard-node-filter ops-dashboard-node-multiselect" @keydown.esc="closeDashboardNodeMenu">
+                            <button type="button" class="form-control form-control-sm ops-dashboard-node-trigger" :aria-expanded="dashboardNodeMenuOpen ? 'true' : 'false'" aria-haspopup="true" aria-controls="monitor-dashboard-node-options" @click="toggleDashboardNodeMenu"><i class="fas fa-server" aria-hidden="true"></i><span>[[ dashboardNodeSelectionLabel ]]</span><i class="fas fa-chevron-down ops-dashboard-node-chevron" :class="{ 'is-open': dashboardNodeMenuOpen }" aria-hidden="true"></i></button>
+                            <div v-if="dashboardNodeMenuOpen" id="monitor-dashboard-node-options" class="ops-dashboard-node-menu" role="group" aria-label="选择节点">
+                                <div class="ops-dashboard-node-menu-actions"><button type="button" @click="selectAllDashboardNodes">全选</button><button type="button" @click="clearDashboardNodes">清空</button></div>
+                                <div class="ops-dashboard-node-search"><i class="fas fa-search" aria-hidden="true"></i><input ref="dashboardNodeSearch" v-model="dashboardNodeQuery" type="search" autocomplete="off" placeholder="搜索节点" aria-label="搜索节点"></div>
+                                <label v-for="node in dashboardFilteredNodeOptions" :key="node" class="ops-dashboard-node-option"><input v-model="selectedDashboardNodes" type="checkbox" :value="node"><span>[[ node ]]</span></label>
+                                <div v-if="!dashboardNodeOptions.length" class="ops-dashboard-node-menu-empty">暂无可用节点</div>
+                                <div v-else-if="!dashboardFilteredNodeOptions.length" class="ops-dashboard-node-menu-empty">未找到匹配节点</div>
+                            </div>
+                        </div>
+                        <div v-if="dashboardTab === 'pods'" v-for="filter in dashboardPodFilterDefinitions" :key="filter.key" class="ops-dashboard-select" :class="{ 'is-open': dashboardSelectMenu === filter.key }" @keydown.esc="closeDashboardSelect"><button type="button" class="ops-dashboard-select-trigger" :aria-expanded="dashboardSelectMenu === filter.key ? 'true' : 'false'" aria-haspopup="listbox" :aria-label="filter.label" @click="toggleDashboardSelect(filter.key)"><span>[[ dashboardFilterLabel(filter.key) ]]</span><i class="fas fa-chevron-down" aria-hidden="true"></i></button><div v-if="dashboardSelectMenu === filter.key" class="ops-dashboard-select-menu" role="listbox" :aria-label="filter.label"><button v-for="option in dashboardFilterOptions(filter.key)" :key="option.value" type="button" class="ops-dashboard-select-option" :class="{ 'is-selected': option.value === dashboardFilterValue(filter.key) }" role="option" :aria-selected="option.value === dashboardFilterValue(filter.key) ? 'true' : 'false'" @click="chooseDashboardFilter(filter.key, option.value)">[[ option.label ]]</button></div></div>
+                    </div>
+                    <div class="ops-dashboard-kpis" :class="{ 'is-node-view': dashboardTab === 'nodes' }" aria-label="监控概览"><div><span>遥测源</span><strong>[[ selectedDashboardPrometheus ? selectedDashboardPrometheus.name : '-' ]]</strong></div><div><span>节点总量</span><strong>[[ dashboardData.hosts.length ]]</strong></div><template v-if="dashboardTab === 'pods'"><div><span>Pod 总量</span><strong>[[ dashboardData.pods.length ]]</strong></div><div><span>正常 Pod</span><strong class="is-cyan">[[ dashboardHealthyPods ]]</strong></div></template><div><span>活跃视图</span><strong>[[ dashboardTotalRows ]]</strong></div></div>
+                    <div v-if="dashboardLoading" class="ops-dashboard-state" role="status"><i class="fas fa-spinner fa-spin" aria-hidden="true"></i><span>正在汇总当前 Prometheus 指标</span></div>
+                    <div v-else-if="dashboardError" class="ops-dashboard-state is-error" role="alert"><i class="fas fa-exclamation-circle" aria-hidden="true"></i><span>看板数据暂时不可用，请稍后刷新</span></div>
+                    <div v-else-if="!dashboardPrometheusConfigs.length" class="ops-dashboard-state" role="status"><i class="fas fa-chart-line" aria-hidden="true"></i><span>暂无已启用的 Prometheus 对接</span></div>
+                    <div v-else class="ops-dashboard-groups">
+                        <section v-if="dashboardTab === 'nodes'" class="ops-dashboard-group">
+                            <div class="ops-dashboard-group-head"><h2><i class="fas fa-server" aria-hidden="true"></i>节点遥测</h2><span>CAPACITY / I-O / LOAD</span></div>
+                            <div v-if="dashboardActiveRows.length" class="ops-dashboard-node-grid">
+                                <article v-for="row in dashboardActiveRows" :key="row.id" class="ops-dashboard-node">
+                                    <header><div><strong>[[ row.name ]]</strong><span>节点 instance</span></div></header>
+                                    <div class="ops-dashboard-viz-grid">
+                                        <section class="ops-dashboard-viz ops-dashboard-viz-cpu"><div class="ops-dashboard-gauge" :style="dashboardGaugeStyle(row.cpu, '#38bdf8')"><strong>[[ dashboardMetricText(row.cpu) ]]</strong></div><div class="ops-dashboard-cpu-summary"><b>CPU 使用率</b><span v-for="resource in row.resources.filter((item) => item.key === 'cpu')" :key="resource.key">总核数 [[ resource.total ]]</span></div></section>
+                                        <section class="ops-dashboard-viz ops-dashboard-viz-capacity"><div class="ops-dashboard-viz-head"><b>内存</b><strong>使用率 [[ dashboardMetricText(row.memory) ]]</strong></div><div class="ops-dashboard-meter"><span :style="{ width: dashboardBarWidth(row.memory) + '%' }"></span></div><div class="ops-dashboard-viz-values" v-for="resource in row.resources.filter((item) => item.key === 'memory')" :key="resource.key"><span>总量 [[ resource.total ]]</span><span>已用 [[ resource.used ]]</span><span>剩余 [[ resource.remaining ]]</span></div></section>
+                                        <section class="ops-dashboard-viz ops-dashboard-viz-capacity"><div class="ops-dashboard-viz-head"><b>磁盘</b><strong>使用率 [[ dashboardMetricText(row.disk) ]]</strong></div><div class="ops-dashboard-meter is-disk"><span :style="{ width: dashboardBarWidth(row.disk) + '%' }"></span></div><div class="ops-dashboard-viz-values" v-for="resource in row.resources.filter((item) => item.key === 'disk')" :key="resource.key"><span>总量 [[ resource.total ]]</span><span>已用 [[ resource.used ]]</span><span>剩余 [[ resource.remaining ]]</span></div></section>
+                                        <section class="ops-dashboard-viz ops-dashboard-viz-io"><div class="ops-dashboard-viz-head"><b>磁盘 IO</b><span>读 / 写</span></div><div class="ops-dashboard-io-bars"><div><i :style="{ height: dashboardIoHeight(row.ioRead) }"></i><span>读</span><strong>[[ row.io.read ]]</strong></div><div><i :style="{ height: dashboardIoHeight(row.ioWrite) }"></i><span>写</span><strong>[[ row.io.write ]]</strong></div></div></section>
+                                        <section class="ops-dashboard-viz ops-dashboard-viz-load"><div class="ops-dashboard-viz-head"><b>系统负载</b><span>相对 CPU 核数</span></div><div class="ops-dashboard-load-lines"><div><span>1m</span><i><b :style="{ width: dashboardLoadWidth(row, 'one') }"></b></i><strong>[[ row.load.one ]]</strong></div><div><span>5m</span><i><b :style="{ width: dashboardLoadWidth(row, 'five') }"></b></i><strong>[[ row.load.five ]]</strong></div><div><span>15m</span><i><b :style="{ width: dashboardLoadWidth(row, 'fifteen') }"></b></i><strong>[[ row.load.fifteen ]]</strong></div></div></section>
+                                    </div>
+                                </article>
+                            </div>
+                            <div v-else class="ops-dashboard-empty">请在节点筛选中选择至少一个节点</div>
+                        </section>
+                        <section v-else class="ops-dashboard-group"><div class="ops-dashboard-group-head"><h2><i class="fas fa-cubes" aria-hidden="true"></i>Pod 遥测</h2><span>[[ dashboardMetricLabel ]] / [[ dashboardActiveRows.length ]] UNITS</span></div><div v-if="dashboardActiveRows.length" class="ops-dashboard-pod-grid"><article v-for="row in dashboardActiveRows" :key="row.id" class="ops-dashboard-node ops-dashboard-pod"><header><div><strong>[[ row.name ]]</strong><span>[[ row.cluster ]] / [[ row.namespace ]]</span></div><span class="ops-dashboard-status" :class="dashboardStatusClass(row.status)">[[ dashboardStatusLabel(row.status) ]]</span></header><div class="ops-dashboard-viz-grid ops-dashboard-pod-viz"><section class="ops-dashboard-viz ops-dashboard-viz-cpu"><div class="ops-dashboard-gauge" :style="dashboardGaugeStyle(row.cpu, '#38bdf8')"><strong>[[ dashboardMetricText(row.cpu) ]]</strong></div><b>CPU</b><span>使用率</span></section><section class="ops-dashboard-viz ops-dashboard-viz-capacity"><div class="ops-dashboard-viz-head"><b>内存</b><strong>[[ dashboardMetricText(row.memory) ]]</strong></div><div class="ops-dashboard-meter"><span :style="{ width: dashboardBarWidth(row.memory) + '%' }"></span></div><span>使用率</span></section><section class="ops-dashboard-viz ops-dashboard-viz-pod-status"><div class="ops-dashboard-viz-head"><b>当前指标</b><strong>[[ dashboardMetricText(row[dashboardMetric]) ]]</strong></div><div class="ops-dashboard-meter" :class="dashboardStatusClass(row.status)"><span :style="{ width: dashboardBarWidth(row[dashboardMetric]) + '%' }"></span></div><span>[[ dashboardMetricLabel ]] · [[ dashboardStatusLabel(row.status) ]]</span></section></div></article></div><div v-else class="ops-dashboard-empty">当前筛选条件下没有可展示的 Pod</div></section>
+                    </div>
                 </section>
 
                 <section v-else-if="kind === 'host-list'" class="ops-panel">
@@ -1364,13 +1922,21 @@
                     </div>
                     <div class="ops-integration-overview mt-3">
                         <div class="ops-section-head">
-                            <div class="ops-section-title">监控对接列表</div>
+                            <div>
+                                <div class="ops-section-title">监控对接列表</div>
+                                <div class="ops-muted">[[ monitorIntegrationTotalCount ]] 个对接</div>
+                            </div>
                             <div class="ops-actions">
                                 <a v-if="data.integration_url" class="btn btn-sm btn-outline-primary" :href="data.integration_url"><i class="fas fa-plug" aria-hidden="true"></i> 管理对接</a>
                                 <a v-if="data.query_url" class="btn btn-sm btn-outline-secondary" :href="data.query_url">指标查询</a>
                                 <a v-if="data.alert_settings_url" class="btn btn-sm btn-outline-dark" :href="data.alert_settings_url">告警设置</a>
                             </div>
                         </div>
+                        <section class="ops-integration-list-summary" aria-label="监控对接状态">
+                            <span><strong>[[ monitorIntegrationTotalCount ]]</strong> 对接</span>
+                            <span class="is-enabled"><i class="fas fa-circle" aria-hidden="true"></i>[[ monitorIntegrationEnabledCount ]] 已启用</span>
+                            <span class="is-current"><i class="fas fa-circle" aria-hidden="true"></i>[[ filteredMonitorIntegrationItems.length ]] 当前显示</span>
+                        </section>
                         <div class="ops-integration-filter">
                             <div class="ops-integration-filter-kind">
                                 <label class="form-label" for="monitor-home-integration-kind">对接类型</label>
@@ -1383,56 +1949,43 @@
                             </div>
                             <div class="ops-integration-filter-query">
                                 <div class="ops-integration-query-control">
-                                    <i class="fas fa-search" aria-hidden="true"></i>
                                     <input id="monitor-home-integration-query" class="form-control form-control-sm"
-                                           v-model.trim="monitorIntegrationQuery" aria-label="查询监控对接">
+                                           v-model.trim="monitorIntegrationQuery" placeholder="查询名称、地址、状态"
+                                           aria-label="查询监控对接">
+                                    <button v-if="monitorIntegrationQuery" type="button"
+                                            class="ops-integration-query-clear" aria-label="清空查询"
+                                            @click="monitorIntegrationQuery = ''">
+                                        <i class="fas fa-times" aria-hidden="true"></i>
+                                    </button>
                                 </div>
                             </div>
                         </div>
-                        <div class="ops-integration-picker-grid">
-                            <article class="ops-integration-picker">
-                                <div class="ops-integration-picker-head">
-                                    <div>
-                                        <div class="ops-integration-picker-title">
-                                            <i class="fas" :class="activeMonitorIntegrationGroup.icon" aria-hidden="true"></i> [[ activeMonitorIntegrationGroup.label ]]
-                                        </div>
-                                        <div class="ops-muted">[[ activeMonitorIntegrationGroup.description ]]</div>
-                                    </div>
-                                    <span class="ops-integration-picker-count">[[ filteredMonitorIntegrationItems.length ]] / [[ activeMonitorIntegrationGroup.items.length ]] 个</span>
-                                </div>
-                                <div v-if="filteredMonitorIntegrationItems.length" class="ops-integration-list">
-                                    <div class="ops-integration-list-row" v-for="integration in filteredMonitorIntegrationItems" :key="integration.id">
-                                        <div class="ops-integration-list-main">
-                                            <strong>[[ integration.displayName ]]</strong>
-                                            <code v-if="integration.url" class="ops-integration-address">[[ integration.url ]]</code>
-                                            <span v-if="integration.updatedAt">更新于 [[ formatDisplayDate(integration.updatedAt) ]]</span>
-                                        </div>
-                                        <div class="ops-integration-list-side">
-                                            <span class="ops-badge" :class="{ 'ops-badge-muted': !integration.enabled }">
-                                                [[ integration.enabled ? '已启用' : '已停用' ]]
-                                            </span>
-                                            <a v-if="data.can_manage_integrations && integration.editUrl"
-                                               class="btn btn-sm btn-outline-primary ops-integration-picker-action"
-                                               :href="integration.editUrl"
-                                               :title="'编辑 ' + integration.displayName"
-                                               :aria-label="'编辑 ' + integration.displayName">
-                                                <i class="fas fa-edit" aria-hidden="true"></i>
-                                            </a>
-                                            <form v-if="data.can_manage_integrations && integration.deleteUrl"
-                                                  class="ops-inline-form" method="post" :action="integration.deleteUrl"
-                                                  @submit="confirmDelete($event, integration)">
-                                                <input type="hidden" name="csrfmiddlewaretoken" :value="data.csrf">
-                                                <button class="btn btn-sm btn-outline-danger ops-integration-picker-action" type="submit"
-                                                        :title="'删除 ' + integration.displayName"
-                                                        :aria-label="'删除 ' + integration.displayName">
-                                                    <i class="fas fa-trash" aria-hidden="true"></i>
-                                                </button>
-                                            </form>
-                                        </div>
-                                    </div>
-                                </div>
-                                <div v-else class="ops-integration-picker-empty">[[ activeMonitorIntegrationGroup.items.length ? '未找到匹配的对接' : '尚未配置' ]]</div>
-                            </article>
+                        <section v-if="filteredMonitorIntegrationItems.length" class="ops-integration-table-panel">
+                            <div class="ops-integration-table-wrap">
+                                <table class="ops-integration-table">
+                                    <thead><tr><th>名称</th><th>类型</th><th>地址</th><th>状态</th><th>更新时间</th><th><span class="visually-hidden">操作</span></th></tr></thead>
+                                    <tbody>
+                                        <tr v-for="integration in filteredMonitorIntegrationItems" :key="integration.id">
+                                            <td><strong class="ops-integration-table-name">[[ integration.displayName ]]</strong></td>
+                                            <td><code>[[ integration.kindLabel ]]</code></td>
+                                            <td><span class="ops-integration-table-text">[[ integration.url || '-' ]]</span></td>
+                                            <td><span class="ops-integration-list-status" :class="integration.enabled ? 'is-enabled' : 'is-disabled'"><i class="fas fa-circle" aria-hidden="true"></i>[[ integration.enabled ? '已启用' : '已停用' ]]</span></td>
+                                            <td class="ops-integration-table-time">[[ integration.updatedAt ? formatDisplayDate(integration.updatedAt) : '-' ]]</td>
+                                            <td><div class="ops-integration-list-actions">
+                                                <a v-if="data.can_manage_integrations && integration.editUrl" class="ops-integration-icon-action" :href="integration.editUrl" :title="'编辑 ' + integration.displayName" :aria-label="'编辑 ' + integration.displayName"><i class="fas fa-edit" aria-hidden="true"></i></a>
+                                                <form v-if="data.can_manage_integrations && integration.deleteUrl" class="ops-inline-form" method="post" :action="integration.deleteUrl" @submit="confirmDelete($event, integration)">
+                                                    <input type="hidden" name="csrfmiddlewaretoken" :value="data.csrf">
+                                                    <button class="ops-integration-icon-action is-delete" type="submit" :title="'删除 ' + integration.displayName" :aria-label="'删除 ' + integration.displayName"><i class="fas fa-trash" aria-hidden="true"></i></button>
+                                                </form>
+                                            </div></td>
+                                        </tr>
+                                    </tbody>
+                                </table>
+                            </div>
+                        </section>
+                        <div v-else class="ops-empty ops-integration-list-empty">
+                            <span>[[ activeMonitorIntegrationGroup.items.length ? '没有匹配的监控对接' : '暂无监控对接' ]]</span>
+                            <a v-if="data.can_manage_integrations && data.integration_url" class="btn btn-sm btn-outline-primary" :href="data.integration_url">前往管理</a>
                         </div>
                     </div>
                 </section>
@@ -1486,6 +2039,25 @@
                         </form>
                     </section>
 
+                    <section v-if="data.can_view_integration_health" class="ops-panel">
+                        <div class="ops-section-title"><i class="fas fa-heartbeat" aria-hidden="true"></i>对接健康状态</div>
+                        <div v-if="monitorIntegrations.length" class="ops-integration-table-wrap">
+                            <table class="ops-integration-table">
+                                <thead><tr><th>对接</th><th>状态</th><th>最近检查</th><th>结果</th><th>失败</th></tr></thead>
+                                <tbody>
+                                    <tr v-for="integration in monitorIntegrations" :key="'health-' + integration.id">
+                                        <td><strong class="ops-integration-table-name">[[ integration.displayName ]]</strong><br><small>[[ integration.kindLabel ]]</small></td>
+                                        <td><span class="ops-integration-list-status" :class="integration.health.state === 'success' ? 'is-enabled' : 'is-disabled'"><i class="fas fa-circle" aria-hidden="true"></i>[[ integration.health.stateLabel ]]</span></td>
+                                        <td class="ops-integration-table-time">[[ integration.health.lastCheckedAt ? formatDisplayDate(integration.health.lastCheckedAt) : '-' ]]</td>
+                                        <td><span class="ops-integration-table-text">[[ integration.health.summary || '-' ]]</span></td>
+                                        <td>连续 [[ integration.health.consecutiveFailures ]]，24h [[ integration.health.recentFailures ]]</td>
+                                    </tr>
+                                </tbody>
+                            </table>
+                        </div>
+                        <div v-else class="ops-empty">暂无已配置的监控对接</div>
+                    </section>
+
                 </div>
 
                 <section v-else-if="kind === 'alert-query'" class="ops-query-page">
@@ -1518,13 +2090,22 @@
                                     @keydown="handleMetricTabKeydown($event, 'rules')">
                                 <i class="fas fa-list-alt" aria-hidden="true"></i> Rules
                             </button>
+                            <button id="metric-tab-alerts" type="button" role="tab"
+                                    :class="{ active: metricView === 'alerts' }"
+                                    :aria-selected="metricView === 'alerts' ? 'true' : 'false'"
+                                    :tabindex="metricView === 'alerts' ? 0 : -1"
+                                    aria-controls="metric-view-alerts"
+                                    @click="changeMetricView('alerts')"
+                                    @keydown="handleMetricTabKeydown($event, 'alerts')">
+                                <i class="fas fa-bell" aria-hidden="true"></i> Alerts
+                            </button>
                         </div>
                         <div class="ops-query-source">
                             <label class="ops-query-source-label" for="metric-prometheus-source">
                                 <i class="fas fa-server" aria-hidden="true"></i>
-                                Prometheus
+                                [[ metricView === 'alerts' ? 'Alertmanager' : 'Prometheus' ]]
                             </label>
-                            <select id="metric-prometheus-source"
+                            <select v-if="metricView !== 'alerts'" id="metric-prometheus-source"
                                     class="form-control form-control-sm ops-query-source-select"
                                     v-model="selectedMetricPrometheusId"
                                     :disabled="metricSourceLocked || !data.prometheus_configured || !metricPrometheusConfigs.length"
@@ -1532,6 +2113,16 @@
                                     @change="changeMetricPrometheus">
                                 <option value="" disabled>[[ metricPrometheusConfigs.length ? '请选择连接' : '暂无可用连接' ]]</option>
                                 <option v-for="config in metricPrometheusConfigs" :key="config.id"
+                                        :value="config.id" :title="config.name">[[ config.name ]]</option>
+                            </select>
+                            <select v-else id="metric-alertmanager-source"
+                                    class="form-control form-control-sm ops-query-source-select"
+                                    v-model="selectedMetricAlertmanagerId"
+                                    :disabled="metricSourceLocked || !data.alertmanager_configured || !metricAlertmanagerConfigs.length"
+                                    :title="selectedMetricAlertmanager ? selectedMetricAlertmanager.name : '选择 Alertmanager 连接'"
+                                    @change="changeMetricAlertmanager">
+                                <option value="" disabled>[[ metricAlertmanagerConfigs.length ? '请选择连接' : '暂无可用连接' ]]</option>
+                                <option v-for="config in metricAlertmanagerConfigs" :key="config.id"
                                         :value="config.id" :title="config.name">[[ config.name ]]</option>
                             </select>
                         </div>
@@ -1742,7 +2333,7 @@
                         </div>
                     </div>
 
-                    <div v-else id="metric-view-rules" class="ops-metric-resource"
+                    <div v-else-if="metricView === 'rules'" id="metric-view-rules" class="ops-metric-resource"
                          role="tabpanel" aria-labelledby="metric-tab-rules" :aria-busy="metricResources.rules.loading ? 'true' : 'false'">
                         <div class="ops-metric-resource-head">
                             <div class="ops-metric-resource-summary">
@@ -1806,6 +2397,42 @@
                         <div v-else class="ops-metric-resource-state is-empty" role="status">
                             <i class="fas fa-info-circle" aria-hidden="true"></i><span>[[ metricResources.rules.rows.length ? '没有匹配的 Rules' : '当前连接没有可展示的 Rules' ]]</span>
                         </div>
+                    </div>
+
+                    <div v-else id="metric-view-alerts" class="ops-metric-resource"
+                         role="tabpanel" aria-labelledby="metric-tab-alerts" :aria-busy="metricResources.alerts.loading ? 'true' : 'false'">
+                        <div class="ops-metric-resource-head">
+                            <div class="ops-metric-resource-summary">
+                                <strong>Alerts</strong>
+                                <span>总计 <b>[[ metricResources.alerts.summary.total ]]</b></span>
+                                <span class="is-danger">Firing <b>[[ metricResources.alerts.summary.firing ]]</b></span>
+                                <span class="is-success">Resolved <b>[[ metricResources.alerts.summary.resolved ]]</b></span>
+                                <span v-if="metricResources.alerts.summary.other">其他 <b>[[ metricResources.alerts.summary.other ]]</b></span>
+                                <span v-if="metricResources.alerts.durationMs !== null">刷新耗时 [[ formatMetricDuration(metricResources.alerts.durationMs) ]]</span>
+                                <span v-if="metricResources.alerts.truncated" class="is-warning">已截断，共 [[ metricResources.alerts.totalRows ]] 条</span>
+                            </div>
+                            <button class="btn btn-sm btn-outline-secondary ops-metric-resource-refresh" type="button"
+                                    :disabled="metricResources.alerts.loading || !canExecuteMetricAlerts"
+                                    title="刷新 Alerts" aria-label="刷新 Alerts" @click="loadMetricResource('alerts', true)">
+                                <i class="fas" :class="metricResources.alerts.loading ? 'fa-spinner fa-spin' : 'fa-sync-alt'" aria-hidden="true"></i>
+                            </button>
+                        </div>
+                        <div class="ops-metric-resource-filter">
+                            <label class="sr-only" for="metric-alerts-filter">查询 Alerts</label>
+                            <i class="fas fa-search" aria-hidden="true"></i>
+                            <input id="metric-alerts-filter" v-model="metricResourceFilters.alerts" class="form-control form-control-sm"
+                                   type="search" placeholder="查询告警、状态、时间、Labels 或 Annotations" autocomplete="off">
+                            <span class="ops-metric-resource-filter-count">匹配 [[ filteredMetricAlerts.length ]] / 已加载 [[ metricResources.alerts.rows.length ]]</span>
+                        </div>
+                        <div v-if="metricResources.alerts.loading" class="ops-metric-resource-state" role="status" aria-live="polite"><i class="fas fa-spinner fa-spin" aria-hidden="true"></i><span>正在加载 Alerts</span></div>
+                        <div v-else-if="metricResources.alerts.error" class="ops-metric-resource-state is-error" role="alert"><i class="fas fa-exclamation-circle" aria-hidden="true"></i><span>[[ metricResources.alerts.error ]]</span></div>
+                        <div v-else-if="filteredMetricAlerts.length" class="table-responsive ops-metric-resource-table-wrap">
+                            <table class="table table-sm ops-metric-resource-table mb-0"><caption class="sr-only">Alertmanager Alerts</caption>
+                                <thead><tr><th scope="col">#</th><th scope="col">告警</th><th scope="col">状态</th><th scope="col">开始时间</th><th scope="col">更新时间</th><th scope="col">结束时间</th><th scope="col">Labels</th><th scope="col">Annotations</th></tr></thead>
+                                <tbody><tr v-for="(row, rowIndex) in filteredMetricAlerts" :key="rowIndex"><th scope="row">[[ rowIndex + 1 ]]</th><td><strong>[[ row.name || '-' ]]</strong></td><td><span class="ops-metric-resource-status" :class="metricResourceStatusClass(row.status)">[[ row.status || 'unknown' ]]</span></td><td class="ops-metric-resource-time">[[ row.startsAt ? formatDisplayDate(row.startsAt) : '-' ]]</td><td class="ops-metric-resource-time">[[ row.updatedAt ? formatDisplayDate(row.updatedAt) : '-' ]]</td><td class="ops-metric-resource-time">[[ row.endsAt ? formatDisplayDate(row.endsAt) : '-' ]]</td><td class="ops-metric-target-label-cell"><span class="ops-metric-label-summary ops-metric-alert-label-summary">[[ formatMetricLabelsSummary(row.labels) ]]</span></td><td class="ops-metric-target-label-cell"><span class="ops-metric-label-summary ops-metric-alert-label-summary">[[ formatMetricLabelsSummary(row.annotations) ]]</span></td></tr></tbody>
+                            </table>
+                        </div>
+                        <div v-else class="ops-metric-resource-state is-empty" role="status"><i class="fas fa-info-circle" aria-hidden="true"></i><span>[[ metricResources.alerts.rows.length ? '没有匹配的 Alerts' : '当前连接没有可展示的 Alerts' ]]</span></div>
                     </div>
                 </section>
 
@@ -2021,11 +2648,20 @@
                 <section v-else class="ops-panel">页面已切换为 Vue 渲染。</section>
             </div>
         `,
+        created() {
+            this.metricResourceFilters.alerts = '';
+        },
         mounted() {
             this.handleQueryViewportChange = () => this.measureQueryStickyBars();
             window.addEventListener('scroll', this.handleQueryViewportChange, { passive: true });
             window.addEventListener('resize', this.handleQueryViewportChange, { passive: true });
+            document.addEventListener('click', this.handleDashboardDocumentClick);
             this.$nextTick(this.measureQueryStickyBars);
+            if (this.kind === 'monitor-dashboard' && !this.dashboardLoaded) {
+                this.loadDashboard(true);
+            } else if (this.kind === 'monitor-dashboard') {
+                this.syncDashboardNodeSelection();
+            }
             if (this.kind === 'webssh' && window.Terminal) {
                 const terminal = new window.Terminal({ convertEol: true, cursorBlink: true, fontSize: 18, theme: { foreground: 'yellow', background: '#060101' } });
                 terminal.open(document.getElementById('terminal'));
@@ -2042,6 +2678,7 @@
             });
             window.removeEventListener('scroll', this.handleQueryViewportChange);
             window.removeEventListener('resize', this.handleQueryViewportChange);
+            document.removeEventListener('click', this.handleDashboardDocumentClick);
         },
     }).mount(root);
 })();
