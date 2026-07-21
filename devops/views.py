@@ -30,6 +30,7 @@ from .forms import (
     CommandPolicyForm,
     ComplianceBaselineForm,
     DevOpsHostScopeForm,
+    DevOpsModulePermissionClearForm,
     DevOpsModulePermissionForm,
     DevOpsSettingForm,
     DeploymentAppForm,
@@ -114,6 +115,8 @@ from .services import (
     scan_compliance_baseline,
     resolve_alert,
     create_project_onboarding,
+    clear_module_permissions,
+    revoke_module_permission,
     summarize_integration_health,
 )
 
@@ -1329,6 +1332,7 @@ def security_settings(request):
         'policy_form': CommandPolicyForm(),
         'role_form': DevOpsRoleForm(),
         'module_permission_form': DevOpsModulePermissionForm(),
+        'module_permission_clear_form': DevOpsModulePermissionClearForm(),
         'host_scope_form': DevOpsHostScopeForm(),
         'setting_form': DevOpsSettingForm(instance=settings_obj),
         'settings_obj': settings_obj,
@@ -1341,6 +1345,7 @@ def security_settings(request):
         'compliance_baselines': ComplianceBaseline.objects.prefetch_related('hosts') if can_manage else (),
         'compliance_results': results,
         'can_manage_compliance': can_manage,
+        'can_manage_security': can_manage,
     })
 
 
@@ -1487,6 +1492,31 @@ def module_permission_set(request):
             },
         )
         audit(request, '设置模块权限', 'DevOpsModulePermission', permission.id, module_permission_audit_detail(permission, created))
+    return redirect('devops:security_settings')
+
+
+@session_login_required
+def module_permission_revoke(request, id):
+    denied = require_devops_role(request, DevOpsRole.ROLE_ADMIN, MODULE_SECURITY)
+    if denied:
+        return denied
+    if request.method != 'POST':
+        return HttpResponseNotAllowed(['POST'])
+    permission = get_object_or_404(DevOpsModulePermission, id=id)
+    revoke_module_permission(request, permission)
+    return redirect('devops:security_settings')
+
+
+@session_login_required
+def module_permissions_clear(request):
+    denied = require_devops_role(request, DevOpsRole.ROLE_ADMIN, MODULE_SECURITY)
+    if denied:
+        return denied
+    if request.method != 'POST':
+        return HttpResponseNotAllowed(['POST'])
+    form = DevOpsModulePermissionClearForm(request.POST)
+    if form.is_valid():
+        clear_module_permissions(request, form.cleaned_data['user'])
     return redirect('devops:security_settings')
 
 

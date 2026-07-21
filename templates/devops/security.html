@@ -90,6 +90,7 @@
     <div class="row g-3 mt-1">
         <div class="col-lg-4">
             <div class="card mb-3"><div class="card-header">模块权限</div><div class="card-body">
+                {% if can_manage_security %}
                 <form method="post" action="{% url 'devops:module_permission_set' %}">
                     {% csrf_token %}
                     <div class="mb-3"><label class="form-label">用户</label>{{ module_permission_form.user }}</div>
@@ -98,6 +99,12 @@
                     <button class="btn btn-primary" type="submit">保存模块权限</button>
                     <div class="text-muted small mt-2">未配置模块权限时沿用用户全局角色。</div>
                 </form>
+                <form class="mt-3" method="post" action="{% url 'devops:module_permissions_clear' %}">
+                    {% csrf_token %}
+                    <div class="mb-3"><label class="form-label">清空指定用户模块权限</label>{{ module_permission_clear_form.user }}</div>
+                    <button class="btn btn-outline-danger" type="submit">清空模块权限</button>
+                </form>
+                {% endif %}
             </div></div>
             <div class="card"><div class="card-header">主机范围</div><div class="card-body">
                 <form method="post" action="{% url 'devops:host_scope_set' %}">
@@ -113,10 +120,13 @@
         <div class="col-lg-8">
             <div class="card mb-3"><div class="card-header">模块权限列表</div><div class="card-body table-responsive">
                 <table class="table table-sm">
-                    <tr><th>用户</th><th>模块</th><th>角色</th><th>更新时间</th></tr>
+                    <tr><th>用户</th><th>模块</th><th>角色</th><th>更新时间</th><th>操作</th></tr>
                     {% for item in module_permissions %}
-                    <tr><td>{{ item.user.user }}</td><td>{{ item.get_module_display }}</td><td>{{ item.get_role_display }}</td><td>{{ item.updated_at|date:"Y-m-d H:i:s" }}</td></tr>
-                    {% empty %}<tr><td colspan="4" class="text-muted">暂无模块权限覆盖</td></tr>{% endfor %}
+                    <tr>
+                        <td>{{ item.user.user }}</td><td>{{ item.get_module_display }}</td><td>{{ item.get_role_display }}</td><td>{{ item.updated_at|date:"Y-m-d H:i:s" }}</td>
+                        <td>{% if can_manage_security %}<form method="post" action="{% url 'devops:module_permission_revoke' item.id %}">{% csrf_token %}<button class="btn btn-outline-danger btn-sm" type="submit">撤销</button></form>{% endif %}</td>
+                    </tr>
+                    {% empty %}<tr><td colspan="5" class="text-muted">暂无模块权限覆盖</td></tr>{% endfor %}
                 </table>
             </div></div>
             <div class="card"><div class="card-header">主机范围列表</div><div class="card-body table-responsive">

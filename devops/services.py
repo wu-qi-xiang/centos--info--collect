@@ -1399,6 +1399,38 @@ def audit(request, action, target_type='', target_id='', detail=''):
     )
 
 
+def revoke_module_permission(request, permission):
+    """Remove one explicit override and record its return to global-role behavior."""
+    permission_id = permission.id
+    with transaction.atomic():
+        locked_permission = DevOpsModulePermission.objects.select_for_update().select_related('user').filter(
+            id=permission_id,
+        ).first()
+        if not locked_permission:
+            return False
+        detail = '用户=%s, 模块=%s, 旧角色=%s, 结果=继承全局角色' % (
+            locked_permission.user.user,
+            locked_permission.module,
+            locked_permission.role,
+        )
+        locked_permission.delete()
+        audit(request, '撤销模块权限', 'DevOpsModulePermission', permission_id, detail)
+    return True
+
+
+def clear_module_permissions(request, user):
+    """Remove only the selected user's explicit module overrides."""
+    with transaction.atomic():
+        permissions = list(DevOpsModulePermission.objects.select_for_update().filter(user=user).order_by('module'))
+        before = ','.join('%s:%s' % (permission.module, permission.role) for permission in permissions) or '-'
+        detail = '用户=%s, 旧模块权限=%s, 结果=继承全局角色' % (user.user, before)
+        permission_ids = [permission.id for permission in permissions]
+        if permission_ids:
+            DevOpsModulePermission.objects.filter(id__in=permission_ids).delete()
+        audit(request, '清空模块权限', 'User', user.id, detail)
+    return len(permissions)
+
+
 def create_project_onboarding(request, cleaned_data):
     """Create the project aggregate and its optional catalog records atomically."""
     username = request.session.get('user_name', '')
@@ -1463,31 +1495,61 @@ def cleanup_audit_logs(retention_days=None):
     return deleted
 
 
+def _permission_cache(request):
+	cache = getattr(request, '_devops_permission_cache', None)
+	if cache is None:
+		cache = {}
+		request._devops_permission_cache = cache
+	return cache
+
+
 def user_role(request):
+	permission_cache = _permission_cache(request)
+	if 'user_role' in permission_cache:
+		return permission_cache['user_role']
 	user_id = request.session.get('user_id')
 	if not user_id:
-		return DevOpsRole.ROLE_VIEWER
+		permission_cache['user_role'] = DevOpsRole.ROLE_VIEWER
+		return permission_cache['user_role']
 	try:
-		return DevOpsRole.objects.get(user_id=user_id).role
+		permission_cache['user_role'] = DevOpsRole.objects.get(user_id=user_id).role
 	except DevOpsRole.DoesNotExist:
-		return DevOpsRole.ROLE_ADMIN if not DevOpsRole.objects.exists() else DevOpsRole.ROLE_OPERATOR
+		permission_cache['user_role'] = DevOpsRole.ROLE_ADMIN if not DevOpsRole.objects.exists() else DevOpsRole.ROLE_OPERATOR
+	return permission_cache['user_role']
 
 
 def module_role(request, module=''):
+	permission_cache = _permission_cache(request)
+	module_roles = permission_cache.setdefault('module_roles', {})
+	if module in module_roles:
+		return module_roles[module]
 	base_role = user_role(request)
 	user_id = request.session.get('user_id')
 	if not user_id or not module:
-		return base_role
+		module_roles[module] = base_role
+		return module_roles[module]
 	try:
-		return DevOpsModulePermission.objects.get(user_id=user_id, module=module).role
+		module_roles[module] = DevOpsModulePermission.objects.get(user_id=user_id, module=module).role
 	except DevOpsModulePermission.DoesNotExist:
-		return base_role
+		module_roles[module] = base_role
+	return module_roles[module]
 
 
 def has_role(request, minimum_role, module=''):
+	permission_cache = _permission_cache(request)
+	role_results = permission_cache.setdefault('role_results', {})
+	cache_key = (minimum_role, module)
+	if cache_key in role_results:
+		return role_results[cache_key]
+	resolved_module_role = module_role(request, module)
+	if resolved_module_role == DevOpsModulePermission.ROLE_NONE:
+		role_results[cache_key] = False
+		return False
 	if request.session.get('user_id') and not has_configured_role(request):
-		return ROLE_RANKS.get(DevOpsRole.ROLE_OPERATOR, 0) >= ROLE_RANKS.get(minimum_role, 0)
-	return ROLE_RANKS.get(module_role(request, module), 0) >= ROLE_RANKS.get(minimum_role, 0)
+		role_results[cache_key] = ROLE_RANKS.get(DevOpsRole.ROLE_OPERATOR, 0) >= ROLE_RANKS.get(minimum_role, 0)
+		return role_results[cache_key]
+	role_results[cache_key] = ROLE_RANKS.get(resolved_module_role, 0) >= ROLE_RANKS.get(minimum_role, 0)
+	return role_results[cache_key]
 
 
 def host_scope_for_request(request):
@@ -1501,20 +1563,30 @@ def host_scope_for_request(request):
 
 
 def has_explicit_admin_role(request):
+	permission_cache = _permission_cache(request)
+	if 'has_explicit_admin_role' in permission_cache:
+		return permission_cache['has_explicit_admin_role']
 	user_id = request.session.get('user_id')
 	if not user_id:
+		permission_cache['has_explicit_admin_role'] = False
 		return False
 	try:
-		return DevOpsRole.objects.get(user_id=user_id).role == DevOpsRole.ROLE_ADMIN
+		permission_cache['has_explicit_admin_role'] = DevOpsRole.objects.get(user_id=user_id).role == DevOpsRole.ROLE_ADMIN
 	except DevOpsRole.DoesNotExist:
-		return not DevOpsRole.objects.exists()
+		permission_cache['has_explicit_admin_role'] = not DevOpsRole.objects.exists()
+	return permission_cache['has_explicit_admin_role']
 
 
 def has_configured_role(request):
+	permission_cache = _permission_cache(request)
+	if 'has_configured_role' in permission_cache:
+		return permission_cache['has_configured_role']
 	user_id = request.session.get('user_id')
 	if not user_id:
+		permission_cache['has_configured_role'] = False
 		return False
-	return DevOpsRole.objects.filter(user_id=user_id).exists()
+	permission_cache['has_configured_role'] = DevOpsRole.objects.filter(user_id=user_id).exists()
+	return permission_cache['has_configured_role']
 
 
 def visible_hosts_for_request(request):

@@ -30,6 +30,7 @@ class DevOpsRole(models.Model):
 
 
 class DevOpsModulePermission(models.Model):
+    ROLE_NONE = 'none'
     MODULE_COMMAND = 'command'
     MODULE_TASK = 'task'
     MODULE_SERVICE = 'service'
@@ -55,10 +56,11 @@ class DevOpsModulePermission(models.Model):
         (MODULE_AUDIT, '审计日志'),
         (MODULE_CLUSTER, 'K8s集群'),
     )
+    ROLE_CHOICES = DevOpsRole.ROLE_CHOICES + ((ROLE_NONE, '禁止访问'),)
 
     user = models.ForeignKey(User, on_delete=models.CASCADE)
     module = models.CharField(max_length=30, choices=MODULE_CHOICES)
-    role = models.CharField(max_length=20, choices=DevOpsRole.ROLE_CHOICES, default=DevOpsRole.ROLE_VIEWER)
+    role = models.CharField(max_length=20, choices=ROLE_CHOICES, default=DevOpsRole.ROLE_VIEWER)
     created_by = models.CharField(max_length=100, blank=True)
     updated_at = models.DateTimeField(auto_now=True)
 

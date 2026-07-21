@@ -136,6 +136,10 @@ class DevOpsModulePermissionForm(forms.ModelForm):
         fields = ('user', 'module', 'role')
 
 
+class DevOpsModulePermissionClearForm(forms.Form):
+    user = forms.ModelChoiceField(queryset=User.objects.all())
+
+
 class DevOpsHostScopeForm(forms.ModelForm):
     user = forms.ModelChoiceField(queryset=User.objects.all())
     groups = forms.ModelMultipleChoiceField(

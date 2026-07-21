@@ -6,7 +6,7 @@ from django.core.management import call_command
 from django.core.management.base import CommandError
 from django.core.cache import cache, caches
 from django.core.cache.backends.filebased import FileBasedCache
-from django.test import TestCase, override_settings
+from django.test import Client, RequestFactory, TestCase, override_settings
 from django.urls import reverse
 from io import StringIO
 from datetime import timedelta
@@ -64,7 +64,7 @@ from .models import (
 )
 from .services import active_maintenance_windows_for_host, active_maintenance_windows_for_release, cleanup_audit_logs, cleanup_metric_samples, deployment_risk_preview, enqueue_background_job, evaluate_worker_alert_thresholds, latest_metric_map, notify_alert, record_alert, record_metric_sample, run_background_job, send_notification_channel, validate_remote_path, scan_compliance_baseline, create_project_onboarding, claim_next_background_job, process_next_background_job, background_job_spec, fail_timed_out_background_jobs, require_deployment_maintenance_approval, summarize_background_jobs
 from .services import execute_batch_task, execute_command_record, execute_deployment_release, execute_deployment_rollback, execute_file_distribution
-from .services import COMMAND_ALLOWED, COMMAND_BLOCKED, evaluate_command_policy
+from .services import COMMAND_ALLOWED, COMMAND_BLOCKED, evaluate_command_policy, has_role
 from .services import (
     build_k8s_resource_matches,
     k8s_detail_cache_key,
@@ -5296,3 +5296,217 @@ class MaintenanceWindowViewTests(TestCase):
 
         self.assertEqual(response.status_code, 403)
         self.assertEqual(response.json()['code'], 'forbidden')
+
+
+class RbacAdministrationClosureTests(TestCase):
+    def setUp(self):
+        self.admin = User.objects.create(
+            user='security-admin', email='security-admin@example.com',
+            password='plain-password', confirm_pwd='plain-password',
+        )
+        self.target = User.objects.create(
+            user='permission-target', email='permission-target@example.com',
+            password='plain-password', confirm_pwd='plain-password',
+        )
+        DevOpsRole.objects.create(user=self.admin, role=DevOpsRole.ROLE_ADMIN)
+        DevOpsRole.objects.create(user=self.target, role=DevOpsRole.ROLE_OPERATOR)
+        session = self.client.session
+        session['is_login'] = True
+        session['user_id'] = self.admin.id
+        session['user_name'] = self.admin.user
+        session.save()
+
+    def set_admin_role(self, role):
+        DevOpsRole.objects.filter(user=self.admin).update(role=role)
+
+    def set_session_user(self, user):
+        session = self.client.session
+        session['is_login'] = True
+        session['user_id'] = user.id
+        session['user_name'] = user.user
+        session.save()
+
+    def test_security_administrator_can_revoke_one_module_permission_with_summary_audit(self):
+        permission = DevOpsModulePermission.objects.create(
+            user=self.target,
+            module=DevOpsModulePermission.MODULE_COMMAND,
+            role=DevOpsRole.ROLE_OPERATOR,
+        )
+
+        response = self.client.post(reverse('devops:module_permission_revoke', args=[permission.id]))
+
+        self.assertEqual(response.status_code, 302)
+        self.assertFalse(DevOpsModulePermission.objects.filter(id=permission.id).exists())
+        audit_log = AuditLog.objects.get(action='撤销模块权限', target_id=str(permission.id))
+        self.assertIn('用户=permission-target', audit_log.detail)
+        self.assertIn('模块=command', audit_log.detail)
+        self.assertIn('旧角色=operator', audit_log.detail)
+        self.assertIn('结果=继承全局角色', audit_log.detail)
+
+    def test_security_administrator_can_clear_selected_user_module_permissions_with_summary_audit(self):
+        DevOpsModulePermission.objects.create(
+            user=self.target, module=DevOpsModulePermission.MODULE_COMMAND,
+            role=DevOpsRole.ROLE_VIEWER,
+        )
+        DevOpsModulePermission.objects.create(
+            user=self.target, module=DevOpsModulePermission.MODULE_TASK,
+            role=DevOpsRole.ROLE_OPERATOR,
+        )
+
+        response = self.client.post(reverse('devops:module_permissions_clear'), {
+            'user': self.target.id,
+        })
+
+        self.assertEqual(response.status_code, 302)
+        self.assertFalse(DevOpsModulePermission.objects.filter(user=self.target).exists())
+        audit_log = AuditLog.objects.get(action='清空模块权限', target_id=str(self.target.id))
+        self.assertIn('用户=permission-target', audit_log.detail)
+        self.assertIn('旧模块权限=command:viewer,task:operator', audit_log.detail)
+        self.assertIn('结果=继承全局角色', audit_log.detail)
+
+    def test_viewer_and_operator_cannot_revoke_or_clear_module_permissions(self):
+        permission = DevOpsModulePermission.objects.create(
+            user=self.target, module=DevOpsModulePermission.MODULE_COMMAND,
+            role=DevOpsRole.ROLE_OPERATOR,
+        )
+        for role in (DevOpsRole.ROLE_VIEWER, DevOpsRole.ROLE_OPERATOR):
+            self.set_admin_role(role)
+            revoke = self.client.post(reverse('devops:module_permission_revoke', args=[permission.id]))
+            clear = self.client.post(reverse('devops:module_permissions_clear'), {'user': self.target.id})
+            self.assertEqual(revoke.status_code, 403)
+            self.assertEqual(clear.status_code, 403)
+            self.assertTrue(DevOpsModulePermission.objects.filter(id=permission.id).exists())
+        self.assertFalse(AuditLog.objects.filter(action__in=('撤销模块权限', '清空模块权限')).exists())
+
+    def test_security_forms_include_csrf_and_mutation_requires_csrf_token(self):
+        permission = DevOpsModulePermission.objects.create(
+            user=self.target, module=DevOpsModulePermission.MODULE_COMMAND,
+            role=DevOpsRole.ROLE_OPERATOR,
+        )
+        response = self.client.get(reverse('devops:security_settings'))
+        self.assertContains(response, 'csrfmiddlewaretoken')
+
+        csrf_client = Client(enforce_csrf_checks=True)
+        session = csrf_client.session
+        session['is_login'] = True
+        session['user_id'] = self.admin.id
+        session['user_name'] = self.admin.user
+        session.save()
+        denied = csrf_client.post(reverse('devops:module_permission_revoke', args=[permission.id]))
+
+        self.assertEqual(denied.status_code, 403)
+        self.assertTrue(DevOpsModulePermission.objects.filter(id=permission.id).exists())
+
+    def test_shared_navigation_hides_unavailable_devops_module_entries_only(self):
+        self.set_admin_role(DevOpsRole.ROLE_VIEWER)
+        DevOpsModulePermission.objects.create(
+            user=self.admin, module=DevOpsModulePermission.MODULE_CLUSTER,
+            role='none',
+        )
+
+        response = self.client.get(reverse('devops:dashboard'))
+
+        self.assertEqual(response.status_code, 200)
+        self.assertContains(response, 'DevOps')
+        self.assertNotContains(response, 'K8s集群管理')
+        self.assertContains(response, '资产管理')
+        self.assertContains(response, '凭据管理')
+        self.assertContains(response, '监控管理')
+
+    def test_shared_navigation_shows_cluster_list_to_viewer_and_connect_to_administrator(self):
+        self.set_admin_role(DevOpsRole.ROLE_VIEWER)
+        DevOpsModulePermission.objects.create(
+            user=self.admin, module=DevOpsModulePermission.MODULE_CLUSTER,
+            role=DevOpsRole.ROLE_VIEWER,
+        )
+
+        viewer_response = self.client.get(reverse('devops:dashboard'))
+
+        self.assertContains(viewer_response, 'K8s集群列表')
+        self.assertNotContains(viewer_response, 'K8s集群连接')
+
+        DevOpsModulePermission.objects.filter(user=self.admin).update(role=DevOpsRole.ROLE_ADMIN)
+        admin_response = self.client.get(reverse('devops:dashboard'))
+
+        self.assertContains(admin_response, 'K8s集群列表')
+        self.assertContains(admin_response, 'K8s集群连接')
+
+    def test_security_administrator_can_configure_explicit_module_deny(self):
+        response = self.client.post(reverse('devops:module_permission_set'), {
+            'user': self.target.id,
+            'module': DevOpsModulePermission.MODULE_CLUSTER,
+            'role': DevOpsModulePermission.ROLE_NONE,
+        })
+
+        self.assertEqual(response.status_code, 302)
+        self.assertEqual(
+            DevOpsModulePermission.objects.get(user=self.target, module=DevOpsModulePermission.MODULE_CLUSTER).role,
+            DevOpsModulePermission.ROLE_NONE,
+        )
+
+    def test_explicit_module_deny_blocks_page_and_api_and_hides_cluster_navigation(self):
+        DevOpsModulePermission.objects.create(
+            user=self.target, module=DevOpsModulePermission.MODULE_CLUSTER,
+            role=DevOpsModulePermission.ROLE_NONE,
+        )
+        DevOpsModulePermission.objects.create(
+            user=self.target, module=DevOpsModulePermission.MODULE_AUDIT,
+            role=DevOpsModulePermission.ROLE_NONE,
+        )
+        self.set_session_user(self.target)
+
+        page_response = self.client.get(reverse('devops:clusters'))
+        api_response = self.client.get(reverse('devops:api_audit_logs'))
+        navigation_response = self.client.get(reverse('devops:dashboard'))
+
+        self.assertEqual(page_response.status_code, 403)
+        self.assertEqual(api_response.status_code, 403)
+        self.assertNotContains(navigation_response, 'K8s集群管理')
+
+    def test_explicit_module_deny_takes_precedence_over_legacy_unconfigured_role(self):
+        legacy_user = User.objects.create(
+            user='legacy-denied', email='legacy-denied@example.com',
+            password='plain-password', confirm_pwd='plain-password',
+        )
+        DevOpsModulePermission.objects.create(
+            user=legacy_user, module=DevOpsModulePermission.MODULE_CLUSTER,
+            role=DevOpsModulePermission.ROLE_NONE,
+        )
+        self.set_session_user(legacy_user)
+
+        response = self.client.get(reverse('devops:clusters'))
+
+        self.assertEqual(response.status_code, 403)
+
+    def test_security_viewer_does_not_see_module_permission_destructive_controls(self):
+        permission = DevOpsModulePermission.objects.create(
+            user=self.target, module=DevOpsModulePermission.MODULE_COMMAND,
+            role=DevOpsRole.ROLE_OPERATOR,
+        )
+        self.set_admin_role(DevOpsRole.ROLE_VIEWER)
+
+        response = self.client.get(reverse('devops:security_settings'))
+
+        self.assertEqual(response.status_code, 200)
+        self.assertFalse(response.context['can_manage_security'])
+        self.assertNotContains(response, reverse('devops:module_permission_revoke', args=[permission.id]))
+        self.assertNotContains(response, reverse('devops:module_permissions_clear'))
+
+    def test_permission_lookup_reuses_request_cache_and_refreshes_for_new_request(self):
+        DevOpsModulePermission.objects.create(
+            user=self.admin, module=DevOpsModulePermission.MODULE_CLUSTER,
+            role=DevOpsRole.ROLE_VIEWER,
+        )
+        factory = RequestFactory()
+        request = factory.get('/devops/')
+        request.session = {'user_id': self.admin.id}
+
+        self.assertTrue(has_role(request, DevOpsRole.ROLE_VIEWER, DevOpsModulePermission.MODULE_CLUSTER))
+        with self.assertNumQueries(0):
+            self.assertTrue(has_role(request, DevOpsRole.ROLE_VIEWER, DevOpsModulePermission.MODULE_CLUSTER))
+            self.assertFalse(has_role(request, DevOpsRole.ROLE_ADMIN, DevOpsModulePermission.MODULE_CLUSTER))
+
+        DevOpsModulePermission.objects.filter(user=self.admin).update(role=DevOpsModulePermission.ROLE_NONE)
+        fresh_request = factory.get('/devops/')
+        fresh_request.session = {'user_id': self.admin.id}
+        self.assertFalse(has_role(fresh_request, DevOpsRole.ROLE_VIEWER, DevOpsModulePermission.MODULE_CLUSTER))
