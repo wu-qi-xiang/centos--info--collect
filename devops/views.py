@@ -44,6 +44,8 @@ from .forms import (
     K8sClusterForm,
     PrometheusRuleDeleteForm,
     PrometheusRuleYamlForm,
+    normalize_prometheus_rule_identity,
+    normalize_prometheus_rule_resource_version,
     NotificationChannelForm,
     NotificationTemplateForm,
     AlertNotificationEscalationForm,
@@ -1933,6 +1935,12 @@ def _prometheus_rule_failure_status(code):
     return 503
 
 
+def _prometheus_rule_audit_outcome(code):
+    if code in PROMETHEUS_RULE_SAFE_MESSAGES:
+        return code
+    return 'offline'
+
+
 def _prometheus_rule_audit_detail(cluster, namespace, name, action, outcome, resource_version=''):
     return '集群=%s, 集群名称=%s, 命名空间=%s, 规则=%s, 操作=%s, 结果=%s, 资源版本=%s' % (
         cluster.id, cluster.name, namespace, name, action, outcome, resource_version or '-',
@@ -1999,6 +2007,9 @@ def prometheus_rule_detail(request, cluster_id, namespace, name):
         return denied
     if request.method != 'GET':
         return HttpResponseNotAllowed(['GET'])
+    namespace, name = normalize_prometheus_rule_identity(namespace, name)
+    if not namespace or not name:
+        return HttpResponseBadRequest('规则命名空间或名称无效。')
     cluster = get_object_or_404(K8sCluster, id=cluster_id)
     result = get_prometheus_rule(cluster, namespace, name)
     if not result.get('ok'):
@@ -2023,6 +2034,9 @@ def prometheus_rule_update(request, cluster_id, namespace, name):
         return denied
     if request.method != 'POST':
         return HttpResponseNotAllowed(['POST'])
+    namespace, name = normalize_prometheus_rule_identity(namespace, name)
+    if not namespace or not name:
+        return HttpResponseBadRequest('规则命名空间或名称无效。')
     cluster = get_object_or_404(K8sCluster, id=cluster_id)
     form = PrometheusRuleYamlForm(request.POST)
     if not form.is_valid():
@@ -2035,12 +2049,14 @@ def prometheus_rule_update(request, cluster_id, namespace, name):
     result = replace_prometheus_rule(cluster, namespace, name, yaml_text)
     code = result.get('code', 'offline')
     if result.get('ok'):
-        resource_version = ((result.get('rule') or {}).get('metadata') or {}).get('resourceVersion', '')
+        resource_version = normalize_prometheus_rule_resource_version(
+            ((result.get('rule') or {}).get('metadata') or {}).get('resourceVersion', ''),
+        )
         audit(request, '更新PrometheusRule', 'K8sCluster', cluster.id,
               _prometheus_rule_audit_detail(cluster, namespace, name, 'update', 'ok', resource_version))
         return redirect('devops:prometheus_rule_detail', cluster_id=cluster.id, namespace=namespace, name=name)
     audit(request, '更新PrometheusRule', 'K8sCluster', cluster.id,
-          _prometheus_rule_audit_detail(cluster, namespace, name, 'update', code))
+          _prometheus_rule_audit_detail(cluster, namespace, name, 'update', _prometheus_rule_audit_outcome(code)))
     status = _prometheus_rule_failure_status(code)
     return render(
         request, 'devops/prometheus_rules.html',
@@ -2057,6 +2073,10 @@ def prometheus_rule_delete(request, cluster_id, namespace, name):
         return denied
     if request.method != 'POST':
         return HttpResponseNotAllowed(['POST'])
+    namespace, name = normalize_prometheus_rule_identity(namespace, name)
+    resource_version = normalize_prometheus_rule_resource_version(request.POST.get('resource_version'))
+    if not namespace or not name or not resource_version:
+        return HttpResponseBadRequest('规则命名空间、名称或资源版本无效。')
     cluster = get_object_or_404(K8sCluster, id=cluster_id)
     form = PrometheusRuleDeleteForm(request.POST)
     if not form.is_valid():
@@ -2072,7 +2092,8 @@ def prometheus_rule_delete(request, cluster_id, namespace, name):
     result = delete_prometheus_rule(cluster, namespace, name, resource_version)
     code = result.get('code', 'offline')
     audit(request, '删除PrometheusRule', 'K8sCluster', cluster.id,
-          _prometheus_rule_audit_detail(cluster, namespace, name, 'delete', 'ok' if result.get('ok') else code,
+          _prometheus_rule_audit_detail(cluster, namespace, name, 'delete',
+                                        'ok' if result.get('ok') else _prometheus_rule_audit_outcome(code),
                                         resource_version))
     if result.get('ok'):
         return redirect('%s?cluster=%s' % (reverse('devops:prometheus_rules'), cluster.id))

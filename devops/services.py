@@ -136,6 +136,7 @@ PROMETHEUS_RULE_API_VERSION = '%s/%s' % (
     PROMETHEUS_RULE_GROUP,
     PROMETHEUS_RULE_VERSION,
 )
+PROMETHEUS_RULE_LIST_MAX_PAGES = 1000
 K8S_RESOURCE_NAME_PATTERN = re.compile(
     r'^[a-z0-9]([a-z0-9.-]*[a-z0-9])?$'
 )
@@ -308,17 +309,33 @@ def list_prometheus_rules(cluster, timeout=8):
     api_client = None
     try:
         api, api_client, path = _prometheus_rule_custom_objects_api(cluster)
-        response = api.list_cluster_custom_object(
-            group=PROMETHEUS_RULE_GROUP,
-            version=PROMETHEUS_RULE_VERSION,
-            plural=PROMETHEUS_RULE_PLURAL,
-            _request_timeout=timeout,
-        )
-        rules = [summary for summary in (
-            _prometheus_rule_summary(item) for item in response.get('items', [])
-        ) if summary]
-        rules.sort(key=lambda item: (item['namespace'], item['name']))
-        return _prometheus_rule_result(True, 'ok', 'PrometheusRule 读取成功。', rules=rules)
+        rules = []
+        continuation_token = ''
+        seen_continuation_tokens = set()
+        for _ in range(PROMETHEUS_RULE_LIST_MAX_PAGES):
+            request_kwargs = {
+                'group': PROMETHEUS_RULE_GROUP,
+                'version': PROMETHEUS_RULE_VERSION,
+                'plural': PROMETHEUS_RULE_PLURAL,
+                '_request_timeout': timeout,
+            }
+            if continuation_token:
+                request_kwargs['_continue'] = continuation_token
+            response = api.list_cluster_custom_object(**request_kwargs)
+            items = response.get('items', []) if isinstance(response, dict) else []
+            rules.extend(summary for summary in (
+                _prometheus_rule_summary(item) for item in items
+            ) if summary)
+            metadata = response.get('metadata', {}) if isinstance(response, dict) else {}
+            next_token = metadata.get('continue') or metadata.get('_continue') if isinstance(metadata, dict) else ''
+            if not isinstance(next_token, str) or not next_token.strip():
+                rules.sort(key=lambda item: (item['namespace'], item['name']))
+                return _prometheus_rule_result(True, 'ok', 'PrometheusRule 读取成功。', rules=rules)
+            continuation_token = next_token.strip()
+            if continuation_token in seen_continuation_tokens:
+                return _prometheus_rule_result(False, 'pagination_error', 'PrometheusRule 列表分页令牌异常，请稍后重试。')
+            seen_continuation_tokens.add(continuation_token)
+        return _prometheus_rule_result(False, 'pagination_error', 'PrometheusRule 列表分页次数超过安全上限，请稍后重试。')
     except Exception as exc:
         return _prometheus_rule_error(exc)
     finally:

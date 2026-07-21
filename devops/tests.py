@@ -1768,6 +1768,70 @@ spec:
         self.assertFalse(os.path.exists(observed['config_file']))
         self.assertEqual(observed.get('close_count'), 1)
 
+    def test_list_fetches_all_pages_with_server_continuation_token(self):
+        from .services import list_prometheus_rules
+
+        requests = []
+
+        def handler(action, observed, kwargs):
+            self.assertEqual(action, 'list')
+            requests.append(kwargs)
+            if len(requests) == 1:
+                return {
+                    'items': [
+                        {'metadata': {'name': 'z-rule', 'namespace': 'z', 'resourceVersion': '2'}},
+                    ],
+                    'metadata': {'continue': 'second-page-token'},
+                }
+            if len(requests) == 2:
+                return {
+                    'items': [
+                        {'metadata': {'name': 'a-rule', 'namespace': 'a', 'resourceVersion': '1'}},
+                    ],
+                    'metadata': {},
+                }
+            self.fail('unexpected additional list request')
+
+        observed, modules = self._kubernetes_modules(handler)
+        with mock.patch.dict(sys.modules, modules):
+            result = list_prometheus_rules(self._cluster())
+
+        self.assertTrue(result['ok'])
+        self.assertEqual(
+            [(item['namespace'], item['name']) for item in result['rules']],
+            [('a', 'a-rule'), ('z', 'z-rule')],
+        )
+        self.assertEqual(requests, [
+            {
+                'group': 'monitoring.coreos.com', 'version': 'v1', 'plural': 'prometheusrules',
+                '_request_timeout': 8,
+            },
+            {
+                'group': 'monitoring.coreos.com', 'version': 'v1', 'plural': 'prometheusrules',
+                '_request_timeout': 8, '_continue': 'second-page-token',
+            },
+        ])
+        self.assertFalse(os.path.exists(observed['config_file']))
+        self.assertEqual(observed.get('close_count'), 1)
+
+    def test_list_rejects_repeated_continuation_token(self):
+        from .services import list_prometheus_rules
+
+        def handler(action, observed, kwargs):
+            self.assertEqual(action, 'list')
+            observed['requests'] = observed.get('requests', 0) + 1
+            return {'items': [], 'metadata': {'continue': 'repeated-token'}}
+
+        observed, modules = self._kubernetes_modules(handler)
+        with mock.patch.dict(sys.modules, modules):
+            result = list_prometheus_rules(self._cluster())
+
+        self.assertFalse(result['ok'])
+        self.assertEqual(result['code'], 'pagination_error')
+        self.assertEqual(observed.get('requests'), 2)
+        self.assertFalse(os.path.exists(observed['config_file']))
+        self.assertEqual(observed.get('close_count'), 1)
+
     def test_custom_objects_constructor_failure_closes_client_and_removes_temp_config(self):
         from .services import _prometheus_rule_custom_objects_api
 
@@ -2041,6 +2105,18 @@ spec:
         self.assertEqual(invalid_identity.status_code, 400)
         self.assertNotContains(invalid_identity, raw_marker, status_code=400)
 
+    def test_detail_rejects_unsafe_route_identity_without_service_or_echo(self):
+        cluster = self.create_cluster()
+        marker = 'private-unsafe-rule-name'
+        url = reverse('devops:prometheus_rule_detail', args=[cluster.id, 'monitoring', marker + '@'])
+        with mock.patch('devops.views.get_prometheus_rule') as get_rule:
+            response = self.client.get(url)
+
+        self.assertEqual(response.status_code, 400)
+        self.assertContains(response, '规则命名空间或名称无效', status_code=400)
+        self.assertNotContains(response, marker, status_code=400)
+        get_rule.assert_not_called()
+
     def test_list_failure_statuses_match_prometheus_rule_error_contract(self):
         cluster = self.create_cluster()
         raw_marker = 'private raw kubernetes failure'
@@ -2140,6 +2216,66 @@ spec:
         audit_log = AuditLog.objects.get(action='删除PrometheusRule')
         self.assertIn('结果=offline', audit_log.detail)
         self.assertNotIn(raw_error, audit_log.detail)
+
+    def test_update_rejects_unsafe_route_identity_without_service_or_audit(self):
+        cluster = self.create_cluster()
+        marker = 'unsafe-rule-name'
+        url = reverse('devops:prometheus_rule_update', args=[cluster.id, 'monitoring', marker + '@'])
+        with mock.patch('devops.views.replace_prometheus_rule') as replace_rule:
+            response = self.client.post(url, {'yaml': self.rule_yaml})
+
+        self.assertEqual(response.status_code, 400)
+        self.assertContains(response, '规则命名空间或名称无效', status_code=400)
+        self.assertNotContains(response, marker, status_code=400)
+        replace_rule.assert_not_called()
+        self.assertFalse(AuditLog.objects.filter(action='更新PrometheusRule').exists())
+
+    def test_delete_rejects_unsafe_identity_and_resource_version_without_service_or_audit(self):
+        cluster = self.create_cluster()
+        marker = 'private-untrusted-value'
+        unsafe_identity_url = reverse(
+            'devops:prometheus_rule_delete', args=[cluster.id, 'monitoring@', 'api-errors'],
+        )
+        unsafe_version_url = reverse(
+            'devops:prometheus_rule_delete', args=[cluster.id, 'monitoring', 'api-errors'],
+        )
+        with mock.patch('devops.views.delete_prometheus_rule') as delete_rule:
+            identity_response = self.client.post(
+                unsafe_identity_url, {'confirmation': 'DELETE', 'resource_version': '42'},
+            )
+            version_response = self.client.post(
+                unsafe_version_url, {'confirmation': 'DELETE', 'resource_version': marker + '/'},
+            )
+
+        for response in (identity_response, version_response):
+            self.assertEqual(response.status_code, 400)
+            self.assertContains(response, '规则命名空间、名称或资源版本无效', status_code=400)
+            self.assertNotContains(response, marker, status_code=400)
+        delete_rule.assert_not_called()
+        self.assertFalse(AuditLog.objects.filter(action='删除PrometheusRule').exists())
+
+    def test_unknown_service_codes_are_not_written_to_prometheus_rule_audits(self):
+        cluster = self.create_cluster()
+        marker = 'private-untrusted-service-code'
+        update_url = reverse('devops:prometheus_rule_update', args=[cluster.id, 'monitoring', 'api-errors'])
+        delete_url = reverse('devops:prometheus_rule_delete', args=[cluster.id, 'monitoring', 'api-errors'])
+        with mock.patch('devops.views.replace_prometheus_rule', return_value={
+            'ok': False, 'code': marker, 'message': marker,
+        }):
+            update_response = self.client.post(update_url, {'yaml': self.rule_yaml})
+        with mock.patch('devops.views.delete_prometheus_rule', return_value={
+            'ok': False, 'code': marker, 'message': marker,
+        }):
+            delete_response = self.client.post(
+                delete_url, {'confirmation': 'DELETE', 'resource_version': '42'},
+            )
+
+        self.assertEqual(update_response.status_code, 503)
+        self.assertEqual(delete_response.status_code, 503)
+        for action in ('更新PrometheusRule', '删除PrometheusRule'):
+            audit_log = AuditLog.objects.get(action=action)
+            self.assertIn('结果=offline', audit_log.detail)
+            self.assertNotIn(marker, audit_log.detail)
 
     def test_successful_delete_returns_to_same_cluster_rule_list(self):
         cluster = self.create_cluster()
