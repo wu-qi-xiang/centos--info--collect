@@ -48,6 +48,7 @@ python manage.py runserver 0.0.0.0:8000
 - `WEBSSH_SESSION_TIMEOUT_SECONDS`
 - `AUDIT_LOG_RETENTION_DAYS`
 - `METRIC_SAMPLE_RETENTION_DAYS`
+- `AIOPS_ANALYSIS_RETENTION_DAYS`
 - `K8S_CACHE_DIR`
 - `K8S_DETAIL_CACHE_TIMEOUT_SECONDS`
 - `BACKUP_S3_BUCKET` / `BACKUP_S3_PREFIX` / `BACKUP_S3_ENDPOINT_URL` / `BACKUP_S3_REGION`
@@ -63,7 +64,7 @@ python manage.py runserver 0.0.0.0:8000
 - `DJANGO_ALLOWED_HOSTS` 不能使用 `*`。
 - 生产环境不应使用 SQLite，应配置 MySQL 或 PostgreSQL。
 - `DEVOPS_WORKER_POLL_SECONDS`、`DEVOPS_WORKER_MAX_ATTEMPTS`、`DEVOPS_WORKER_JOB_TIMEOUT_SECONDS`、`DEVOPS_SSH_CONNECT_TIMEOUT_SECONDS`、`DEVOPS_COMMAND_TIMEOUT_SECONDS`、`DEVOPS_COMMAND_OUTPUT_MAX_BYTES`、`WEBSSH_SESSION_TIMEOUT_SECONDS`、`NOTIFICATION_TIMEOUT_SECONDS` 必须为正整数。
-- `AUDIT_LOG_RETENTION_DAYS`、`METRIC_SAMPLE_RETENTION_DAYS` 不能为负数；设置为 `0` 表示不按保留天数清理，生产环境会给出警告。
+- `AUDIT_LOG_RETENTION_DAYS`、`METRIC_SAMPLE_RETENTION_DAYS`、`AIOPS_ANALYSIS_RETENTION_DAYS` 不能为负数；设置为 `0` 表示不按保留天数清理，生产环境会给出警告。
 - 外部 OIDC/LDAP 认证可独立启用；启用来源必须完整配置，组到 `viewer`、`operator`、`admin` 的映射必须有效。OIDC discovery 和回调地址必须使用 HTTPS，回调主机必须在 `DJANGO_ALLOWED_HOSTS` 中；LDAP 必须使用 LDAPS 或 StartTLS。
 - 启用 S3 兼容异地备份时，桶、对象前缀和 TLS 验证必须有效；自定义端点必须使用 HTTPS。备份加密复用 `DATA_ENCRYPTION_KEY`，不配置独立备份密钥。
 
@@ -99,6 +100,8 @@ SQLite 部署只需启动一个 Worker；多个 Worker 需要使用支持并发�
 ## 监控数据保留
 
 远程监控采集会写入 `MetricSample` 指标样本，用于 DevOps 监控历史和 AIOps 容量分析。`METRIC_SAMPLE_RETENTION_DAYS` 控制样本保留天数，默认 `30` 天；设置为 `0` 表示不自动清理。定时监控任务每次运行后会清理超过保留期的指标样本，不删除告警事件、告警历史或审计日志。
+
+Alertmanager 接入只保留告警名称、级别、实例、允许的服务标签和经过净化的摘要，不保存原始 webhook 请求或大模型原始响应。P0 迁移会不可逆地清除已有原始告警、提供方响应和历史分析文本；生产操作员必须在迁移前按既有恢复流程完成受控备份。`AIOPS_ANALYSIS_RETENTION_DAYS` 控制分析记录保留天数，默认 `90` 天；设置为 `0` 表示不自动清理。可通过 `python manage.py cleanup_aiops_analyses` 清理超期记录，命令仅输出删除数量。
 
 ## 监控对接
 

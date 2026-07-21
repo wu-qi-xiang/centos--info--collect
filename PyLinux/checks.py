@@ -291,6 +291,12 @@ def production_security_check(app_configs, **kwargs):
 		'pylinux.E012',
 		'pylinux.W003',
 	))
+	messages.extend(retention_days_messages(
+		'AIOPS_ANALYSIS_RETENTION_DAYS',
+		'AIOps 分析记录',
+		'pylinux.E031',
+		'pylinux.W008',
+	))
 	messages.extend(external_auth_production_messages())
 	messages.extend(backup_s3_production_messages())
 	messages.extend(worker_alert_threshold_messages())

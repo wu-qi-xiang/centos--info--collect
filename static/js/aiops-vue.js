@@ -146,19 +146,19 @@
                 <section v-if="active === 'ingest'" class="aiops-grid two">
                     <div class="aiops-panel">
                         <h2>告警接入配置</h2>
-                        <form class="aiops-form" method="post" :action="data.integration.config_url">
+                        <form class="aiops-form" method="post">
                             <input type="hidden" name="csrfmiddlewaretoken" :value="data.integration.csrf">
                             <label>
                                 <span>Alertmanager 地址</span>
-                                <input class="form-control" name="alertmanager_url" :value="data.integration.alertmanager_url || ''" placeholder="http://alertmanager:9093">
+                                <input class="form-control" name="alertmanager_url" type="url" placeholder="留空保持已有配置" autocomplete="off">
                             </label>
                             <label>
                                 <span>大模型地址</span>
-                                <input class="form-control" name="llm_url" :value="data.integration.llm_url || ''" placeholder="http://llm-gateway:8000 或完整 /v1/chat/completions">
+                                <input class="form-control" name="llm_url" type="url" placeholder="留空保持已有配置" autocomplete="off">
                             </label>
                             <label>
                                 <span>模型名称</span>
-                                <input class="form-control" name="llm_model" :value="data.integration.llm_model || 'gpt-4o-mini'">
+                                <input class="form-control" name="llm_model" placeholder="留空保持已有配置" autocomplete="off">
                             </label>
                             <label>
                                 <span>API Key</span>
@@ -172,16 +172,11 @@
                         </form>
                     </div>
                     <div class="aiops-panel">
-                        <h2>Alertmanager Webhook</h2>
-                        <div class="aiops-webhook">[[ data.integration.webhook_url ]]</div>
-                        <div class="aiops-muted">在 Alertmanager receiver 的 webhook_configs.url 中填写该地址。收到告警后会保存原始内容，并调用大模型生成处理建议。</div>
-                        <div class="aiops-example">
-                            <strong>receiver 示例</strong>
-                            <pre>receivers:
-  - name: aiops
-    webhook_configs:
-      - url: [[ data.integration.webhook_url ]]</pre>
-                        </div>
+                        <h2>接入状态</h2>
+                        <div class="aiops-row compact"><div><strong>Alertmanager</strong></div><b>[[ data.integration.alertmanager_configured ? '已配置' : '未配置' ]]</b></div>
+                        <div class="aiops-row compact"><div><strong>大模型连接</strong></div><b>[[ data.integration.llm_configured ? '已配置' : '未配置' ]]</b></div>
+                        <div class="aiops-row compact"><div><strong>访问密钥</strong></div><b>[[ data.integration.llm_api_key_set ? '已配置' : '未配置' ]]</b></div>
+                        <div class="aiops-row compact"><div><strong>告警接入</strong></div><b>[[ data.integration.enabled ? '已启用' : '未启用' ]]</b></div>
                     </div>
                     <div class="aiops-panel aiops-wide">
                         <h2>最近告警分析</h2>

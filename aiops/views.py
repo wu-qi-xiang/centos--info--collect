@@ -1,5 +1,6 @@
 from collections import defaultdict
 import json
+import re
 try:
 	from urllib import request as urlrequest
 except ImportError:
@@ -38,6 +39,90 @@ from devops.models import AlertEvent, AuditLog, CommandExecution, MetricSample, 
 from devops.services import visible_hosts_for_request
 from userprofile.decorators import session_login_required
 from .models import AiopsAlertAnalysis, AiopsIntegration
+
+
+SAFE_ALERT_LABELS = ('alertname', 'severity', 'instance', 'host', 'service', 'job', 'environment')
+SAFE_ALERT_ANNOTATIONS = ('summary', 'description')
+SAFE_ALERT_LIMITS = {
+	'alertname': 200,
+	'severity': 50,
+	'instance': 200,
+	'host': 200,
+	'service': 200,
+	'job': 200,
+	'environment': 200,
+	'summary': 1000,
+	'description': 1500,
+}
+SAFE_IDENTIFIER_RE = re.compile(r'^[A-Za-z0-9][A-Za-z0-9._:-]*$')
+SAFE_ANNOTATION_RE = re.compile(r'^[A-Za-z0-9\u4e00-\u9fff ，。；、（）()！!?%._-]+$')
+ANNOTATION_WORD_RE = re.compile(r'[A-Za-z]+')
+ANNOTATION_PAREN_RE = re.compile(r'\([^()]*\)')
+SENSITIVE_ANNOTATION_RE = re.compile(
+	r'\b(?:access\s+key|api[_ -]?(?:key|credential)|authorization|bearer|client\s+secret|credential(?:s)?|'
+	r'password|private\s+key|secret(?:\s+key)?|token)\b',
+	re.IGNORECASE,
+)
+SAFE_ANNOTATION_SUBJECTS = frozenset((
+	'alert', 'api', 'application', 'cache', 'connection', 'container', 'cpu',
+	'database', 'disk', 'error', 'host', 'latency', 'memory', 'network', 'nginx',
+	'node', 'pod', 'process', 'redis', 'service', 'status',
+))
+SAFE_ANNOTATION_STATES = frozenset((
+	'critical', 'degraded', 'down', 'failed', 'high', 'healthy', 'low', 'unavailable', 'up', 'warning',
+))
+
+
+def _normalize_identifier(value, limit):
+	value = ''.join(char for char in str(value or '') if ord(char) >= 32 and ord(char) != 127).strip()
+	if not SAFE_IDENTIFIER_RE.match(value):
+		return ''
+	return value[:limit]
+
+
+def _normalize_annotation(value, limit):
+	value = ''.join(char for char in str(value or '') if ord(char) >= 32 and ord(char) != 127).strip()
+	if not SAFE_ANNOTATION_RE.match(value) or SENSITIVE_ANNOTATION_RE.search(value):
+		return ''
+	words = ANNOTATION_WORD_RE.findall(value)
+	if words:
+		base = ANNOTATION_PAREN_RE.sub('', value)
+		base_words = [word.lower() for word in ANNOTATION_WORD_RE.findall(base)]
+		if (
+			len(base_words) < 2 or
+			base_words[0] not in SAFE_ANNOTATION_SUBJECTS or
+			base_words[-1] not in SAFE_ANNOTATION_STATES
+		):
+			return ''
+	return value[:limit]
+
+
+def sanitize_alert(alert):
+	"""Extract the only Alertmanager fields permitted for storage or LLM analysis."""
+	alert = alert if isinstance(alert, dict) else {}
+	labels = alert.get('labels') if isinstance(alert.get('labels'), dict) else {}
+	annotations = alert.get('annotations') if isinstance(alert.get('annotations'), dict) else {}
+	safe_labels = {}
+	for key in SAFE_ALERT_LABELS:
+		value = labels.get(key)
+		if value in (None, '') and key == 'alertname':
+			value = alert.get('alertname')
+		if value in (None, '') and key in SAFE_ALERT_ANNOTATIONS:
+			value = alert.get(key)
+		if value not in (None, ''):
+			normalized = _normalize_identifier(value, SAFE_ALERT_LIMITS[key])
+			if normalized:
+				safe_labels[key] = normalized
+	safe_annotations = {}
+	for key in SAFE_ALERT_ANNOTATIONS:
+		value = annotations.get(key)
+		if value in (None, '') and key == 'summary':
+			value = alert.get('summary')
+		if value not in (None, ''):
+			normalized = _normalize_annotation(value, SAFE_ALERT_LIMITS[key])
+			if normalized:
+				safe_annotations[key] = normalized
+	return {'labels': safe_labels, 'annotations': safe_annotations}
 
 
 def _pct(value):
@@ -237,7 +322,9 @@ def _alert_text(alert):
 		'级别：%s' % (labels.get('severity') or 'unknown'),
 		'实例：%s' % (labels.get('instance') or labels.get('host') or ''),
 		'摘要：%s' % (annotations.get('summary') or annotations.get('description') or alert.get('summary') or ''),
-		'详情：%s' % json.dumps(alert, ensure_ascii=False)[:2500],
+		'服务：%s' % labels.get('service', ''),
+		'环境：%s' % labels.get('environment', ''),
+		'详情：%s' % annotations.get('description', ''),
 	])
 
 
@@ -257,15 +344,15 @@ def _fallback_suggestion(alert):
 def _call_llm(config, alert):
 	endpoint = _llm_endpoint(config.llm_url)
 	if not endpoint:
-		return _fallback_suggestion(alert), '', '未配置大模型地址，已生成基础建议'
+		return _fallback_suggestion(alert), '未配置大模型地址，已生成基础建议'
 	prompt = (
 		'你是资深 SRE/AIOps 分析助手。请分析下面 Alertmanager 告警，输出中文处理建议，'
 		'包含：1. 告警含义；2. 可能根因；3. 排查步骤；4. 临时止血；5. 长期优化。'
 		'不要编造不存在的指标。\n\n%s'
 	) % _alert_text(alert)
 	headers = {'Content-Type': 'application/json'}
-	if config.llm_api_key:
-		headers['Authorization'] = 'Bearer %s' % config.llm_api_key
+	if config.decrypted_llm_api_key:
+		headers['Authorization'] = 'Bearer %s' % config.decrypted_llm_api_key
 	body = {
 		'model': config.llm_model or 'gpt-4o-mini',
 		'messages': [
@@ -275,37 +362,33 @@ def _call_llm(config, alert):
 		'temperature': 0.2,
 	}
 	response = requests.post(endpoint, json=body, headers=headers, timeout=20)
-	response_text = response.text[:4000]
 	if response.status_code >= 400:
-		return _fallback_suggestion(alert), response_text, '大模型接口返回 HTTP %s' % response.status_code
-	data = response.json()
-	content = ''
-	try:
-		content = data['choices'][0]['message']['content']
-	except Exception:
-		content = response_text
-	return content or _fallback_suggestion(alert), response_text, ''
+		return _fallback_suggestion(alert), '大模型接口返回 HTTP %s' % response.status_code
+	# Provider output is never persisted or rendered. The local suggestion is the
+	# bounded, deterministic contract for all success and failure paths.
+	return _fallback_suggestion(alert), ''
 
 
 def _save_alert_analysis(alert, config):
-	labels = alert.get('labels') or {}
-	annotations = alert.get('annotations') or {}
+	alert = sanitize_alert(alert)
+	labels = alert['labels']
+	annotations = alert['annotations']
 	record = AiopsAlertAnalysis.objects.create(
 		alert_name=labels.get('alertname') or alert.get('alertname') or '',
 		severity=labels.get('severity') or '',
 		instance=labels.get('instance') or labels.get('host') or '',
-		raw_payload=json.dumps(alert, ensure_ascii=False),
+		raw_payload='',
 		summary=annotations.get('summary') or annotations.get('description') or alert.get('summary') or '',
 	)
 	try:
-		suggestion, llm_response, error = _call_llm(config, alert)
+		suggestion, error = _call_llm(config, alert)
 		record.suggestion = suggestion
-		record.llm_response = llm_response
+		record.llm_response = ''
 		record.error = error
-		record.status = AiopsAlertAnalysis.STATUS_FAILED if error and llm_response else AiopsAlertAnalysis.STATUS_ANALYZED
-	except Exception as exc:
+		record.status = AiopsAlertAnalysis.STATUS_ANALYZED
+	except Exception:
 		record.suggestion = _fallback_suggestion(alert)
-		record.error = str(exc)
+		record.error = '大模型分析失败，已生成基础建议'
 		record.status = AiopsAlertAnalysis.STATUS_FAILED
 	record.save(update_fields=['suggestion', 'llm_response', 'error', 'status', 'updated_at'])
 	return record
@@ -343,6 +426,8 @@ def _analysis_payload(item):
 
 @session_login_required
 def dashboard(request):
+	if request.method == 'POST':
+		return save_config(request)
 	hosts = list(visible_hosts_for_request(request).order_by('id'))
 	open_alerts = list(AlertEvent.objects.select_related('host').filter(status=AlertEvent.STATUS_OPEN, host__in=hosts)[:50])
 	failed_commands = list(CommandExecution.objects.select_related('host').filter(host__in=hosts, status=CommandExecution.STATUS_FAILED)[:30])
@@ -377,14 +462,11 @@ def dashboard(request):
 		'capacity': capacity,
 		'runbooks': _runbooks(),
 		'integration': {
-			'alertmanager_url': config.alertmanager_url,
-			'llm_url': config.llm_url,
-			'llm_model': config.llm_model,
+			'alertmanager_configured': bool(config.alertmanager_url),
+			'llm_configured': bool(config.llm_url),
 			'llm_api_key_set': bool(config.llm_api_key),
 			'enabled': config.enabled,
 			'csrf': get_token(request),
-			'webhook_url': request.build_absolute_uri('/aiops/webhook/'),
-			'config_url': '/aiops/config/',
 		},
 		'alert_analyses': [_analysis_payload(item) for item in alert_analyses],
 		'recent_changes': [
@@ -400,9 +482,15 @@ def save_config(request):
 	if request.method != 'POST':
 		return HttpResponseNotAllowed(['POST'])
 	config = AiopsIntegration.current()
-	config.alertmanager_url = (request.POST.get('alertmanager_url') or '').strip()
-	config.llm_url = (request.POST.get('llm_url') or '').strip()
-	config.llm_model = (request.POST.get('llm_model') or '').strip() or 'gpt-4o-mini'
+	alertmanager_url = (request.POST.get('alertmanager_url') or '').strip()
+	llm_url = (request.POST.get('llm_url') or '').strip()
+	if alertmanager_url:
+		config.alertmanager_url = alertmanager_url
+	if llm_url:
+		config.llm_url = llm_url
+	llm_model = (request.POST.get('llm_model') or '').strip()
+	if llm_model:
+		config.llm_model = llm_model
 	config.enabled = request.POST.get('enabled') == 'on'
 	api_key = (request.POST.get('llm_api_key') or '').strip()
 	if api_key:
