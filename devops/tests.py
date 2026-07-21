@@ -6117,3 +6117,25 @@ class RbacAdministrationClosureTests(TestCase):
         fresh_request = factory.get('/devops/')
         fresh_request.session = {'user_id': self.admin.id}
         self.assertFalse(has_role(fresh_request, DevOpsRole.ROLE_VIEWER, DevOpsModulePermission.MODULE_CLUSTER))
+
+    def test_module_denies_hide_slo_and_runbook_navigation_while_permitted_links_remain(self):
+        DevOpsModulePermission.objects.create(
+            user=self.target, module=DevOpsModulePermission.MODULE_SERVICE,
+            role=DevOpsModulePermission.ROLE_NONE,
+        )
+        DevOpsModulePermission.objects.create(
+            user=self.target, module=DevOpsModulePermission.MODULE_COMMAND,
+            role=DevOpsModulePermission.ROLE_NONE,
+        )
+        self.set_session_user(self.target)
+
+        navigation_response = self.client.get(reverse('devops:security_settings'))
+        slo_response = self.client.get(reverse('devops:service_slos'))
+        runbook_response = self.client.get(reverse('devops:runbooks'))
+
+        self.assertEqual(navigation_response.status_code, 200)
+        self.assertNotContains(navigation_response, reverse('devops:service_slos'))
+        self.assertNotContains(navigation_response, reverse('devops:runbooks'))
+        self.assertContains(navigation_response, reverse('devops:file_distributions'))
+        self.assertEqual(slo_response.status_code, 403)
+        self.assertEqual(runbook_response.status_code, 403)
