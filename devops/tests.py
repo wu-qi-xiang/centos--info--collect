@@ -1691,6 +1691,271 @@ contexts:
         loader.assert_called_once_with(cluster.id, cluster.decrypted_kubeconfig, 'default', refresh=False)
 
 
+class PrometheusRuleServiceTests(K8sClusterTests):
+    rule_yaml = '''apiVersion: monitoring.coreos.com/v1
+kind: PrometheusRule
+metadata:
+  name: api-errors
+  namespace: monitoring
+  resourceVersion: "42"
+spec:
+  groups: []
+'''
+
+    def _cluster(self):
+        return self.create_cluster('prometheus-rules-cluster')
+
+    def _kubernetes_modules(self, handler):
+        observed = {}
+
+        def new_client_from_config(config_file=None):
+            observed['config_file'] = config_file
+            class ApiClient(object):
+                def close(self):
+                    observed['close_count'] = observed.get('close_count', 0) + 1
+            return ApiClient()
+
+        class CustomObjectsApi(object):
+            def __init__(self, api_client):
+                self.api_client = api_client
+
+            def list_cluster_custom_object(self, **kwargs):
+                return handler('list', observed, kwargs)
+
+            def get_namespaced_custom_object(self, **kwargs):
+                return handler('get', observed, kwargs)
+
+            def replace_namespaced_custom_object(self, **kwargs):
+                return handler('replace', observed, kwargs)
+
+            def delete_namespaced_custom_object(self, **kwargs):
+                return handler('delete', observed, kwargs)
+
+        fake_client = types.ModuleType('kubernetes.client')
+        fake_client.CustomObjectsApi = CustomObjectsApi
+        fake_config = types.ModuleType('kubernetes.config')
+        fake_config.new_client_from_config = new_client_from_config
+        fake_kubernetes = types.ModuleType('kubernetes')
+        fake_kubernetes.client = fake_client
+        fake_kubernetes.config = fake_config
+        return observed, {
+            'kubernetes': fake_kubernetes,
+            'kubernetes.client': fake_client,
+            'kubernetes.config': fake_config,
+        }
+
+    def test_list_uses_fixed_gvk_across_all_namespaces(self):
+        from .services import list_prometheus_rules
+
+        def handler(action, observed, kwargs):
+            self.assertEqual(action, 'list')
+            observed['kwargs'] = kwargs
+            return {'items': [
+                {'metadata': {'name': 'z-rule', 'namespace': 'z', 'resourceVersion': '2'}},
+                {'metadata': {'name': 'a-rule', 'namespace': 'a', 'resourceVersion': '1'}},
+            ]}
+
+        observed, modules = self._kubernetes_modules(handler)
+        with mock.patch.dict(sys.modules, modules):
+            result = list_prometheus_rules(self._cluster())
+
+        self.assertTrue(result['ok'])
+        self.assertEqual([(item['namespace'], item['name']) for item in result['rules']], [('a', 'a-rule'), ('z', 'z-rule')])
+        self.assertEqual(observed['kwargs'], {
+            'group': 'monitoring.coreos.com', 'version': 'v1', 'plural': 'prometheusrules',
+            '_request_timeout': 8,
+        })
+        self.assertFalse(os.path.exists(observed['config_file']))
+        self.assertEqual(observed.get('close_count'), 1)
+
+    def test_custom_objects_constructor_failure_closes_client_and_removes_temp_config(self):
+        from .services import _prometheus_rule_custom_objects_api
+
+        def handler(action, observed, kwargs):
+            self.fail('CustomObjectsApi construction must fail before a request is made')
+
+        observed, modules = self._kubernetes_modules(handler)
+
+        class FailingCustomObjectsApi(object):
+            def __init__(self, api_client):
+                raise RuntimeError('constructor failure')
+
+        modules['kubernetes.client'].CustomObjectsApi = FailingCustomObjectsApi
+        with mock.patch.dict(sys.modules, modules):
+            with self.assertRaises(RuntimeError):
+                _prometheus_rule_custom_objects_api(self._cluster())
+
+        self.assertEqual(observed.get('close_count'), 1)
+        self.assertFalse(os.path.exists(observed['config_file']))
+
+    def test_get_uses_namespaced_fixed_gvk_and_returns_yaml(self):
+        from .services import get_prometheus_rule
+
+        def handler(action, observed, kwargs):
+            self.assertEqual(action, 'get')
+            observed['kwargs'] = kwargs
+            return {
+                'apiVersion': 'monitoring.coreos.com/v1', 'kind': 'PrometheusRule',
+                'metadata': {'name': 'api-errors', 'namespace': 'monitoring', 'resourceVersion': '42'},
+                'spec': {'groups': []},
+            }
+
+        observed, modules = self._kubernetes_modules(handler)
+        with mock.patch.dict(sys.modules, modules):
+            result = get_prometheus_rule(self._cluster(), 'monitoring', 'api-errors')
+
+        self.assertTrue(result['ok'])
+        self.assertIn('resourceVersion: \'42\'', result['yaml'])
+        self.assertEqual(observed['kwargs']['namespace'], 'monitoring')
+        self.assertEqual(observed['kwargs']['name'], 'api-errors')
+        self.assertEqual(observed['kwargs']['group'], 'monitoring.coreos.com')
+        self.assertEqual(observed.get('close_count'), 1)
+
+    def test_replace_validates_yaml_identity_and_forwards_resource_version(self):
+        from .services import replace_prometheus_rule
+
+        def handler(action, observed, kwargs):
+            self.assertEqual(action, 'replace')
+            observed['kwargs'] = kwargs
+            return kwargs['body']
+
+        observed, modules = self._kubernetes_modules(handler)
+        with mock.patch.dict(sys.modules, modules):
+            result = replace_prometheus_rule(self._cluster(), 'monitoring', 'api-errors', self.rule_yaml)
+
+        self.assertTrue(result['ok'])
+        self.assertEqual(observed['kwargs']['body']['metadata']['resourceVersion'], '42')
+        self.assertEqual(observed['kwargs']['namespace'], 'monitoring')
+        self.assertEqual(observed['kwargs']['name'], 'api-errors')
+        self.assertEqual(observed.get('close_count'), 1)
+
+    def test_replace_rejects_invalid_yaml_before_api(self):
+        from .services import replace_prometheus_rule
+
+        cluster = self._cluster()
+        invalid_cases = (
+            'apiVersion: [broken',
+            self.rule_yaml + '---\nkind: PrometheusRule\n',
+            self.rule_yaml.replace('monitoring.coreos.com/v1', 'v1'),
+            self.rule_yaml.replace('kind: PrometheusRule', 'kind: ConfigMap'),
+            self.rule_yaml.replace('name: api-errors', 'name: other-rule'),
+            self.rule_yaml.replace('namespace: monitoring', 'namespace: other'),
+            self.rule_yaml.replace('resourceVersion: "42"\n', ''),
+        )
+        for yaml_text in invalid_cases:
+            with self.subTest(yaml_text=yaml_text):
+                with mock.patch('devops.services._prometheus_rule_custom_objects_api') as api:
+                    result = replace_prometheus_rule(cluster, 'monitoring', 'api-errors', yaml_text)
+                self.assertFalse(result['ok'])
+                self.assertEqual(result['code'], 'invalid_yaml')
+                api.assert_not_called()
+
+    def test_delete_uses_selected_identity_and_resource_version(self):
+        from .services import delete_prometheus_rule
+
+        def handler(action, observed, kwargs):
+            self.assertEqual(action, 'delete')
+            observed['kwargs'] = kwargs
+            return {'status': 'Success'}
+
+        observed, modules = self._kubernetes_modules(handler)
+        with mock.patch.dict(sys.modules, modules):
+            result = delete_prometheus_rule(self._cluster(), 'monitoring', 'api-errors', '42')
+
+        self.assertTrue(result['ok'])
+        self.assertEqual(observed['kwargs']['body'], {'preconditions': {'resourceVersion': '42'}})
+        self.assertEqual(observed['kwargs']['plural'], 'prometheusrules')
+        self.assertEqual(observed.get('close_count'), 1)
+
+    def test_delete_conflict_requires_refresh_without_raw_error(self):
+        from .services import delete_prometheus_rule
+
+        class ApiError(Exception):
+            status = 409
+            reason = 'private resource version conflict detail'
+
+        def handler(action, observed, kwargs):
+            raise ApiError('raw delete conflict body')
+
+        observed, modules = self._kubernetes_modules(handler)
+        with mock.patch.dict(sys.modules, modules):
+            result = delete_prometheus_rule(self._cluster(), 'monitoring', 'api-errors', '42')
+
+        self.assertFalse(result['ok'])
+        self.assertEqual(result['code'], 'conflict')
+        self.assertIn('刷新', result['message'])
+        self.assertNotIn('private resource version conflict detail', result['message'])
+        self.assertNotIn('raw delete conflict body', result['message'])
+        self.assertEqual(observed.get('close_count'), 1)
+
+    def test_safe_kubernetes_errors_do_not_leak_raw_details(self):
+        from .services import list_prometheus_rules
+
+        class ApiError(Exception):
+            status = 403
+            reason = 'token=private-value must not leak'
+
+        def handler(action, observed, kwargs):
+            raise ApiError('raw private response body')
+
+        observed, modules = self._kubernetes_modules(handler)
+        with mock.patch.dict(sys.modules, modules):
+            result = list_prometheus_rules(self._cluster())
+
+        self.assertFalse(result['ok'])
+        self.assertEqual(result['code'], 'forbidden')
+        self.assertNotIn('private-value', result['message'])
+        self.assertNotIn('raw private response body', result['message'])
+        self.assertEqual(observed.get('close_count'), 1)
+
+    def test_missing_crd_and_timeout_are_reported_with_safe_categories(self):
+        from .services import list_prometheus_rules
+        cluster = self._cluster()
+
+        class MissingCrd(Exception):
+            status = 404
+
+        class RequestTimeout(Exception):
+            pass
+
+        for expected_code, error in (
+            ('crd_not_found', MissingCrd('raw missing CRD response')),
+            ('timeout', RequestTimeout('raw timeout response')),
+        ):
+            with self.subTest(expected_code=expected_code):
+                def handler(action, observed, kwargs):
+                    raise error
+
+                observed, modules = self._kubernetes_modules(handler)
+                with mock.patch.dict(sys.modules, modules):
+                    result = list_prometheus_rules(cluster)
+
+                self.assertFalse(result['ok'])
+                self.assertEqual(result['code'], expected_code)
+                self.assertNotIn('raw ', result['message'])
+                self.assertEqual(observed.get('close_count'), 1)
+
+    def test_conflict_returns_refresh_required_without_raw_error(self):
+        from .services import replace_prometheus_rule
+
+        class ApiError(Exception):
+            status = 409
+            reason = 'resource version conflict private detail'
+
+        def handler(action, observed, kwargs):
+            raise ApiError('raw conflict body')
+
+        observed, modules = self._kubernetes_modules(handler)
+        with mock.patch.dict(sys.modules, modules):
+            result = replace_prometheus_rule(self._cluster(), 'monitoring', 'api-errors', self.rule_yaml)
+
+        self.assertFalse(result['ok'])
+        self.assertEqual(result['code'], 'conflict')
+        self.assertIn('刷新', result['message'])
+        self.assertNotIn('private detail', result['message'])
+        self.assertEqual(observed.get('close_count'), 1)
+
+
 class DevOpsViewTests(TestCase):
     def setUp(self):
         self.user = User.objects.create(
