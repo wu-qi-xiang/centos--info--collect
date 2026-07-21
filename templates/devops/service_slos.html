@@ -1,0 +1,36 @@
+{% extends "base.html" %}
+
+{% block title %}服务 SLO - DevOps平台{% endblock %}
+
+{% block content %}
+<div class="container-fluid px-4">
+    <h1 class="h3 mb-3">服务 SLO</h1>
+    {% include "devops/_nav.html" %}
+    {% if can_manage %}
+    <div class="card mb-3"><div class="card-header">{% if editing_slo %}编辑服务目标{% else %}新增服务目标{% endif %}</div><div class="card-body">
+        <form method="post" action="{% if editing_slo %}{% url 'devops:service_slo_update' editing_slo.id %}{% endif %}" class="row g-3 align-items-end">
+            {% csrf_token %}
+            <div class="col-md-3"><label class="form-label">服务</label>{{ form.service }}{{ form.service.errors }}</div>
+            <div class="col-md-2"><label class="form-label">指标</label>{{ form.metric_kind }}{{ form.metric_kind.errors }}</div>
+            <div class="col-md-2"><label class="form-label">目标</label>{{ form.target }}{{ form.target.errors }}</div>
+            <div class="col-md-2"><label class="form-label">窗口（分钟）</label>{{ form.window_minutes }}{{ form.window_minutes.errors }}</div>
+            <div class="col-md-1"><label class="form-label">启用</label>{{ form.enabled }}</div>
+            <div class="col-md-2"><button class="btn btn-primary" type="submit">保存 SLO</button>{% if editing_slo %}<a class="btn btn-outline-secondary" href="{% url 'devops:service_slos' %}">取消</a>{% endif %}</div>
+        </form>
+    </div></div>
+    {% endif %}
+    <div class="card"><div class="card-header">服务目标状态</div><div class="card-body table-responsive">
+        <table class="table table-sm align-middle">
+            <tr><th>服务</th><th>指标</th><th>目标</th><th>窗口</th><th>状态</th><th>安全摘要</th><th>最近评估</th><th>启用</th>{% if can_manage %}<th>操作</th>{% endif %}</tr>
+            {% for slo in slos %}
+            <tr>
+                <td>{{ slo.service.name }}</td><td>{{ slo.get_metric_kind_display }}</td><td>{{ slo.target }}</td><td>{{ slo.window_minutes }} 分钟</td>
+                <td>{{ slo.get_last_state_display }}</td><td>{{ slo.last_summary|default:"-" }}</td>
+                <td>{{ slo.last_evaluated_at|date:"Y-m-d H:i:s"|default:"-" }}</td><td>{% if slo.enabled %}是{% else %}否{% endif %}</td>
+                {% if can_manage %}<td class="text-nowrap"><a class="btn btn-outline-primary btn-sm" href="{% url 'devops:service_slos' %}?edit={{ slo.id }}">编辑</a><form method="post" action="{% url 'devops:service_slo_evaluate' slo.id %}" class="d-inline">{% csrf_token %}<button class="btn btn-outline-secondary btn-sm" type="submit">评估</button></form></td>{% endif %}
+            </tr>
+            {% empty %}<tr><td colspan="9" class="text-muted">当前授权范围内没有服务 SLO</td></tr>{% endfor %}
+        </table>
+    </div></div>
+</div>
+{% endblock %}

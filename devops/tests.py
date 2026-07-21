@@ -59,11 +59,12 @@ from .models import (
     ServiceOperation,
     ServiceCatalog,
     ServiceDependency,
+    ServiceSlo,
     ComplianceBaseline,
     ComplianceResult,
 )
 from .services import active_maintenance_windows_for_host, active_maintenance_windows_for_release, cleanup_audit_logs, cleanup_metric_samples, deployment_risk_preview, enqueue_background_job, evaluate_worker_alert_thresholds, latest_metric_map, notify_alert, record_alert, record_metric_sample, run_background_job, send_notification_channel, validate_remote_path, scan_compliance_baseline, create_project_onboarding, claim_next_background_job, process_next_background_job, background_job_spec, fail_timed_out_background_jobs, require_deployment_maintenance_approval, summarize_background_jobs
-from .services import execute_batch_task, execute_command_record, execute_deployment_release, execute_deployment_rollback, execute_file_distribution
+from .services import execute_batch_task, execute_command_record, execute_deployment_release, execute_deployment_rollback, execute_file_distribution, evaluate_service_slo, require_deployment_slo_approval
 from .services import COMMAND_ALLOWED, COMMAND_BLOCKED, evaluate_command_policy, has_role
 from .services import (
     build_k8s_resource_matches,
@@ -2425,6 +2426,43 @@ class DevOpsViewTests(TestCase):
         self.assertEqual(response.json()['code'], 'not_found')
         approval.refresh_from_db()
         self.assertEqual(approval.status, ApprovalRequest.STATUS_PENDING)
+
+    def test_deployment_approval_requires_full_host_scope_for_classic_and_api_decisions(self):
+        self.set_role(DevOpsRole.ROLE_ADMIN)
+        allowed_group = HostGroup.objects.create(name='approval-release-allowed')
+        allowed_group.hosts.add(self.host)
+        other = NewLinux.objects.create(
+            linux_name='approval-release-blocked', linux_ip='127.0.1.16',
+            linux_hostname='approval-release-blocked', linux_port='22', linux_user='root',
+        )
+        scope = DevOpsHostScope.objects.create(user=self.user)
+        scope.groups.add(allowed_group)
+        app = DeploymentApp.objects.create(name='approval-scope-app')
+        release = DeploymentRelease.objects.create(app=app, version='scope-v1', deploy_script='echo deploy')
+        release.hosts.add(self.host, other)
+        classic = ApprovalRequest.objects.create(
+            request_type=ApprovalRequest.TYPE_DEPLOYMENT, title='classic deployment scope',
+            deployment_release=release, requester='another-user',
+        )
+        api = ApprovalRequest.objects.create(
+            request_type=ApprovalRequest.TYPE_DEPLOYMENT, title='api deployment scope',
+            deployment_release=release, requester='another-user',
+        )
+
+        classic_response = self.client.post(reverse('devops:approval_decide', args=[classic.id]), {
+            'action': 'reject', 'comment': 'no scope',
+        })
+        api_response = self.client.post(
+            reverse('devops:api_approval_decide', args=[api.id]),
+            data=json.dumps({'action': 'reject', 'comment': 'no scope'}), content_type='application/json',
+        )
+
+        self.assertEqual(classic_response.status_code, 403)
+        self.assertEqual(api_response.status_code, 404)
+        classic.refresh_from_db()
+        api.refresh_from_db()
+        self.assertEqual(classic.status, ApprovalRequest.STATUS_PENDING)
+        self.assertEqual(api.status, ApprovalRequest.STATUS_PENDING)
 
     def test_api_approval_decide_self_request_stays_pending(self):
         self.set_role(DevOpsRole.ROLE_ADMIN)
@@ -5296,6 +5334,291 @@ class MaintenanceWindowViewTests(TestCase):
 
         self.assertEqual(response.status_code, 403)
         self.assertEqual(response.json()['code'], 'forbidden')
+
+
+class ServiceSloTests(TestCase):
+    def setUp(self):
+        from monitor.models import PrometheusConfig
+        self.admin = User.objects.create(
+            user='slo-admin', email='slo-admin@example.com',
+            password='plain-password', confirm_pwd='plain-password',
+        )
+        self.viewer = User.objects.create(
+            user='slo-viewer', email='slo-viewer@example.com',
+            password='plain-password', confirm_pwd='plain-password',
+        )
+        self.host = NewLinux.objects.create(
+            linux_name='slo-host', linux_ip='127.0.0.211', linux_hostname='slo-host',
+        )
+        self.other_host = NewLinux.objects.create(
+            linux_name='slo-other', linux_ip='127.0.0.212', linux_hostname='slo-other',
+        )
+        self.service = ServiceCatalog.objects.create(name='slo-service')
+        self.service.hosts.add(self.host)
+        PrometheusConfig.objects.create(name='slo-prometheus', prometheus_url='https://prometheus.example.test')
+        DevOpsRole.objects.create(user=self.admin, role=DevOpsRole.ROLE_ADMIN)
+        DevOpsRole.objects.create(user=self.viewer, role=DevOpsRole.ROLE_VIEWER)
+        DevOpsModulePermission.objects.create(
+            user=self.admin, module=DevOpsModulePermission.MODULE_SECURITY,
+            role=DevOpsRole.ROLE_ADMIN,
+        )
+        DevOpsModulePermission.objects.create(
+            user=self.viewer, module=DevOpsModulePermission.MODULE_SERVICE,
+            role=DevOpsRole.ROLE_VIEWER,
+        )
+        session = self.client.session
+        session['is_login'] = True
+        session['user_id'] = self.admin.id
+        session['user_name'] = self.admin.user
+        session.save()
+
+    def make_slo(self, **kwargs):
+        defaults = {
+            'service': self.service,
+            'metric_kind': ServiceSlo.KIND_AVAILABILITY,
+            'target': 99.0,
+            'window_minutes': 60,
+            'enabled': True,
+        }
+        defaults.update(kwargs)
+        return ServiceSlo.objects.create(**defaults)
+
+    def create_release(self):
+        app = DeploymentApp.objects.create(name='slo-release-app')
+        release = DeploymentRelease.objects.create(
+            app=app, version='slo-v1', deploy_script='echo deploy',
+        )
+        release.hosts.add(self.host)
+        project = DevOpsProject.objects.create(name='slo-release-project')
+        project.services.add(self.service)
+        project.deployment_apps.add(app)
+        return release
+
+    def test_model_rejects_unknown_metric_target_and_window(self):
+        invalid_kind = ServiceSlo(
+            service=self.service, metric_kind='raw_promql', target=99, window_minutes=60,
+        )
+        invalid_target = ServiceSlo(
+            service=self.service, metric_kind=ServiceSlo.KIND_AVAILABILITY,
+            target=101, window_minutes=60,
+        )
+        invalid_window = ServiceSlo(
+            service=self.service, metric_kind=ServiceSlo.KIND_AVAILABILITY,
+            target=99, window_minutes=0,
+        )
+        for slo in (invalid_kind, invalid_target, invalid_window):
+            with self.assertRaises(ValidationError):
+                slo.full_clean()
+
+    def test_viewer_cannot_create_slo_and_out_of_scope_service_is_not_listed(self):
+        self.make_slo()
+        group = HostGroup.objects.create(name='slo-viewer-scope')
+        group.hosts.add(self.other_host)
+        scope = DevOpsHostScope.objects.create(user=self.viewer)
+        scope.groups.add(group)
+        session = self.client.session
+        session['user_id'] = self.viewer.id
+        session['user_name'] = self.viewer.user
+        session.save()
+
+        page = self.client.get(reverse('devops:service_slos'))
+        api = self.client.get(reverse('devops:api_service_slos'))
+        create = self.client.post(reverse('devops:service_slos'), {
+            'service': self.service.id, 'metric_kind': ServiceSlo.KIND_AVAILABILITY,
+            'target': '99', 'window_minutes': '60', 'enabled': 'on',
+        })
+
+        self.assertEqual(page.status_code, 200)
+        self.assertContains(page, reverse('devops:service_slos'))
+        self.assertNotContains(page, self.service.name)
+        self.assertEqual(api.status_code, 200)
+        self.assertEqual(api.json()['results'], [])
+        self.assertEqual(create.status_code, 403)
+
+    def test_security_admin_can_create_scoped_slo_through_api(self):
+        response = self.client.post(
+            reverse('devops:api_service_slos'),
+            data=json.dumps({
+                'service': self.service.id,
+                'metric_kind': ServiceSlo.KIND_AVAILABILITY,
+                'target': '99',
+                'window_minutes': 60,
+                'enabled': True,
+            }),
+            content_type='application/json',
+        )
+
+        self.assertEqual(response.status_code, 201)
+        self.assertEqual(response.json()['slo']['service']['id'], self.service.id)
+        self.assertTrue(AuditLog.objects.filter(action='API创建服务SLO').exists())
+
+    @mock.patch('monitor.services.query_prometheus')
+    def test_fixed_slo_templates_scope_opposing_service_metrics_independently(self, query_prometheus):
+        other_service = ServiceCatalog.objects.create(name='other-slo-service')
+        other_service.hosts.add(self.other_host)
+        first = self.make_slo()
+        second = self.make_slo(service=other_service)
+
+        def service_result(config, query):
+            value = '0.999' if 'service="slo-service"' in query else '0.80'
+            return {'ok': True, 'body': {
+                'status': 'success', 'data': {'resultType': 'scalar', 'result': [1, value]},
+            }}
+        query_prometheus.side_effect = service_result
+
+        first_result = evaluate_service_slo(first)
+        second_result = evaluate_service_slo(second)
+
+        self.assertEqual(first_result['state'], ServiceSlo.STATE_HEALTHY)
+        self.assertEqual(second_result['state'], ServiceSlo.STATE_EXHAUSTED)
+        self.assertIn('service="slo-service"', query_prometheus.call_args_list[0][0][1])
+        self.assertIn('service="other-slo-service"', query_prometheus.call_args_list[1][0][1])
+
+    @mock.patch('monitor.services.query_prometheus')
+    def test_security_admin_can_update_and_evaluate_slo_but_viewer_cannot(self, query_prometheus):
+        slo = self.make_slo()
+        query_prometheus.return_value = {'ok': True, 'body': {
+            'status': 'success', 'data': {'resultType': 'scalar', 'result': [1, '0.80']},
+        }}
+        update = self.client.post(reverse('devops:service_slo_update', args=[slo.id]), {
+            'service': self.service.id, 'metric_kind': ServiceSlo.KIND_AVAILABILITY,
+            'target': '98', 'window_minutes': '30', 'enabled': 'on',
+        })
+        evaluate = self.client.post(reverse('devops:service_slo_evaluate', args=[slo.id]))
+        api_evaluate = self.client.post(
+            reverse('devops:api_service_slo_evaluate', args=[slo.id]),
+            data='{}', content_type='application/json',
+        )
+        slo.refresh_from_db()
+
+        self.assertEqual(update.status_code, 302)
+        self.assertEqual(evaluate.status_code, 302)
+        self.assertEqual(api_evaluate.status_code, 200)
+        self.assertEqual(slo.target, 98)
+        self.assertEqual(slo.last_state, ServiceSlo.STATE_EXHAUSTED)
+        self.assertTrue(AuditLog.objects.filter(action='手动评估服务SLO').exists())
+        self.assertTrue(AuditLog.objects.filter(action='API手动评估服务SLO').exists())
+
+        session = self.client.session
+        session['user_id'] = self.viewer.id
+        session['user_name'] = self.viewer.user
+        session.save()
+        denied = self.client.post(reverse('devops:service_slo_evaluate', args=[slo.id]))
+        self.assertEqual(denied.status_code, 403)
+
+    @mock.patch('monitor.services.query_prometheus')
+    def test_evaluator_reports_unavailable_without_raw_response(self, query_prometheus):
+        slo = self.make_slo()
+        query_prometheus.return_value = {
+            'ok': False, 'message': 'https://private.example.invalid/query secret-token',
+        }
+
+        result = evaluate_service_slo(slo)
+
+        self.assertEqual(result['state'], ServiceSlo.STATE_UNAVAILABLE)
+        self.assertEqual(slo.last_state, ServiceSlo.STATE_UNAVAILABLE)
+        self.assertNotIn('private.example.invalid', slo.last_summary)
+        self.assertNotIn('secret-token', slo.last_summary)
+
+    @mock.patch('monitor.services.query_prometheus')
+    def test_healthy_slo_allows_release_enqueue(self, query_prometheus):
+        self.make_slo()
+        query_prometheus.return_value = {
+            'ok': True,
+            'body': {'status': 'success', 'data': {'resultType': 'scalar', 'result': [1, '0.999']}},
+        }
+
+        with mock.patch('devops.views.enqueue_background_job') as enqueue:
+            response = self.client.post(reverse('devops:deployments'), {
+                'form_type': 'release', 'submit_mode': 'execute',
+                'app': DeploymentApp.objects.create(name='slo-healthy-app').id,
+                'version': 'healthy-v1', 'deploy_script': 'echo deploy', 'hosts': [self.host.id],
+            })
+
+        self.assertEqual(response.status_code, 302)
+        enqueue.assert_called_once()
+        self.assertFalse(ApprovalRequest.objects.filter(request_type=ApprovalRequest.TYPE_DEPLOYMENT).exists())
+
+    @mock.patch('monitor.services.query_prometheus')
+    def test_exhausted_slo_creates_and_reuses_deployment_approval(self, query_prometheus):
+        self.make_slo()
+        query_prometheus.return_value = {
+            'ok': True,
+            'body': {'status': 'success', 'data': {'resultType': 'scalar', 'result': [1, '0.80']}},
+        }
+        release = self.create_release()
+
+        first = require_deployment_slo_approval(release, requester=self.admin.user)
+        second = require_deployment_slo_approval(release, requester=self.admin.user)
+
+        self.assertEqual(first.id, second.id)
+        self.assertEqual(first.request_type, ApprovalRequest.TYPE_DEPLOYMENT)
+        self.assertIn('SLO', first.reason)
+        self.assertEqual(ApprovalRequest.objects.filter(deployment_release=release).count(), 1)
+
+    @mock.patch('monitor.services.query_prometheus')
+    def test_slo_gate_locks_release_and_keeps_one_pending_approval_on_repeated_submission(self, query_prometheus):
+        self.make_slo()
+        release = self.create_release()
+        query_prometheus.return_value = {'ok': True, 'body': {
+            'status': 'success', 'data': {'resultType': 'scalar', 'result': [1, '0.80']},
+        }}
+        with mock.patch('devops.services.transaction.atomic', wraps=__import__('django.db').db.transaction.atomic) as atomic:
+            require_deployment_slo_approval(release, requester=self.admin.user)
+            require_deployment_slo_approval(release, requester=self.admin.user)
+
+        self.assertGreaterEqual(atomic.call_count, 2)
+        self.assertEqual(ApprovalRequest.objects.filter(
+            deployment_release=release, status=ApprovalRequest.STATUS_PENDING,
+        ).count(), 1)
+
+    @mock.patch('monitor.services.query_prometheus')
+    def test_slo_gate_audits_only_bounded_state_and_counts(self, query_prometheus):
+        self.make_slo()
+        release = self.create_release()
+        raw_value = 'https://private.example.invalid/query never-store-this'
+        for response, expected_state in (
+            ({'ok': True, 'body': {'status': 'success', 'data': {'resultType': 'scalar', 'result': [1, '0.999']}}}, 'healthy'),
+            ({'ok': False, 'message': raw_value}, 'unavailable'),
+            ({'ok': True, 'body': {'status': 'success', 'data': {'resultType': 'scalar', 'result': [1, '0.80']}}}, 'exhausted'),
+        ):
+            query_prometheus.return_value = response
+            require_deployment_slo_approval(release, requester=self.admin.user)
+            audit_log = AuditLog.objects.filter(action='服务SLO发布门禁').latest('id')
+            self.assertIn('状态=%s' % expected_state, audit_log.detail)
+            self.assertNotIn(raw_value, audit_log.detail)
+            self.assertNotIn('avg(up)', audit_log.detail)
+
+    @mock.patch('monitor.services.query_prometheus')
+    def test_unavailable_slo_preserves_release_enqueue(self, query_prometheus):
+        self.make_slo()
+        query_prometheus.return_value = {'ok': False, 'message': 'upstream failure'}
+
+        with mock.patch('devops.views.enqueue_background_job') as enqueue:
+            response = self.client.post(reverse('devops:deployments'), {
+                'form_type': 'release', 'submit_mode': 'execute',
+                'app': DeploymentApp.objects.create(name='slo-unavailable-app').id,
+                'version': 'unavailable-v1', 'deploy_script': 'echo deploy', 'hosts': [self.host.id],
+            })
+
+        self.assertEqual(response.status_code, 302)
+        enqueue.assert_called_once()
+
+    @mock.patch('monitor.services.query_prometheus')
+    def test_api_and_audit_omit_raw_prometheus_payload(self, query_prometheus):
+        slo = self.make_slo()
+        raw_value = 'never-return-this-prometheus-payload'
+        query_prometheus.return_value = {
+            'ok': True,
+            'body': {'status': 'success', 'data': {'resultType': 'scalar', 'result': [1, '0.999'], 'raw': raw_value}},
+        }
+
+        evaluate_service_slo(slo)
+        response = self.client.get(reverse('devops:api_service_slos'))
+
+        self.assertEqual(response.status_code, 200)
+        self.assertNotIn(raw_value, json.dumps(response.json()))
+        self.assertNotIn(raw_value, '\n'.join(AuditLog.objects.values_list('detail', flat=True)))
 
 
 class RbacAdministrationClosureTests(TestCase):

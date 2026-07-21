@@ -154,3 +154,19 @@ class GitHubWorkflowRunWebhookTests(TestCase):
         self.assertEqual(response.status_code, 202)
         self.assertEqual(response.json()['code'], 'awaiting_approval')
         self.assertFalse(enqueue.called)
+
+    @mock.patch('devops.github_integration.require_deployment_slo_approval')
+    @mock.patch('devops.github_integration.enqueue_background_job')
+    def test_exhausted_slo_prevents_webhook_queueing_and_reuses_approval(self, enqueue, slo_gate):
+        approval = ApprovalRequest.objects.create(
+            request_type=ApprovalRequest.TYPE_DEPLOYMENT,
+            title='slo approval', deployment_release=self.release,
+        )
+        slo_gate.return_value = approval
+
+        response = self.post_webhook(HTTP_X_GITHUB_DELIVERY='delivery-awaiting-slo')
+
+        self.assertEqual(response.status_code, 202)
+        self.assertEqual(response.json()['code'], 'awaiting_approval')
+        self.assertFalse(enqueue.called)
+        slo_gate.assert_called_once_with(self.release, requester='github')

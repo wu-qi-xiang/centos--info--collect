@@ -85,6 +85,7 @@ from .models import (
     IntegrationHealthEvent,
     MaintenanceWindow,
     ServiceCatalog,
+    ServiceSlo,
 )
 from RemoteLinux.models import NewLinux
 
@@ -1623,6 +1624,13 @@ def can_access_hosts(request, hosts):
     return set(host_ids).issubset(allowed_ids)
 
 
+def can_decide_deployment_approval(request, approval):
+    """A deployment approval is actionable only when every release host is visible."""
+    if approval.request_type != ApprovalRequest.TYPE_DEPLOYMENT or not approval.deployment_release_id:
+        return True
+    return can_access_hosts(request, approval.deployment_release.hosts.all())
+
+
 def incident_reference_hosts(incident):
     hosts = []
     if incident.host_id:
@@ -2401,6 +2409,137 @@ def require_deployment_maintenance_approval(release, requester='', now=None):
     reason = '维护窗口要求审批：%s' % '、'.join(names)
     approval = create_deployment_approval(release, requester=requester, reason=reason[:500])
     return approval
+
+
+SLO_PROMETHEUS_QUERY_TEMPLATES = {
+    ServiceSlo.KIND_AVAILABILITY: 'avg(up{{{selector}}})',
+    ServiceSlo.KIND_LATENCY: (
+        'histogram_quantile(0.95, sum(rate(http_request_duration_seconds_bucket{{{selector}}}[{window}m])) by (le))'
+    ),
+    ServiceSlo.KIND_ERROR_RATE: (
+        'sum(rate(http_requests_total{{code=~"5..",{selector}}}[{window}m])) / '
+        'sum(rate(http_requests_total{{{selector}}}[{window}m]))'
+    ),
+}
+
+
+def _service_slo_query(slo):
+    """Render only one of the fixed server-owned Prometheus query templates."""
+    template = SLO_PROMETHEUS_QUERY_TEMPLATES.get(slo.metric_kind)
+    if not template:
+        return None
+    window = int(slo.window_minutes)
+    if window < 1 or window > 10080:
+        return None
+    # The selector is server-rendered from a bounded catalog identifier; callers
+    # cannot supply PromQL or alter the fixed query structure.
+    selector = 'service=%s' % json.dumps(slo.service.name)
+    return template.format(selector=selector, window=window)
+
+
+def _service_slo_numeric_result(body):
+    try:
+        data = body['data']
+        result_type = data['resultType']
+        result = data['result']
+        if result_type in ('scalar', 'string'):
+            value = result[1]
+        elif result_type == 'vector' and len(result) == 1:
+            value = result[0]['value'][1]
+        else:
+            return None
+        value = float(value)
+    except (KeyError, TypeError, ValueError, IndexError):
+        return None
+    return value if math.isfinite(value) else None
+
+
+def _service_slo_display_value(slo, value):
+    if slo.metric_kind == ServiceSlo.KIND_AVAILABILITY:
+        return value * 100, '%0.3f%%' % (value * 100)
+    if slo.metric_kind == ServiceSlo.KIND_ERROR_RATE:
+        return value * 100, '%0.3f%%' % (value * 100)
+    if slo.metric_kind == ServiceSlo.KIND_LATENCY:
+        return value * 1000, '%0.3f ms' % (value * 1000)
+    return None, ''
+
+
+def evaluate_service_slo(slo, now=None):
+    """Evaluate an SLO without retaining raw upstream results or query text."""
+    now = now or timezone.now()
+    query = _service_slo_query(slo)
+    state = ServiceSlo.STATE_UNAVAILABLE
+    summary = '指标不可用'
+    if query:
+        from monitor.models import PrometheusConfig
+        from monitor.services import query_prometheus
+
+        config = PrometheusConfig.objects.filter(enabled=True).exclude(prometheus_url='').order_by('id').first()
+        result = query_prometheus(config, query) if config else None
+        value = _service_slo_numeric_result(result.get('body') if isinstance(result, dict) and result.get('ok') else None)
+        if value is not None:
+            displayed, label = _service_slo_display_value(slo, value)
+            if displayed is not None:
+                healthy = displayed >= float(slo.target) if slo.metric_kind == ServiceSlo.KIND_AVAILABILITY else displayed <= float(slo.target)
+                state = ServiceSlo.STATE_HEALTHY if healthy else ServiceSlo.STATE_EXHAUSTED
+                summary = '%s，目标 %s' % (label, slo.target)
+    slo.last_state = state
+    slo.last_summary = summary[:200]
+    slo.last_evaluated_at = now
+    slo.save(update_fields=['last_state', 'last_summary', 'last_evaluated_at', 'updated_at'])
+    return {'state': state, 'summary': slo.last_summary}
+
+
+def deployment_service_slos(release):
+    services = ServiceCatalog.objects.filter(
+        models.Q(devops_projects__deployment_apps=release.app) |
+        models.Q(hosts__in=release.hosts.all())
+    ).distinct()
+    return ServiceSlo.objects.filter(service__in=services, enabled=True).select_related('service')
+
+
+def require_deployment_slo_approval(release, requester=''):
+    """Require an existing deployment approval when an enabled SLO is exhausted."""
+    with transaction.atomic():
+        release = DeploymentRelease.objects.select_for_update().get(pk=release.pk)
+        slo_count = 0
+        exhausted = []
+        unavailable_count = 0
+        for slo in deployment_service_slos(release):
+            slo_count += 1
+            try:
+                state = evaluate_service_slo(slo)['state']
+            except Exception:
+                # An unavailable metrics integration must preserve the release path.
+                state = ServiceSlo.STATE_UNAVAILABLE
+            if state == ServiceSlo.STATE_EXHAUSTED:
+                exhausted.append(slo.service.name)
+            elif state == ServiceSlo.STATE_UNAVAILABLE:
+                unavailable_count += 1
+        state = (
+            ServiceSlo.STATE_EXHAUSTED if exhausted else
+            ServiceSlo.STATE_UNAVAILABLE if unavailable_count else
+            ServiceSlo.STATE_HEALTHY
+        )
+        AuditLog.objects.create(
+            user=requester or 'system',
+            action='服务SLO发布门禁',
+            target_type='DeploymentRelease',
+            target_id=str(release.id),
+            detail='状态=%s, SLO数量=%s, 耗尽数量=%s' % (state, slo_count, len(exhausted)),
+            ip_address='',
+        )
+        if not exhausted:
+            return None
+        approval = ApprovalRequest.objects.filter(
+            request_type=ApprovalRequest.TYPE_DEPLOYMENT,
+            deployment_release=release,
+            status__in=(ApprovalRequest.STATUS_PENDING, ApprovalRequest.STATUS_APPROVED),
+        ).order_by('-created_at').first()
+        if approval:
+            return approval
+        reason = 'SLO 预算耗尽：%s' % '、'.join(exhausted[:5])
+        return create_deployment_approval(release, requester=requester, reason=reason[:500])
 
 
 def validate_remote_path(remote_path):

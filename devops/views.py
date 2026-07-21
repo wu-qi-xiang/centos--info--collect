@@ -46,6 +46,7 @@ from .forms import (
     AlertNotificationEscalationForm,
     ServiceOperationForm,
     ServiceCatalogForm,
+    ServiceSloForm,
     ProjectOnboardingForm,
 )
 from .models import (
@@ -74,6 +75,7 @@ from .models import (
     AlertNotificationEscalation,
     ServiceOperation,
     ServiceCatalog,
+    ServiceSlo,
     ServiceDependency,
     DevOpsProject,
     ComplianceBaseline,
@@ -86,6 +88,7 @@ from .services import (
     audit,
     can_access_host,
     can_access_hosts,
+    can_decide_deployment_approval,
     command_denied_message,
     create_command_approval,
     create_deployment_approval,
@@ -106,6 +109,8 @@ from .services import (
     service_command,
     latest_metric_map,
     require_deployment_maintenance_approval,
+    require_deployment_slo_approval,
+    evaluate_service_slo,
     clear_k8s_detail_cache,
     load_cached_k8s_cluster_detail,
     load_cached_k8s_node_detail,
@@ -656,6 +661,80 @@ def topology_service_choices(request):
     ).distinct()
 
 
+def service_slo_queryset(request):
+    return ServiceSlo.objects.select_related('service').filter(
+        service__in=topology_service_choices(request)
+    )
+
+
+def service_slo_form(request, *args, **kwargs):
+    form = ServiceSloForm(*args, **kwargs)
+    form.fields['service'].queryset = topology_service_choices(request)
+    return form
+
+
+@session_login_required
+def service_slos(request):
+    can_manage = has_role(request, DevOpsRole.ROLE_ADMIN, DevOpsModulePermission.MODULE_SECURITY)
+    if not can_manage:
+        denied = require_devops_role(request, DevOpsRole.ROLE_VIEWER, MODULE_SERVICE)
+        if denied:
+            return denied
+    if request.method == 'POST':
+        if not can_manage:
+            return HttpResponseForbidden('没有 SLO 管理权限')
+        form = service_slo_form(request, request.POST)
+        if form.is_valid():
+            slo = form.save()
+            audit(request, '创建服务SLO', 'ServiceSlo', slo.id, '%s:%s' % (slo.service.name, slo.metric_kind))
+            return redirect('devops:service_slos')
+        return render(request, 'devops/service_slos.html', {
+            'slos': service_slo_queryset(request), 'form': form, 'can_manage': can_manage,
+        }, status=400)
+    if request.method != 'GET':
+        return HttpResponseNotAllowed(['GET', 'POST'])
+    editing_slo = None
+    if can_manage and request.GET.get('edit'):
+        editing_slo = get_object_or_404(service_slo_queryset(request), id=request.GET.get('edit'))
+    return render(request, 'devops/service_slos.html', {
+        'slos': service_slo_queryset(request),
+        'form': service_slo_form(request, instance=editing_slo),
+        'editing_slo': editing_slo,
+        'can_manage': can_manage,
+    })
+
+
+@session_login_required
+def service_slo_update(request, id):
+    if request.method != 'POST':
+        return HttpResponseNotAllowed(['POST'])
+    denied = require_devops_role(request, DevOpsRole.ROLE_ADMIN, DevOpsModulePermission.MODULE_SECURITY)
+    if denied:
+        return denied
+    slo = get_object_or_404(service_slo_queryset(request), id=id)
+    form = service_slo_form(request, request.POST, instance=slo)
+    if form.is_valid():
+        slo = form.save()
+        audit(request, '更新服务SLO', 'ServiceSlo', slo.id, '指标=%s, 启用=%s' % (slo.metric_kind, bool(slo.enabled)))
+        return redirect('devops:service_slos')
+    return render(request, 'devops/service_slos.html', {
+        'slos': service_slo_queryset(request), 'form': form, 'editing_slo': slo, 'can_manage': True,
+    }, status=400)
+
+
+@session_login_required
+def service_slo_evaluate(request, id):
+    if request.method != 'POST':
+        return HttpResponseNotAllowed(['POST'])
+    denied = require_devops_role(request, DevOpsRole.ROLE_ADMIN, DevOpsModulePermission.MODULE_SECURITY)
+    if denied:
+        return denied
+    slo = get_object_or_404(service_slo_queryset(request), id=id)
+    result = evaluate_service_slo(slo)
+    audit(request, '手动评估服务SLO', 'ServiceSlo', slo.id, '状态=%s' % result['state'])
+    return redirect('devops:service_slos')
+
+
 def topology_service_form(request, *args, **kwargs):
     form = ServiceCatalogForm(
         *args,
@@ -976,15 +1055,20 @@ def deployments(request):
                         release,
                         requester=request.session.get('user_name'),
                     )
-                    if submit_for_approval or maintenance_approval:
-                        if maintenance_approval and release.status != DeploymentRelease.STATUS_PENDING:
+                    slo_approval = require_deployment_slo_approval(
+                        release,
+                        requester=request.session.get('user_name'),
+                    )
+                    approval_required = maintenance_approval or slo_approval
+                    if submit_for_approval or approval_required:
+                        if approval_required and release.status != DeploymentRelease.STATUS_PENDING:
                             release.status = DeploymentRelease.STATUS_PENDING
                             release.save(update_fields=['status'])
                         approval = create_deployment_approval(
                             release,
                             request.session.get('user_name'),
                             release.description,
-                        ) if not maintenance_approval else maintenance_approval
+                        ) if not approval_required else approval_required
                         audit(request, '提交发布审批', 'ApprovalRequest', approval.id, approval.title)
                     else:
                         enqueue_background_job(execute_deployment_release, release, user_role(request))
@@ -1155,6 +1239,8 @@ def approval_decide(request, id):
     if request.method != 'POST':
         return HttpResponseNotAllowed(['POST'])
     approval = get_object_or_404(ApprovalRequest, id=id)
+    if not can_decide_deployment_approval(request, approval):
+        return host_forbidden(request, approval.title)
     if approval.status != ApprovalRequest.STATUS_PENDING:
         return redirect('devops:approvals')
     current_user = request.session.get('user_name', '')

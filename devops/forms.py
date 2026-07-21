@@ -28,6 +28,7 @@ from .models import (
     AlertNotificationEscalation,
     ComplianceBaseline,
     ServiceCatalog,
+    ServiceSlo,
     DevOpsProject,
 )
 
@@ -221,6 +222,12 @@ class ServiceCatalogForm(forms.ModelForm):
         if self.instance and self.instance.pk and services.filter(id=self.instance.id).exists():
             raise forms.ValidationError('服务不能依赖自身')
         return services
+
+
+class ServiceSloForm(forms.ModelForm):
+    class Meta:
+        model = ServiceSlo
+        fields = ('service', 'metric_kind', 'target', 'window_minutes', 'enabled')
 
 
 class FileDistributionForm(forms.ModelForm):

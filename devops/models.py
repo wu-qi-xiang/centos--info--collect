@@ -168,6 +168,58 @@ class ServiceCatalog(models.Model):
         return self.name
 
 
+class ServiceSlo(models.Model):
+    """A bounded, safe-to-display service level objective configuration."""
+    KIND_AVAILABILITY = 'availability'
+    KIND_LATENCY = 'latency'
+    KIND_ERROR_RATE = 'error_rate'
+    KIND_CHOICES = (
+        (KIND_AVAILABILITY, '可用性'),
+        (KIND_LATENCY, '延迟'),
+        (KIND_ERROR_RATE, '错误率'),
+    )
+
+    STATE_HEALTHY = 'healthy'
+    STATE_EXHAUSTED = 'exhausted'
+    STATE_UNAVAILABLE = 'unavailable'
+    STATE_CHOICES = (
+        (STATE_HEALTHY, '健康'),
+        (STATE_EXHAUSTED, '预算耗尽'),
+        (STATE_UNAVAILABLE, '指标不可用'),
+    )
+
+    service = models.ForeignKey(ServiceCatalog, on_delete=models.CASCADE, related_name='slos')
+    metric_kind = models.CharField(max_length=20, choices=KIND_CHOICES)
+    target = models.DecimalField(max_digits=8, decimal_places=3)
+    window_minutes = models.PositiveIntegerField(default=60)
+    enabled = models.BooleanField(default=True)
+    last_state = models.CharField(max_length=20, choices=STATE_CHOICES, default=STATE_UNAVAILABLE)
+    last_summary = models.CharField(max_length=200, blank=True)
+    last_evaluated_at = models.DateTimeField(null=True, blank=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        db_table = 'devops_service_slo'
+        ordering = ['service__name', 'metric_kind', 'id']
+        unique_together = ('service', 'metric_kind')
+
+    def clean(self):
+        super(ServiceSlo, self).clean()
+        if self.metric_kind not in dict(self.KIND_CHOICES):
+            raise ValidationError({'metric_kind': '不支持的 SLO 指标类型'})
+        if self.target is None or self.target <= 0:
+            raise ValidationError({'target': '目标值必须大于 0'})
+        maximum = 60000 if self.metric_kind == self.KIND_LATENCY else 100
+        if self.target > maximum:
+            raise ValidationError({'target': '目标值超出允许范围'})
+        if not self.window_minutes or self.window_minutes > 10080:
+            raise ValidationError({'window_minutes': '统计窗口必须介于 1 到 10080 分钟'})
+
+    def __str__(self):
+        return '%s:%s' % (self.service, self.metric_kind)
+
+
 class ServiceDependency(models.Model):
     service = models.ForeignKey(ServiceCatalog, on_delete=models.CASCADE, related_name='upstream_links')
     upstream_service = models.ForeignKey(ServiceCatalog, on_delete=models.CASCADE, related_name='downstream_links')

@@ -9,7 +9,12 @@ from django.http import JsonResponse
 from django.views.decorators.csrf import csrf_exempt
 
 from .models import ApprovalRequest, AuditLog, DeploymentRelease, DevOpsSetting, IntegrationHealthEvent
-from .services import enqueue_background_job, execute_deployment_release, record_integration_health_event
+from .services import (
+    enqueue_background_job,
+    execute_deployment_release,
+    record_integration_health_event,
+    require_deployment_slo_approval,
+)
 
 
 MAX_WEBHOOK_BODY_BYTES = 1024 * 1024
@@ -210,7 +215,10 @@ def github_workflow_run(request):
             deployment_release=release,
             status=ApprovalRequest.STATUS_PENDING,
         ).exists()
-        approval_required = approval_pending or DevOpsSetting.current().force_deploy_approval
+        slo_approval = require_deployment_slo_approval(release, requester='github')
+        approval_required = (
+            approval_pending or slo_approval or DevOpsSetting.current().force_deploy_approval
+        )
         AuditLog.objects.create(
             user='github',
             action='GitHub workflow_run delivery',

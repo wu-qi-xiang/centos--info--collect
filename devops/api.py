@@ -10,6 +10,7 @@ from django.shortcuts import get_object_or_404
 from django.utils import timezone
 from django.views.decorators.http import require_http_methods
 
+from .forms import ServiceSloForm
 from .models import (
     AlertEvent,
     ApprovalRequest,
@@ -28,12 +29,14 @@ from .models import (
     NotificationChannel,
     NotificationLog,
     ServiceCatalog,
+    ServiceSlo,
 )
 from .services import (
     COMMAND_ALLOWED,
     audit,
     can_access_host,
     can_access_hosts,
+    can_decide_deployment_approval,
     command_denied_message,
     create_command_approval,
     enqueue_background_job,
@@ -52,6 +55,7 @@ from .services import (
     user_role,
     visible_hosts_for_request,
     summarize_integration_health,
+    evaluate_service_slo,
 )
 
 
@@ -581,6 +585,98 @@ def service_topology(request):
     })
 
 
+def serialize_service_slo(slo):
+    """Expose only the configuration and safe evaluation summary, never query data."""
+    return {
+        'id': slo.id,
+        'service': {'id': slo.service_id, 'name': slo.service.name},
+        'metric_kind': slo.metric_kind,
+        'metric_kind_label': label(slo, 'metric_kind'),
+        'target': str(slo.target),
+        'window_minutes': slo.window_minutes,
+        'enabled': slo.enabled,
+        'last_state': slo.last_state,
+        'last_state_label': label(slo, 'last_state'),
+        'last_summary': slo.last_summary,
+        'last_evaluated_at': iso(slo.last_evaluated_at),
+    }
+
+
+@api_login_required
+@require_http_methods(['GET', 'POST'])
+def service_slos(request):
+    can_manage = has_role(request, DevOpsRole.ROLE_ADMIN, MODULE_SECURITY)
+    if request.method == 'POST':
+        if not can_manage:
+            return api_error('没有服务 SLO 管理权限', status=403, code='forbidden')
+        payload = request_json(request)
+        if not isinstance(payload, dict):
+            return invalid_json_error()
+        hosts = visible_hosts_for_request(request)
+        services = ServiceCatalog.objects.filter(
+            models.Q(hosts__in=hosts) | models.Q(hosts__isnull=True)
+        ).distinct()
+        form = ServiceSloForm(payload)
+        form.fields['service'].queryset = services
+        if not form.is_valid():
+            return api_error('SLO 配置无效', status=400, code='validation_error')
+        slo = form.save()
+        audit(request, 'API创建服务SLO', 'ServiceSlo', slo.id, '%s:%s' % (slo.service.name, slo.metric_kind))
+        return JsonResponse({'ok': True, 'slo': serialize_service_slo(slo)}, status=201)
+    if not can_manage and not has_role(request, DevOpsRole.ROLE_VIEWER, MODULE_SERVICE):
+        return api_error('没有服务 SLO 查看权限', status=403, code='forbidden')
+    hosts = visible_hosts_for_request(request)
+    services = ServiceCatalog.objects.filter(
+        models.Q(hosts__in=hosts) | models.Q(hosts__isnull=True)
+    ).distinct()
+    slos = ServiceSlo.objects.select_related('service').filter(service__in=services)
+    return JsonResponse({'ok': True, 'results': [serialize_service_slo(slo) for slo in slos]})
+
+
+def scoped_service_slo_or_error(request, id):
+    hosts = visible_hosts_for_request(request)
+    services = ServiceCatalog.objects.filter(
+        models.Q(hosts__in=hosts) | models.Q(hosts__isnull=True)
+    ).distinct()
+    try:
+        return ServiceSlo.objects.select_related('service').get(id=id, service__in=services), None
+    except ServiceSlo.DoesNotExist:
+        return None, api_error('服务 SLO 不存在', status=404, code='not_found')
+
+
+@api_login_required
+@require_http_methods(['POST'])
+def service_slo_update(request, id):
+    if not has_role(request, DevOpsRole.ROLE_ADMIN, MODULE_SECURITY):
+        return api_error('没有服务 SLO 管理权限', status=403, code='forbidden')
+    payload = request_json(request)
+    if not isinstance(payload, dict):
+        return invalid_json_error()
+    slo, error = scoped_service_slo_or_error(request, id)
+    if error:
+        return error
+    form = ServiceSloForm(payload, instance=slo)
+    form.fields['service'].queryset = ServiceCatalog.objects.filter(id=slo.service_id)
+    if not form.is_valid():
+        return api_error('SLO 配置无效', status=400, code='validation_error')
+    slo = form.save()
+    audit(request, 'API更新服务SLO', 'ServiceSlo', slo.id, '指标=%s, 启用=%s' % (slo.metric_kind, bool(slo.enabled)))
+    return JsonResponse({'ok': True, 'slo': serialize_service_slo(slo)})
+
+
+@api_login_required
+@require_http_methods(['POST'])
+def service_slo_evaluate(request, id):
+    if not has_role(request, DevOpsRole.ROLE_ADMIN, MODULE_SECURITY):
+        return api_error('没有服务 SLO 管理权限', status=403, code='forbidden')
+    slo, error = scoped_service_slo_or_error(request, id)
+    if error:
+        return error
+    result = evaluate_service_slo(slo)
+    audit(request, 'API手动评估服务SLO', 'ServiceSlo', slo.id, '状态=%s' % result['state'])
+    return JsonResponse({'ok': True, 'slo': serialize_service_slo(slo)})
+
+
 @api_login_required
 @require_http_methods(['GET'])
 def dashboard(request):
@@ -900,6 +996,9 @@ def approval_decide(request, id):
     try:
         approval = scoped_approval_queryset(visible_hosts_for_request(request)).get(id=id)
     except ApprovalRequest.DoesNotExist:
+        return api_error('审批不存在', status=404, code='not_found')
+
+    if not can_decide_deployment_approval(request, approval):
         return api_error('审批不存在', status=404, code='not_found')
 
     if approval.status != ApprovalRequest.STATUS_PENDING:

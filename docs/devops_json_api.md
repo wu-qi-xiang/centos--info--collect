@@ -31,6 +31,18 @@
   - 返回服务、负责人、环境、描述、当前用户可见的关联主机及上游依赖。
   - 认证：需要 session 登录和服务管理模块只读权限；未登录返回 `401`，权限不足返回 `403`。
   - 主机范围：仅返回无关联主机的服务，或关联至少一台当前用户可见主机的服务；主机字段不会返回密码、私钥或其他凭据。上游依赖仅在依赖服务同样可见时返回。
+- `GET /devops/api/service-slos/`
+  - 返回当前用户主机范围内服务的 SLO 配置和安全评估摘要。
+  - 认证：需要 session 登录和服务管理模块只读权限；未登录返回 `401`，权限不足返回 `403`。
+  - 返回 `service`、`metric_kind`（仅 `availability`、`latency`、`error_rate`）、目标、窗口、启用状态、`last_state`（`healthy`、`exhausted`、`unavailable`）及安全摘要。
+  - 安全：不返回 Prometheus 地址、查询语句、原始响应、标签、样本或凭据。
+- `POST /devops/api/service-slos/`
+  - JSON：`service`、`metric_kind`、`target`、`window_minutes`、`enabled`。指标类型仅支持 `availability`、`latency`、`error_rate`；目标与窗口由服务端范围校验。
+  - 权限：需要安全策略模块管理员权限；服务必须在当前主机授权范围内。成功返回 `201` 和安全 SLO 摘要，创建操作记录摘要审计。
+- `POST /devops/api/service-slos/<id>/update/`
+  - 更新同一授权范围内的 SLO 配置；需要安全策略模块管理员权限。只接受受限的服务、指标类型、目标、窗口和启用状态，不接受 PromQL 或指标标签表达式。
+- `POST /devops/api/service-slos/<id>/evaluate/`
+  - 手动刷新同一授权范围内 SLO 的安全状态摘要；需要安全策略模块管理员权限。仅记录状态审计，不返回查询语句或原始 Prometheus 数据。
 - `GET /devops/api/dashboard/`
   - DevOps 概览、最近命令、最近告警、主机最新指标。
   - `recent_commands`、`recent_alerts`、`host_metrics` 和相关统计均按当前用户可见主机范围过滤。
@@ -93,6 +105,7 @@
 
 - `GET /devops/api/deployments/?limit=50`
   - 发布记录列表，仅返回包含当前用户可见主机的发布；`host_count` 只统计当前用户可见主机数量。
+  - 创建发布时，关联服务的已启用 SLO 若为 `exhausted`，平台会创建或复用待处理的发布审批而不入 Worker 队列；`unavailable` 不改变既有发布路径，也不会自动回滚或执行 SSH。
 - `GET /devops/api/maintenance-windows/`
   - 维护窗口日历。需要安全策略模块管理员权限；返回名称、时间、启用状态及当前用户授权范围内的主机和服务摘要。
   - 不返回主机凭据、服务配置、发布脚本或通知密钥。发布命中启用中的维护窗口时，平台会创建或复用待处理的发布审批，不能直接执行。
