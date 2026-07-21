@@ -2152,6 +2152,186 @@ spec:
         self.assertEqual(response.url, '%s?cluster=%s' % (reverse('devops:prometheus_rules'), cluster.id))
 
 
+class PrometheusRuleApiTests(K8sClusterTests):
+    rule_yaml = '''apiVersion: monitoring.coreos.com/v1
+kind: PrometheusRule
+metadata:
+  name: api-errors
+  namespace: monitoring
+  resourceVersion: "42"
+spec:
+  groups: []
+'''
+
+    def _set_cluster_role(self, role):
+        DevOpsModulePermission.objects.update_or_create(
+            user=self.user,
+            module=DevOpsModulePermission.MODULE_CLUSTER,
+            defaults={'role': role},
+        )
+
+    def _summary(self):
+        return {
+            'namespace': 'monitoring',
+            'name': 'api-errors',
+            'resource_version': '42',
+            'created_at': '2026-07-21T08:00:00Z',
+        }
+
+    def _detail_url(self, cluster):
+        return reverse('devops:api_prometheus_rule_detail', args=[cluster.id, 'monitoring', 'api-errors'])
+
+    def _update_url(self, cluster):
+        return reverse('devops:api_prometheus_rule_update', args=[cluster.id, 'monitoring', 'api-errors'])
+
+    def _delete_url(self, cluster):
+        return reverse('devops:api_prometheus_rule_delete', args=[cluster.id, 'monitoring', 'api-errors'])
+
+    def test_list_requires_session_and_cluster_viewer_permission(self):
+        cluster = self.create_cluster()
+        url = reverse('devops:api_prometheus_rules', args=[cluster.id])
+        self._set_cluster_role(DevOpsModulePermission.ROLE_NONE)
+        denied = self.client.get(url)
+        self.assertEqual(denied.status_code, 403)
+        self.assertEqual(denied.json()['code'], 'forbidden')
+
+        self.client.session.flush()
+        unauthenticated = self.client.get(url)
+        self.assertEqual(unauthenticated.status_code, 401)
+        self.assertEqual(unauthenticated.json()['code'], 'unauthorized')
+
+    def test_viewer_lists_safe_metadata_and_can_view_yaml(self):
+        cluster = self.create_cluster()
+        self._set_cluster_role(DevOpsRole.ROLE_VIEWER)
+        raw_marker = 'private rule body must not appear in a list'
+        unsafe_summary = self._summary()
+        unsafe_summary['yaml'] = raw_marker
+        with mock.patch('devops.api.list_prometheus_rules', return_value={
+            'ok': True, 'code': 'ok', 'rules': [unsafe_summary],
+        }) as list_rules:
+            response = self.client.get(reverse('devops:api_prometheus_rules', args=[cluster.id]))
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.json(), {'ok': True, 'results': [self._summary()]})
+        self.assertNotIn(raw_marker, json.dumps(response.json()))
+        list_rules.assert_called_once_with(cluster)
+
+        with mock.patch('devops.api.get_prometheus_rule', return_value={
+            'ok': True, 'code': 'ok', 'yaml': self.rule_yaml,
+            'rule': {'metadata': {'resourceVersion': '42'}, 'private': raw_marker},
+        }) as get_rule:
+            detail = self.client.get(self._detail_url(cluster))
+        self.assertEqual(detail.status_code, 200)
+        self.assertEqual(detail.json(), {'ok': True, 'yaml': self.rule_yaml})
+        self.assertNotIn(raw_marker, json.dumps(detail.json()))
+        get_rule.assert_called_once_with(cluster, 'monitoring', 'api-errors')
+
+    def test_update_requires_admin_and_returns_safe_conflict(self):
+        cluster = self.create_cluster()
+        self._set_cluster_role(DevOpsRole.ROLE_VIEWER)
+        denied = self.client.post(
+            self._update_url(cluster), data=json.dumps({'yaml': self.rule_yaml}),
+            content_type='application/json',
+        )
+        self.assertEqual(denied.status_code, 403)
+        self.assertEqual(denied.json()['code'], 'forbidden')
+
+        self._set_cluster_role(DevOpsRole.ROLE_ADMIN)
+        raw_error = 'private Kubernetes response never exposed'
+        with mock.patch('devops.api.replace_prometheus_rule', return_value={
+            'ok': False, 'code': 'conflict', 'message': raw_error,
+        }) as replace_rule:
+            conflict = self.client.post(
+                self._update_url(cluster), data=json.dumps({'yaml': self.rule_yaml}),
+                content_type='application/json',
+            )
+        self.assertEqual(conflict.status_code, 409)
+        self.assertEqual(conflict.json()['code'], 'conflict')
+        self.assertIn('刷新', conflict.json()['message'])
+        self.assertNotIn(raw_error, json.dumps(conflict.json()))
+        replace_rule.assert_called_once_with(cluster, 'monitoring', 'api-errors', self.rule_yaml)
+        audit_log = AuditLog.objects.get(action='API更新PrometheusRule')
+        self.assertIn('结果=conflict', audit_log.detail)
+        self.assertNotIn(raw_error, audit_log.detail)
+        self.assertNotIn(self.rule_yaml, audit_log.detail)
+
+    def test_update_rejects_invalid_json_or_empty_yaml_before_service_call(self):
+        cluster = self.create_cluster()
+        self._set_cluster_role(DevOpsRole.ROLE_ADMIN)
+        with mock.patch('devops.api.replace_prometheus_rule') as replace_rule:
+            invalid_json = self.client.post(
+                self._update_url(cluster), data='{invalid', content_type='application/json',
+            )
+            missing_yaml = self.client.post(
+                self._update_url(cluster), data=json.dumps({}), content_type='application/json',
+            )
+        self.assertEqual(invalid_json.status_code, 400)
+        self.assertEqual(invalid_json.json()['code'], 'invalid_json')
+        self.assertEqual(missing_yaml.status_code, 400)
+        self.assertEqual(missing_yaml.json()['code'], 'validation_error')
+        replace_rule.assert_not_called()
+
+    def test_mutations_reject_unsafe_route_identity_or_resource_version_without_audit(self):
+        cluster = self.create_cluster()
+        self._set_cluster_role(DevOpsRole.ROLE_ADMIN)
+        raw_identity = 'api-errors;private-token'
+        unsafe_update_url = '/devops/api/prometheus-rules/%s/monitoring/%s/update/' % (cluster.id, raw_identity)
+        raw_resource_version = '42;private-token'
+
+        with mock.patch('devops.api.replace_prometheus_rule') as replace_rule:
+            update = self.client.post(
+                unsafe_update_url, data=json.dumps({'yaml': self.rule_yaml}), content_type='application/json',
+            )
+        with mock.patch('devops.api.delete_prometheus_rule') as delete_rule:
+            delete = self.client.post(
+                self._delete_url(cluster),
+                data=json.dumps({'confirmation': 'DELETE', 'resource_version': raw_resource_version}),
+                content_type='application/json',
+            )
+
+        self.assertEqual(update.status_code, 400)
+        self.assertEqual(update.json()['code'], 'validation_error')
+        self.assertNotIn(raw_identity, json.dumps(update.json()))
+        self.assertEqual(delete.status_code, 400)
+        self.assertEqual(delete.json()['code'], 'validation_error')
+        self.assertNotIn(raw_resource_version, json.dumps(delete.json()))
+        replace_rule.assert_not_called()
+        delete_rule.assert_not_called()
+        self.assertFalse(AuditLog.objects.filter(action__in=(
+            'API更新PrometheusRule', 'API删除PrometheusRule',
+        )).exists())
+
+    def test_delete_requires_exact_confirmation_and_resource_version(self):
+        cluster = self.create_cluster()
+        self._set_cluster_role(DevOpsRole.ROLE_ADMIN)
+        with mock.patch('devops.api.delete_prometheus_rule') as delete_rule:
+            rejected_confirmation = self.client.post(
+                self._delete_url(cluster), data=json.dumps({'confirmation': 'delete', 'resource_version': '42'}),
+                content_type='application/json',
+            )
+            rejected_version = self.client.post(
+                self._delete_url(cluster), data=json.dumps({'confirmation': 'DELETE'}),
+                content_type='application/json',
+            )
+        self.assertEqual(rejected_confirmation.status_code, 400)
+        self.assertEqual(rejected_confirmation.json()['code'], 'validation_error')
+        self.assertEqual(rejected_version.status_code, 400)
+        self.assertEqual(rejected_version.json()['code'], 'validation_error')
+        delete_rule.assert_not_called()
+
+        with mock.patch('devops.api.delete_prometheus_rule', return_value={'ok': True, 'code': 'ok'}) as delete_rule:
+            deleted = self.client.post(
+                self._delete_url(cluster),
+                data=json.dumps({'confirmation': 'DELETE', 'resource_version': '42'}),
+                content_type='application/json',
+            )
+        self.assertEqual(deleted.status_code, 200)
+        self.assertEqual(deleted.json(), {'ok': True})
+        delete_rule.assert_called_once_with(cluster, 'monitoring', 'api-errors', '42')
+        audit_log = AuditLog.objects.get(action='API删除PrometheusRule')
+        self.assertIn('资源版本=42', audit_log.detail)
+        self.assertNotIn(self.secret, audit_log.detail)
+
+
 class DevOpsViewTests(TestCase):
     def setUp(self):
         self.user = User.objects.create(

@@ -27,6 +27,7 @@ from .models import (
     IntegrationHealthEvent,
     MetricSample,
     MaintenanceWindow,
+    K8sCluster,
     NotificationChannel,
     NotificationLog,
     ServiceCatalog,
@@ -59,6 +60,10 @@ from .services import (
     summarize_integration_health,
     evaluate_service_slo,
     initiate_runbook,
+    list_prometheus_rules,
+    get_prometheus_rule,
+    replace_prometheus_rule,
+    delete_prometheus_rule,
     RunbookInitiationError,
 )
 
@@ -73,6 +78,7 @@ MODULE_SECURITY = DevOpsModulePermission.MODULE_SECURITY
 MODULE_AUDIT = DevOpsModulePermission.MODULE_AUDIT
 MODULE_SERVICE = DevOpsModulePermission.MODULE_SERVICE
 MODULE_ALERT = DevOpsModulePermission.MODULE_ALERT
+MODULE_CLUSTER = DevOpsModulePermission.MODULE_CLUSTER
 NOTIFICATION_RESPONSE_PREVIEW_LENGTH = 300
 SENSITIVE_URL_RE = re.compile(r'https?://[^\s,;]+', re.IGNORECASE)
 SENSITIVE_ENC_RE = re.compile(r'\benc:[^\s,;]+', re.IGNORECASE)
@@ -576,6 +582,172 @@ def bootstrap(request):
 def hosts(request):
     data = [serialize_host(host) for host in visible_hosts_for_request(request)]
     return JsonResponse({'ok': True, 'results': data})
+
+
+PROMETHEUS_RULE_SAFE_MESSAGES = {
+    'conflict': '规则已被其他操作更新，请刷新后重试。',
+    'forbidden': '当前集群权限不足，无法操作 PrometheusRule。',
+    'crd_not_found': '集群未安装 PrometheusRule CRD，或规则不存在。',
+    'timeout': '连接 Kubernetes 集群超时，请稍后重试。',
+    'offline': '无法连接 Kubernetes 集群，请确认集群状态后重试。',
+    'invalid_yaml': '规则 YAML 格式或资源身份无效。',
+    'invalid_identity': '规则命名空间、名称或资源版本无效。',
+    'dependency_missing': '缺少必要依赖，无法操作 PrometheusRule。',
+}
+PROMETHEUS_RULE_NAMESPACE_PATTERN = re.compile(r'^[a-z0-9]([-a-z0-9]*[a-z0-9])?$')
+PROMETHEUS_RULE_NAME_PATTERN = re.compile(r'^[a-z0-9]([a-z0-9.-]*[a-z0-9])?$')
+PROMETHEUS_RULE_RESOURCE_VERSION_PATTERN = re.compile(r'^[A-Za-z0-9][A-Za-z0-9._-]{0,252}$')
+
+
+def prometheus_rule_cluster_or_error(cluster_id):
+    cluster = K8sCluster.objects.filter(id=cluster_id).first()
+    if not cluster:
+        return None, api_error('集群不存在', status=404, code='not_found')
+    return cluster, None
+
+
+def prometheus_rule_service_error(result):
+    code = (result or {}).get('code', 'offline')
+    status = {
+        'invalid_yaml': 400,
+        'invalid_identity': 400,
+        'conflict': 409,
+        'forbidden': 403,
+        'crd_not_found': 404,
+    }.get(code, 503)
+    return api_error(
+        PROMETHEUS_RULE_SAFE_MESSAGES.get(code, '无法操作 PrometheusRule，请稍后重试。'),
+        status=status,
+        code=code if code in PROMETHEUS_RULE_SAFE_MESSAGES else 'offline',
+    )
+
+
+def normalize_prometheus_rule_identity(namespace, name):
+    namespace = (namespace or '').strip().lower()
+    name = (name or '').strip()
+    if (not namespace or len(namespace) > 63 or not PROMETHEUS_RULE_NAMESPACE_PATTERN.match(namespace)
+            or not name or len(name) > 253 or not PROMETHEUS_RULE_NAME_PATTERN.match(name)):
+        return None, None
+    return namespace, name
+
+
+def normalize_prometheus_rule_resource_version(value):
+    value = value.strip() if isinstance(value, str) else ''
+    if not value or not PROMETHEUS_RULE_RESOURCE_VERSION_PATTERN.match(value):
+        return ''
+    return value
+
+
+def prometheus_rule_audit_detail(cluster, namespace, name, action, outcome, resource_version=''):
+    return '集群=%s, 集群名称=%s, 命名空间=%s, 规则=%s, 操作=%s, 结果=%s, 资源版本=%s' % (
+        cluster.id, cluster.name, namespace, name, action, outcome, resource_version or '-',
+    )
+
+
+def prometheus_rule_update_summary(rule, namespace, name):
+    metadata = (rule or {}).get('metadata') if isinstance(rule, dict) else {}
+    metadata = metadata if isinstance(metadata, dict) else {}
+    return {
+        'namespace': namespace,
+        'name': name,
+        'resource_version': normalize_prometheus_rule_resource_version(metadata.get('resourceVersion')),
+    }
+
+
+def prometheus_rule_list_summary(rule):
+    rule = rule if isinstance(rule, dict) else {}
+    return {
+        'namespace': str(rule.get('namespace') or ''),
+        'name': str(rule.get('name') or ''),
+        'resource_version': str(rule.get('resource_version') or ''),
+        'created_at': str(rule.get('created_at') or ''),
+    }
+
+
+@api_login_required
+@require_http_methods(['GET'])
+def prometheus_rules(request, cluster_id):
+    if not has_role(request, DevOpsRole.ROLE_VIEWER, MODULE_CLUSTER):
+        return api_error('没有 PrometheusRule 查看权限', status=403, code='forbidden')
+    cluster, error = prometheus_rule_cluster_or_error(cluster_id)
+    if error:
+        return error
+    result = list_prometheus_rules(cluster)
+    if not result.get('ok'):
+        return prometheus_rule_service_error(result)
+    return JsonResponse({
+        'ok': True,
+        'results': [prometheus_rule_list_summary(rule) for rule in result.get('rules', [])],
+    })
+
+
+@api_login_required
+@require_http_methods(['GET'])
+def prometheus_rule_detail(request, cluster_id, namespace, name):
+    if not has_role(request, DevOpsRole.ROLE_VIEWER, MODULE_CLUSTER):
+        return api_error('没有 PrometheusRule 查看权限', status=403, code='forbidden')
+    cluster, error = prometheus_rule_cluster_or_error(cluster_id)
+    if error:
+        return error
+    result = get_prometheus_rule(cluster, namespace, name)
+    if not result.get('ok'):
+        return prometheus_rule_service_error(result)
+    return JsonResponse({'ok': True, 'yaml': result.get('yaml', '')})
+
+
+@api_login_required
+@require_http_methods(['POST'])
+def prometheus_rule_update(request, cluster_id, namespace, name):
+    if not has_role(request, DevOpsRole.ROLE_ADMIN, MODULE_CLUSTER):
+        return api_error('没有 PrometheusRule 管理权限', status=403, code='forbidden')
+    payload = request_json(request)
+    if not isinstance(payload, dict):
+        return invalid_json_error()
+    yaml_text = payload.get('yaml')
+    if not isinstance(yaml_text, str) or not yaml_text.strip():
+        return api_error('规则 YAML 不能为空', status=400, code='validation_error')
+    namespace, name = normalize_prometheus_rule_identity(namespace, name)
+    if not namespace or not name:
+        return api_error('规则命名空间或名称无效', status=400, code='validation_error')
+    cluster, error = prometheus_rule_cluster_or_error(cluster_id)
+    if error:
+        return error
+    result = replace_prometheus_rule(cluster, namespace, name, yaml_text)
+    code = result.get('code', 'offline')
+    resource_version = prometheus_rule_update_summary(result.get('rule'), namespace, name)['resource_version']
+    audit(request, 'API更新PrometheusRule', 'K8sCluster', cluster.id,
+          prometheus_rule_audit_detail(cluster, namespace, name, 'update', 'ok' if result.get('ok') else code,
+                                       resource_version))
+    if not result.get('ok'):
+        return prometheus_rule_service_error(result)
+    return JsonResponse({'ok': True, 'rule': prometheus_rule_update_summary(result.get('rule'), namespace, name)})
+
+
+@api_login_required
+@require_http_methods(['POST'])
+def prometheus_rule_delete(request, cluster_id, namespace, name):
+    if not has_role(request, DevOpsRole.ROLE_ADMIN, MODULE_CLUSTER):
+        return api_error('没有 PrometheusRule 管理权限', status=403, code='forbidden')
+    payload = request_json(request)
+    if not isinstance(payload, dict):
+        return invalid_json_error()
+    resource_version = normalize_prometheus_rule_resource_version(payload.get('resource_version'))
+    if payload.get('confirmation') != 'DELETE' or not resource_version:
+        return api_error('请确认 DELETE 并提供资源版本', status=400, code='validation_error')
+    namespace, name = normalize_prometheus_rule_identity(namespace, name)
+    if not namespace or not name:
+        return api_error('规则命名空间或名称无效', status=400, code='validation_error')
+    cluster, error = prometheus_rule_cluster_or_error(cluster_id)
+    if error:
+        return error
+    result = delete_prometheus_rule(cluster, namespace, name, resource_version)
+    code = result.get('code', 'offline')
+    audit(request, 'API删除PrometheusRule', 'K8sCluster', cluster.id,
+          prometheus_rule_audit_detail(cluster, namespace, name, 'delete', 'ok' if result.get('ok') else code,
+                                       resource_version))
+    if not result.get('ok'):
+        return prometheus_rule_service_error(result)
+    return JsonResponse({'ok': True})
 
 
 @api_login_required

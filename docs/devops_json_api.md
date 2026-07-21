@@ -27,6 +27,22 @@
   - `counts.hosts/groups/open_alerts/pending_approvals` 均按当前用户可见主机范围统计；不返回不可见主机的告警或审批数量。
 - `GET /devops/api/hosts/`
   - 当前用户可见主机列表，不返回密码或私钥。
+- `GET /devops/api/prometheus-rules/<cluster_id>/`
+  - 返回所选已配置 Kubernetes 集群中全部命名空间的 PrometheusRule 安全摘要，需 session 登录和 K8s 集群模块只读权限。
+  - `results[]` 仅包含 `namespace`、`name`、`resource_version`、`created_at`；不返回完整 YAML、kubeconfig、集群凭据、任意 GVK/API 路径或 Kubernetes 原始错误。
+  - 路径中的 `cluster_id` 必须指向已配置集群；不存在返回 `404` 和 `code: "not_found"`。
+- `GET /devops/api/prometheus-rules/<cluster_id>/<namespace>/<name>/`
+  - 返回所选集群中该固定 `monitoring.coreos.com/v1` `PrometheusRule` 的完整 YAML，需 K8s 集群模块只读权限。
+  - 集群、命名空间和规则名称只由路由确定；调用方不能提交 group、version、plural 或 Kubernetes API 路径。
+- `POST /devops/api/prometheus-rules/<cluster_id>/<namespace>/<name>/update/`
+  - JSON：`{"yaml": "..."}`。需 K8s 集群模块管理员权限。
+  - YAML 必须且只能包含一个 `monitoring.coreos.com/v1` `PrometheusRule`，并且 `metadata.name`、`metadata.namespace` 和非空 `metadata.resourceVersion` 必须与路由完全一致。服务端使用该 `resourceVersion` 写回 Kubernetes；冲突返回 `409` 和 `code: "conflict"`，调用方应重新读取 YAML 后重试。
+  - 成功返回安全的 `rule.namespace`、`rule.name`、`rule.resource_version`，不回显 YAML 或 Kubernetes 原始对象。
+- `POST /devops/api/prometheus-rules/<cluster_id>/<namespace>/<name>/delete/`
+  - JSON：`{"confirmation": "DELETE", "resource_version": "..."}`。需 K8s 集群模块管理员权限；确认词必须精确为 `DELETE`，缺少或错误的确认词/资源版本返回 `400` 和 `code: "validation_error"`。
+  - 删除使用 `resource_version` Kubernetes 预条件，冲突返回 `409` 和 `code: "conflict"`。成功返回 `{"ok": true}`。
+  - 更新和删除审计仅记录集群 ID/名称、命名空间、规则名称、动作、结果和资源版本；不记录 YAML、kubeconfig、令牌或 Kubernetes 原始错误。
+  - Kubernetes CRD 缺失或规则不存在返回 `404`/`crd_not_found`；Kubernetes RBAC 拒绝返回 `403`/`forbidden`；连接超时、离线或依赖缺失返回 `503` 及对应安全分类。
 - `GET /devops/api/service-topology/`
   - 返回服务、负责人、环境、描述、当前用户可见的关联主机及上游依赖。
   - 认证：需要 session 登录和服务管理模块只读权限；未登录返回 `401`，权限不足返回 `403`。
