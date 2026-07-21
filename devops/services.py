@@ -140,6 +140,9 @@ PROMETHEUS_RULE_LIST_MAX_PAGES = 1000
 K8S_RESOURCE_NAME_PATTERN = re.compile(
     r'^[a-z0-9]([a-z0-9.-]*[a-z0-9])?$'
 )
+# Kubernetes resourceVersion is opaque. Keep it bounded, while permitting the
+# printable Unicode and symbol values returned by Kubernetes implementations.
+PROMETHEUS_RULE_RESOURCE_VERSION_MAX_LENGTH = 253
 
 
 def _k8s_detail_cache_timeout():
@@ -211,6 +214,14 @@ def _safe_prometheus_rule_identity(namespace, name):
     return namespace, name
 
 
+def normalize_prometheus_rule_resource_version(value):
+    value = value.strip() if isinstance(value, str) else ''
+    if (not value or len(value) > PROMETHEUS_RULE_RESOURCE_VERSION_MAX_LENGTH
+            or not value.isprintable()):
+        return ''
+    return value
+
+
 def _prometheus_rule_custom_objects_api(cluster):
     kubeconfig = getattr(cluster, 'decrypted_kubeconfig', '') or ''
     if not kubeconfig:
@@ -279,14 +290,14 @@ def _validate_prometheus_rule_yaml(yaml_text, namespace, name):
         return None, _prometheus_rule_result(False, 'invalid_yaml', '规则 YAML 缺少 metadata。')
     document_name = metadata.get('name')
     document_namespace = metadata.get('namespace')
-    resource_version = metadata.get('resourceVersion')
-    if not all(isinstance(value, str) and value.strip() for value in (document_name, document_namespace, resource_version)):
+    resource_version = normalize_prometheus_rule_resource_version(metadata.get('resourceVersion'))
+    if not all(isinstance(value, str) and value.strip() for value in (document_name, document_namespace)) or not resource_version:
         return None, _prometheus_rule_result(False, 'invalid_yaml', '规则 YAML 必须包含 metadata.name、metadata.namespace 和 metadata.resourceVersion。')
     if document_name.strip() != name or document_namespace.strip() != namespace:
         return None, _prometheus_rule_result(False, 'invalid_yaml', '规则 YAML 的名称或命名空间与当前选择不一致。')
     metadata['name'] = name
     metadata['namespace'] = namespace
-    metadata['resourceVersion'] = resource_version.strip()
+    metadata['resourceVersion'] = resource_version
     return document, None
 
 
@@ -404,7 +415,7 @@ def replace_prometheus_rule(cluster, namespace, name, yaml_text, timeout=8):
 
 def delete_prometheus_rule(cluster, namespace, name, resource_version, timeout=8):
     namespace, name = _safe_prometheus_rule_identity(namespace, name)
-    resource_version = (resource_version or '').strip()
+    resource_version = normalize_prometheus_rule_resource_version(resource_version)
     if not namespace or not name or not resource_version:
         return _prometheus_rule_result(False, 'invalid_identity', '规则命名空间、名称或资源版本无效。')
     path = ''

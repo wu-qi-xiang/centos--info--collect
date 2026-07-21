@@ -64,6 +64,7 @@ from .services import (
     get_prometheus_rule,
     replace_prometheus_rule,
     delete_prometheus_rule,
+    normalize_prometheus_rule_resource_version,
     RunbookInitiationError,
 )
 
@@ -596,7 +597,7 @@ PROMETHEUS_RULE_SAFE_MESSAGES = {
 }
 PROMETHEUS_RULE_NAMESPACE_PATTERN = re.compile(r'^[a-z0-9]([-a-z0-9]*[a-z0-9])?$')
 PROMETHEUS_RULE_NAME_PATTERN = re.compile(r'^[a-z0-9]([a-z0-9.-]*[a-z0-9])?$')
-PROMETHEUS_RULE_RESOURCE_VERSION_PATTERN = re.compile(r'^[A-Za-z0-9][A-Za-z0-9._-]{0,252}$')
+PROMETHEUS_RULE_AUDIT_OUTCOMES = frozenset(('ok',) + tuple(PROMETHEUS_RULE_SAFE_MESSAGES))
 
 
 def prometheus_rule_cluster_or_error(cluster_id):
@@ -631,17 +632,17 @@ def normalize_prometheus_rule_identity(namespace, name):
     return namespace, name
 
 
-def normalize_prometheus_rule_resource_version(value):
-    value = value.strip() if isinstance(value, str) else ''
-    if not value or not PROMETHEUS_RULE_RESOURCE_VERSION_PATTERN.match(value):
-        return ''
-    return value
-
-
 def prometheus_rule_audit_detail(cluster, namespace, name, action, outcome, resource_version=''):
     return '集群=%s, 集群名称=%s, 命名空间=%s, 规则=%s, 操作=%s, 结果=%s, 资源版本=%s' % (
         cluster.id, cluster.name, namespace, name, action, outcome, resource_version or '-',
     )
+
+
+def prometheus_rule_audit_outcome(result):
+    if result and result.get('ok'):
+        return 'ok'
+    code = (result or {}).get('code')
+    return code if code in PROMETHEUS_RULE_AUDIT_OUTCOMES else 'offline'
 
 
 def prometheus_rule_update_summary(rule, namespace, name):
@@ -713,10 +714,9 @@ def prometheus_rule_update(request, cluster_id, namespace, name):
     if error:
         return error
     result = replace_prometheus_rule(cluster, namespace, name, yaml_text)
-    code = result.get('code', 'offline')
     resource_version = prometheus_rule_update_summary(result.get('rule'), namespace, name)['resource_version']
     audit(request, 'API更新PrometheusRule', 'K8sCluster', cluster.id,
-          prometheus_rule_audit_detail(cluster, namespace, name, 'update', 'ok' if result.get('ok') else code,
+          prometheus_rule_audit_detail(cluster, namespace, name, 'update', prometheus_rule_audit_outcome(result),
                                        resource_version))
     if not result.get('ok'):
         return prometheus_rule_service_error(result)
@@ -741,9 +741,8 @@ def prometheus_rule_delete(request, cluster_id, namespace, name):
     if error:
         return error
     result = delete_prometheus_rule(cluster, namespace, name, resource_version)
-    code = result.get('code', 'offline')
     audit(request, 'API删除PrometheusRule', 'K8sCluster', cluster.id,
-          prometheus_rule_audit_detail(cluster, namespace, name, 'delete', 'ok' if result.get('ok') else code,
+          prometheus_rule_audit_detail(cluster, namespace, name, 'delete', prometheus_rule_audit_outcome(result),
                                        resource_version))
     if not result.get('ok'):
         return prometheus_rule_service_error(result)

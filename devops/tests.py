@@ -1914,6 +1914,41 @@ spec:
                 self.assertEqual(result['code'], 'invalid_yaml')
                 api.assert_not_called()
 
+    def test_replace_rejects_unsafe_resource_version_before_api(self):
+        from .services import replace_prometheus_rule
+
+        marker = '42\nprivate-token'
+        with mock.patch('devops.services._prometheus_rule_custom_objects_api') as api:
+            result = replace_prometheus_rule(
+                self._cluster(), 'monitoring', 'api-errors',
+                self.rule_yaml.replace('"42"', '"42\\nprivate-token"'),
+            )
+
+        self.assertFalse(result['ok'])
+        self.assertEqual(result['code'], 'invalid_yaml')
+        self.assertNotIn(marker, result['message'])
+        api.assert_not_called()
+
+    def test_replace_accepts_printable_opaque_resource_version(self):
+        from .services import replace_prometheus_rule
+
+        resource_version = 'rv:版本/42'
+
+        def handler(action, observed, kwargs):
+            self.assertEqual(action, 'replace')
+            observed['kwargs'] = kwargs
+            return kwargs['body']
+
+        observed, modules = self._kubernetes_modules(handler)
+        with mock.patch.dict(sys.modules, modules):
+            result = replace_prometheus_rule(
+                self._cluster(), 'monitoring', 'api-errors',
+                self.rule_yaml.replace('"42"', '"%s"' % resource_version),
+            )
+
+        self.assertTrue(result['ok'])
+        self.assertEqual(observed['kwargs']['body']['metadata']['resourceVersion'], resource_version)
+
     def test_delete_uses_selected_identity_and_resource_version(self):
         from .services import delete_prometheus_rule
 
@@ -1930,6 +1965,39 @@ spec:
         self.assertEqual(observed['kwargs']['body'], {'preconditions': {'resourceVersion': '42'}})
         self.assertEqual(observed['kwargs']['plural'], 'prometheusrules')
         self.assertEqual(observed.get('close_count'), 1)
+
+    def test_delete_rejects_unsafe_resource_version_before_api(self):
+        from .services import delete_prometheus_rule
+
+        marker = '42\nprivate-token'
+        with mock.patch('devops.services._prometheus_rule_custom_objects_api') as api:
+            result = delete_prometheus_rule(self._cluster(), 'monitoring', 'api-errors', marker)
+
+        self.assertFalse(result['ok'])
+        self.assertEqual(result['code'], 'invalid_identity')
+        self.assertNotIn(marker, result['message'])
+        api.assert_not_called()
+
+    def test_delete_accepts_printable_opaque_resource_version(self):
+        from .services import delete_prometheus_rule
+
+        resource_version = 'rv:版本/42'
+
+        def handler(action, observed, kwargs):
+            self.assertEqual(action, 'delete')
+            observed['kwargs'] = kwargs
+            return {'status': 'Success'}
+
+        observed, modules = self._kubernetes_modules(handler)
+        with mock.patch.dict(sys.modules, modules):
+            result = delete_prometheus_rule(
+                self._cluster(), 'monitoring', 'api-errors', resource_version,
+            )
+
+        self.assertTrue(result['ok'])
+        self.assertEqual(
+            observed['kwargs']['body']['preconditions']['resourceVersion'], resource_version,
+        )
 
     def test_delete_conflict_requires_refresh_without_raw_error(self):
         from .services import delete_prometheus_rule
@@ -2217,6 +2285,41 @@ spec:
         self.assertIn('结果=offline', audit_log.detail)
         self.assertNotIn(raw_error, audit_log.detail)
 
+    def test_delete_accepts_printable_opaque_resource_version(self):
+        cluster = self.create_cluster()
+        resource_version = 'rv:版本/42'
+        url = reverse('devops:prometheus_rule_delete', args=[cluster.id, 'monitoring', 'api-errors'])
+        with mock.patch('devops.views.delete_prometheus_rule', return_value={
+            'ok': True, 'code': 'ok', 'message': 'PrometheusRule 已从集群删除。',
+        }) as delete_rule:
+            response = self.client.post(url, {
+                'confirmation': 'DELETE',
+                'resource_version': resource_version,
+            })
+
+        self.assertEqual(response.status_code, 302)
+        delete_rule.assert_called_once_with(cluster, 'monitoring', 'api-errors', resource_version)
+        audit_log = AuditLog.objects.get(action='删除PrometheusRule')
+        self.assertIn('资源版本=%s' % resource_version, audit_log.detail)
+
+    def test_delete_rejects_blank_oversized_and_control_resource_versions_before_service_or_audit(self):
+        cluster = self.create_cluster()
+        url = reverse('devops:prometheus_rule_delete', args=[cluster.id, 'monitoring', 'api-errors'])
+        invalid_versions = ('   ', 'v' * 254, '42\nprivate-token')
+        with mock.patch('devops.views.delete_prometheus_rule') as delete_rule:
+            for resource_version in invalid_versions:
+                with self.subTest(resource_version=resource_version):
+                    response = self.client.post(url, {
+                        'confirmation': 'DELETE',
+                        'resource_version': resource_version,
+                    })
+                    self.assertEqual(response.status_code, 400)
+                    self.assertContains(response, '规则命名空间、名称或资源版本无效', status_code=400)
+                    self.assertNotContains(response, 'private-token', status_code=400)
+
+        delete_rule.assert_not_called()
+        self.assertFalse(AuditLog.objects.filter(action='删除PrometheusRule').exists())
+
     def test_update_rejects_unsafe_route_identity_without_service_or_audit(self):
         cluster = self.create_cluster()
         marker = 'unsafe-rule-name'
@@ -2244,7 +2347,7 @@ spec:
                 unsafe_identity_url, {'confirmation': 'DELETE', 'resource_version': '42'},
             )
             version_response = self.client.post(
-                unsafe_version_url, {'confirmation': 'DELETE', 'resource_version': marker + '/'},
+                unsafe_version_url, {'confirmation': 'DELETE', 'resource_version': '42\nprivate-token'},
             )
 
         for response in (identity_response, version_response):
@@ -2390,6 +2493,35 @@ spec:
         self.assertNotIn(raw_error, audit_log.detail)
         self.assertNotIn(self.rule_yaml, audit_log.detail)
 
+    def test_unknown_service_codes_are_mapped_before_api_audit_and_response(self):
+        cluster = self.create_cluster()
+        self._set_cluster_role(DevOpsRole.ROLE_ADMIN)
+        marker = 'private-untrusted-service-code'
+        with mock.patch('devops.api.replace_prometheus_rule', return_value={
+            'ok': False, 'code': marker, 'message': marker,
+        }):
+            update = self.client.post(
+                self._update_url(cluster), data=json.dumps({'yaml': self.rule_yaml}),
+                content_type='application/json',
+            )
+        with mock.patch('devops.api.delete_prometheus_rule', return_value={
+            'ok': False, 'code': marker, 'message': marker,
+        }):
+            delete = self.client.post(
+                self._delete_url(cluster),
+                data=json.dumps({'confirmation': 'DELETE', 'resource_version': '42'}),
+                content_type='application/json',
+            )
+
+        for response in (update, delete):
+            self.assertEqual(response.status_code, 503)
+            self.assertEqual(response.json()['code'], 'offline')
+            self.assertNotIn(marker, json.dumps(response.json()))
+        for action in ('API更新PrometheusRule', 'API删除PrometheusRule'):
+            audit_log = AuditLog.objects.get(action=action)
+            self.assertIn('结果=offline', audit_log.detail)
+            self.assertNotIn(marker, audit_log.detail)
+
     def test_update_rejects_invalid_json_or_empty_yaml_before_service_call(self):
         cluster = self.create_cluster()
         self._set_cluster_role(DevOpsRole.ROLE_ADMIN)
@@ -2411,7 +2543,7 @@ spec:
         self._set_cluster_role(DevOpsRole.ROLE_ADMIN)
         raw_identity = 'api-errors;private-token'
         unsafe_update_url = '/devops/api/prometheus-rules/%s/monitoring/%s/update/' % (cluster.id, raw_identity)
-        raw_resource_version = '42;private-token'
+        raw_resource_version = '42\nprivate-token'
 
         with mock.patch('devops.api.replace_prometheus_rule') as replace_rule:
             update = self.client.post(

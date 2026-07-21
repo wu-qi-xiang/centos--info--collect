@@ -32,6 +32,7 @@ from .models import (
     RunbookTemplate,
     DevOpsProject,
 )
+from .services import normalize_prometheus_rule_resource_version
 
 
 class HostGroupForm(forms.ModelForm):
@@ -486,7 +487,6 @@ class K8sClusterForm(forms.ModelForm):
 
 PROMETHEUS_RULE_NAMESPACE_PATTERN = re.compile(r'^[a-z0-9]([-a-z0-9]*[a-z0-9])?$')
 PROMETHEUS_RULE_NAME_PATTERN = re.compile(r'^[a-z0-9]([a-z0-9.-]*[a-z0-9])?$')
-PROMETHEUS_RULE_RESOURCE_VERSION_PATTERN = re.compile(r'^[A-Za-z0-9][A-Za-z0-9._-]{0,252}$')
 
 
 def normalize_prometheus_rule_identity(namespace, name):
@@ -496,13 +496,6 @@ def normalize_prometheus_rule_identity(namespace, name):
             or not name or len(name) > 253 or not PROMETHEUS_RULE_NAME_PATTERN.match(name)):
         return None, None
     return namespace, name
-
-
-def normalize_prometheus_rule_resource_version(value):
-    value = value.strip() if isinstance(value, str) else ''
-    if not value or not PROMETHEUS_RULE_RESOURCE_VERSION_PATTERN.match(value):
-        return ''
-    return value
 
 
 class PrometheusRuleYamlForm(forms.Form):
