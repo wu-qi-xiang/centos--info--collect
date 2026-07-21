@@ -29,6 +29,7 @@ from .models import (
     ComplianceBaseline,
     ServiceCatalog,
     ServiceSlo,
+    RunbookTemplate,
     DevOpsProject,
 )
 
@@ -228,6 +229,16 @@ class ServiceSloForm(forms.ModelForm):
     class Meta:
         model = ServiceSlo
         fields = ('service', 'metric_kind', 'target', 'window_minutes', 'enabled')
+
+
+class RunbookTemplateForm(forms.ModelForm):
+    allowed_hosts = forms.ModelMultipleChoiceField(
+        queryset=NewLinux.objects.all(), widget=forms.CheckboxSelectMultiple,
+    )
+
+    class Meta:
+        model = RunbookTemplate
+        fields = ('name', 'version', 'trigger_kind', 'command_template', 'service', 'allowed_hosts', 'enabled', 'requires_approval')
 
 
 class FileDistributionForm(forms.ModelForm):

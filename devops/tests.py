@@ -60,6 +60,7 @@ from .models import (
     ServiceCatalog,
     ServiceDependency,
     ServiceSlo,
+    RunbookTemplate,
     ComplianceBaseline,
     ComplianceResult,
 )
@@ -5619,6 +5620,289 @@ class ServiceSloTests(TestCase):
         self.assertEqual(response.status_code, 200)
         self.assertNotIn(raw_value, json.dumps(response.json()))
         self.assertNotIn(raw_value, '\n'.join(AuditLog.objects.values_list('detail', flat=True)))
+
+
+class RunbookTemplateTests(TestCase):
+    def setUp(self):
+        self.admin = User.objects.create(user='runbook-admin', email='runbook-admin@example.com', password='pwd', confirm_pwd='pwd')
+        self.operator = User.objects.create(user='runbook-operator', email='runbook-operator@example.com', password='pwd', confirm_pwd='pwd')
+        self.viewer = User.objects.create(user='runbook-viewer', email='runbook-viewer@example.com', password='pwd', confirm_pwd='pwd')
+        self.host = NewLinux.objects.create(linux_name='runbook-host', linux_ip='127.0.0.221', linux_hostname='runbook-host')
+        self.other_host = NewLinux.objects.create(linux_name='runbook-other', linux_ip='127.0.0.222', linux_hostname='runbook-other')
+        self.service = ServiceCatalog.objects.create(name='runbook-service')
+        self.service.hosts.add(self.host)
+        DevOpsRole.objects.create(user=self.admin, role=DevOpsRole.ROLE_ADMIN)
+        DevOpsRole.objects.create(user=self.operator, role=DevOpsRole.ROLE_OPERATOR)
+        DevOpsRole.objects.create(user=self.viewer, role=DevOpsRole.ROLE_VIEWER)
+        DevOpsModulePermission.objects.create(user=self.admin, module=DevOpsModulePermission.MODULE_SECURITY, role=DevOpsRole.ROLE_ADMIN)
+        DevOpsModulePermission.objects.create(user=self.operator, module=DevOpsModulePermission.MODULE_COMMAND, role=DevOpsRole.ROLE_OPERATOR)
+        DevOpsModulePermission.objects.create(user=self.viewer, module=DevOpsModulePermission.MODULE_COMMAND, role=DevOpsRole.ROLE_VIEWER)
+        group = HostGroup.objects.create(name='runbook-operator-hosts')
+        group.hosts.add(self.host)
+        scope = DevOpsHostScope.objects.create(user=self.operator)
+        scope.groups.add(group)
+        self.login(self.operator)
+
+    def login(self, user):
+        session = self.client.session
+        session['is_login'] = True
+        session['user_id'] = user.id
+        session['user_name'] = user.user
+        session.save()
+
+    def make_runbook(self, **kwargs):
+        values = {
+            'name': '检查服务状态', 'version': 1, 'trigger_kind': RunbookTemplate.TRIGGER_SERVICE,
+            'command_template': 'systemctl status nginx', 'service': self.service,
+            'enabled': True, 'requires_approval': True, 'created_by': self.admin.user,
+        }
+        values.update(kwargs)
+        runbook = RunbookTemplate.objects.create(**values)
+        runbook.allowed_hosts.add(self.host)
+        return runbook
+
+    def test_model_rejects_interpolation_substitution_multiline_and_caller_parameters(self):
+        for command in ('echo {host}', 'echo $(hostname)', 'echo `hostname`', 'echo one\necho two', 'echo %s', 'echo $HOME', 'echo $1', 'echo $$', 'echo $@', 'echo $?'):
+            runbook = RunbookTemplate(name='unsafe', version=1, trigger_kind=RunbookTemplate.TRIGGER_ALERT, command_template=command)
+            with self.assertRaises(ValidationError):
+                runbook.full_clean()
+
+    def test_linked_service_without_hosts_rejects_initiation(self):
+        empty_service = ServiceCatalog.objects.create(name='empty-runbook-service')
+        runbook = self.make_runbook(service=empty_service)
+
+        response = self.client.post(reverse('devops:api_runbook_initiate', args=[runbook.id]), data=json.dumps({'host_id': self.host.id}), content_type='application/json')
+
+        self.assertEqual(response.status_code, 400)
+        self.assertEqual(CommandExecution.objects.count(), 0)
+
+    def test_same_runbook_version_rejects_template_changes_in_model_api_and_classic_form(self):
+        runbook = self.make_runbook()
+        runbook.command_template = 'systemctl restart nginx'
+        with self.assertRaises(ValidationError):
+            runbook.full_clean()
+
+        self.login(self.admin)
+        payload = {
+            'name': runbook.name, 'version': runbook.version, 'trigger_kind': runbook.trigger_kind,
+            'command_template': 'systemctl restart nginx', 'service': runbook.service_id,
+            'allowed_hosts': [self.host.id], 'enabled': True, 'requires_approval': True,
+        }
+        api_response = self.client.post(reverse('devops:api_runbook_update', args=[runbook.id]), data=json.dumps(payload), content_type='application/json')
+        page_response = self.client.post(reverse('devops:runbook_update', args=[runbook.id]), payload)
+
+        self.assertEqual(api_response.status_code, 400)
+        self.assertEqual(page_response.status_code, 400)
+
+    def test_created_runbook_rejects_identity_changes_in_model_api_and_classic_form(self):
+        runbook = self.make_runbook()
+        runbook.version = 2
+        with self.assertRaises(ValidationError):
+            runbook.full_clean()
+        runbook.refresh_from_db()
+        runbook.name = 'renamed runbook'
+        with self.assertRaises(ValidationError):
+            runbook.full_clean()
+
+        self.login(self.admin)
+        payload = {
+            'name': runbook.name, 'version': 2, 'trigger_kind': runbook.trigger_kind,
+            'command_template': runbook.command_template, 'service': runbook.service_id,
+            'allowed_hosts': [self.host.id], 'enabled': True, 'requires_approval': True,
+        }
+        api_response = self.client.post(reverse('devops:api_runbook_update', args=[runbook.id]), data=json.dumps(payload), content_type='application/json')
+        page_response = self.client.post(reverse('devops:runbook_update', args=[runbook.id]), payload)
+
+        self.assertEqual(api_response.status_code, 400)
+        self.assertEqual(page_response.status_code, 400)
+
+    def test_viewer_and_out_of_scope_operator_cannot_initiate(self):
+        runbook = self.make_runbook()
+        self.login(self.viewer)
+        viewer_response = self.client.post(reverse('devops:api_runbook_initiate', args=[runbook.id]), data=json.dumps({'host_id': self.host.id}), content_type='application/json')
+        self.login(self.operator)
+        scoped_response = self.client.post(reverse('devops:api_runbook_initiate', args=[runbook.id]), data=json.dumps({'host_id': self.other_host.id}), content_type='application/json')
+
+        self.assertEqual(viewer_response.status_code, 403)
+        self.assertEqual(scoped_response.status_code, 403)
+        self.assertEqual(CommandExecution.objects.count(), 0)
+
+    @override_settings(DEVOPS_SYNC_TASKS=False)
+    def test_authorized_initiation_creates_pending_command_and_approval_then_worker_runs_after_approval(self):
+        from .services import execute_approval_request, process_next_background_job
+        runbook = self.make_runbook()
+        with mock.patch('devops.services.create_host_ssh_client') as ssh_client:
+            response = self.client.post(reverse('devops:api_runbook_initiate', args=[runbook.id]), data=json.dumps({'host_id': self.host.id}), content_type='application/json')
+            self.assertEqual(response.status_code, 202)
+            self.assertNotIn(runbook.command_template, json.dumps(response.json()))
+            command = CommandExecution.objects.get()
+            approval = ApprovalRequest.objects.get()
+            self.assertEqual(command.status, CommandExecution.STATUS_PENDING)
+            self.assertEqual(approval.request_type, ApprovalRequest.TYPE_COMMAND)
+            self.assertEqual(approval.command_execution_id, command.id)
+            ssh_client.assert_not_called()
+
+            approval.status = ApprovalRequest.STATUS_APPROVED
+            approval.save(update_fields=['status'])
+            execute_approval_request(approval)
+            self.assertEqual(BackgroundJob.objects.filter(job_type=BackgroundJob.TYPE_COMMAND).count(), 1)
+            approval.refresh_from_db()
+            self.assertEqual(approval.status, ApprovalRequest.STATUS_APPROVED)
+            ssh_client.assert_not_called()
+            client = mock.Mock()
+            client.exec_command.return_value = (None, mock.Mock(read=lambda: b'ok'), mock.Mock(read=lambda: b''))
+            ssh_client.return_value = client
+            process_next_background_job()
+        command.refresh_from_db()
+        approval.refresh_from_db()
+        self.assertEqual(command.status, CommandExecution.STATUS_SUCCESS)
+        self.assertEqual(approval.status, ApprovalRequest.STATUS_EXECUTED)
+        self.assertTrue(AuditLog.objects.filter(action='发起受控运行手册').exists())
+
+    @override_settings(DEVOPS_SYNC_TASKS=False)
+    def test_runbook_approval_becomes_failed_only_after_worker_command_failure(self):
+        from .services import execute_approval_request, process_next_background_job
+        runbook = self.make_runbook()
+        self.client.post(reverse('devops:api_runbook_initiate', args=[runbook.id]), data=json.dumps({'host_id': self.host.id}), content_type='application/json')
+        approval = ApprovalRequest.objects.get()
+        approval.status = ApprovalRequest.STATUS_APPROVED
+        approval.save(update_fields=['status'])
+        execute_approval_request(approval)
+        approval.refresh_from_db()
+        self.assertEqual(approval.status, ApprovalRequest.STATUS_APPROVED)
+
+        with mock.patch('devops.services.create_host_ssh_client', side_effect=RuntimeError('worker failure')):
+            process_next_background_job()
+
+        approval.refresh_from_db()
+        self.assertEqual(approval.status, ApprovalRequest.STATUS_FAILED)
+
+    def test_timed_out_runbook_worker_marks_linked_command_and_approval_failed(self):
+        runbook = self.make_runbook()
+        record = CommandExecution.objects.create(
+            host=self.host, runbook_template=runbook, command=runbook.command_template,
+            status=CommandExecution.STATUS_RUNNING,
+        )
+        approval = ApprovalRequest.objects.create(
+            request_type=ApprovalRequest.TYPE_COMMAND, title='timed runbook', host=self.host,
+            command_execution=record, status=ApprovalRequest.STATUS_APPROVED,
+        )
+        BackgroundJob.objects.create(
+            job_type=BackgroundJob.TYPE_COMMAND, target_id=record.id,
+            status=BackgroundJob.STATUS_RUNNING, started_at=timezone.now() - timedelta(seconds=30),
+        )
+
+        self.assertEqual(fail_timed_out_background_jobs(1), 1)
+
+        record.refresh_from_db()
+        approval.refresh_from_db()
+        self.assertEqual(record.status, CommandExecution.STATUS_FAILED)
+        self.assertEqual(approval.status, ApprovalRequest.STATUS_FAILED)
+
+    def test_max_attempt_runbook_worker_marks_linked_command_and_approval_failed(self):
+        runbook = self.make_runbook()
+        record = CommandExecution.objects.create(
+            host=self.host, runbook_template=runbook, command=runbook.command_template,
+        )
+        approval = ApprovalRequest.objects.create(
+            request_type=ApprovalRequest.TYPE_COMMAND, title='retry runbook', host=self.host,
+            command_execution=record, status=ApprovalRequest.STATUS_APPROVED,
+        )
+        BackgroundJob.objects.create(
+            job_type=BackgroundJob.TYPE_COMMAND, target_id=record.id, attempts=1,
+        )
+
+        process_next_background_job(max_attempts=1)
+
+        record.refresh_from_db()
+        approval.refresh_from_db()
+        self.assertEqual(record.status, CommandExecution.STATUS_FAILED)
+        self.assertEqual(approval.status, ApprovalRequest.STATUS_FAILED)
+
+    def test_classic_approval_rejects_guessed_command_approval_outside_host_scope(self):
+        DevOpsRole.objects.filter(user=self.operator).update(role=DevOpsRole.ROLE_ADMIN)
+        approval = ApprovalRequest.objects.create(
+            request_type=ApprovalRequest.TYPE_COMMAND, title='other host command', host=self.other_host,
+        )
+
+        response = self.client.post(reverse('devops:approval_decide', args=[approval.id]), {'action': 'approve'})
+
+        self.assertEqual(response.status_code, 403)
+        approval.refresh_from_db()
+        self.assertEqual(approval.status, ApprovalRequest.STATUS_PENDING)
+
+    def test_list_and_initiation_payload_omit_template_and_command_output(self):
+        runbook = self.make_runbook()
+        response = self.client.get(reverse('devops:api_runbooks'))
+
+        self.assertEqual(response.status_code, 200)
+        payload = json.dumps(response.json())
+        self.assertNotIn('command_template', payload)
+        self.assertNotIn(runbook.command_template, payload)
+        self.assertNotIn('output', payload)
+
+    def test_runbook_command_surfaces_omit_command_output_and_error_but_manual_records_remain_visible(self):
+        runbook = self.make_runbook()
+        sensitive_command = 'runbook-sensitive-command'
+        sensitive_output = 'runbook-sensitive-output'
+        sensitive_error = 'runbook-sensitive-error'
+        record = CommandExecution.objects.create(
+            host=self.host, command=sensitive_command, output=sensitive_output, error=sensitive_error,
+            runbook_template=runbook,
+        )
+        manual = CommandExecution.objects.create(host=self.host, command='manual-visible-command', output='manual-visible-output')
+        ApprovalRequest.objects.create(
+            request_type=ApprovalRequest.TYPE_COMMAND, title='runbook approval', host=self.host,
+            command=sensitive_command, reason='受控运行手册 #%s v%s' % (runbook.id, runbook.version),
+            command_execution=record,
+        )
+
+        responses = [
+            self.client.get(reverse('devops:command_center')),
+            self.client.get(reverse('devops:command_detail', args=[record.id])),
+            self.client.get(reverse('devops:dashboard')),
+            self.client.get(reverse('devops:approvals')),
+            self.client.get(reverse('devops:api_commands')),
+            self.client.get(reverse('devops:api_command_detail', args=[record.id])),
+            self.client.get(reverse('devops:api_dashboard')),
+            self.client.get(reverse('devops:api_approvals')),
+        ]
+        for response in responses:
+            self.assertEqual(response.status_code, 200)
+            self.assertNotIn(sensitive_command, response.content.decode())
+            self.assertNotIn(sensitive_output, response.content.decode())
+            self.assertNotIn(sensitive_error, response.content.decode())
+        self.assertIn(manual.command, responses[4].content.decode())
+        self.assertIn(manual.output, responses[4].content.decode())
+
+    def test_incident_api_omits_runbook_command_text(self):
+        runbook = self.make_runbook()
+        record = CommandExecution.objects.create(
+            host=self.host, runbook_template=runbook, command='incident-runbook-command',
+            output='incident-runbook-output', error='incident-runbook-error',
+        )
+        incident = Incident.objects.create(title='runbook incident', severity=Incident.SEVERITY_HIGH, command_execution=record)
+
+        responses = [
+            self.client.get(reverse('devops:api_incidents')),
+            self.client.get(reverse('devops:api_incident_detail', args=[incident.id])),
+        ]
+        for response in responses:
+            self.assertEqual(response.status_code, 200)
+            content = response.content.decode()
+            self.assertNotIn(record.command, content)
+            self.assertNotIn(record.output, content)
+            self.assertNotIn(record.error, content)
+
+    def test_runbook_page_only_renders_in_scope_allowed_host_options(self):
+        runbook = self.make_runbook()
+        runbook.allowed_hosts.add(self.other_host)
+
+        response = self.client.get(reverse('devops:runbooks'))
+
+        self.assertEqual(response.status_code, 200)
+        self.assertContains(response, self.host.linux_name)
+        self.assertNotContains(response, self.other_host.linux_name)
 
 
 class RbacAdministrationClosureTests(TestCase):

@@ -86,6 +86,7 @@ from .models import (
     MaintenanceWindow,
     ServiceCatalog,
     ServiceSlo,
+    RunbookTemplate,
 )
 from RemoteLinux.models import NewLinux
 
@@ -980,6 +981,8 @@ def process_background_job(job):
             target(obj)
     except Exception as exc:
         mark_background_failure(target if 'target' in locals() else job.job_type, (obj,) if 'obj' in locals() else (), exc)
+        if 'obj' in locals() and isinstance(obj, CommandExecution):
+            finalize_command_approval(obj)
         message = '后台任务异常：%s' % exc
         BackgroundJob.objects.filter(id=job.id, status=BackgroundJob.STATUS_RUNNING).update(
             status=BackgroundJob.STATUS_FAILED,
@@ -988,6 +991,8 @@ def process_background_job(job):
         )
         return False
 
+    if isinstance(obj, CommandExecution):
+        finalize_command_approval(obj)
     BackgroundJob.objects.filter(id=job.id, status=BackgroundJob.STATUS_RUNNING).update(
         status=BackgroundJob.STATUS_SUCCESS,
         finished_at=timezone.now(),
@@ -1023,6 +1028,8 @@ def fail_timed_out_background_jobs(timeout_seconds):
         except Exception:
             target, obj = job.job_type, None
         mark_background_failure(target, (obj,) if obj else (), RuntimeError(message))
+        if isinstance(obj, CommandExecution):
+            finalize_command_approval(obj)
     return failed
 
 
@@ -1327,11 +1334,17 @@ def process_next_background_job(max_attempts=1):
     except (TypeError, ValueError):
         max_attempts = 1
     if job.attempts > max_attempts:
+        message = '后台任务超过最大尝试次数'
         BackgroundJob.objects.filter(id=job.id).update(
             status=BackgroundJob.STATUS_FAILED,
-            error='后台任务超过最大尝试次数',
+            error=message,
             finished_at=timezone.now(),
         )
+        if job.job_type == BackgroundJob.TYPE_COMMAND:
+            record = CommandExecution.objects.filter(id=job.target_id).first()
+            if record:
+                mark_background_failure('process_next_background_job', (record,), RuntimeError(message))
+                finalize_command_approval(record)
         return job
     process_background_job(job)
     return job
@@ -1626,6 +1639,8 @@ def can_access_hosts(request, hosts):
 
 def can_decide_deployment_approval(request, approval):
     """A deployment approval is actionable only when every release host is visible."""
+    if approval.request_type == ApprovalRequest.TYPE_COMMAND and approval.host_id:
+        return can_access_host(request, approval.host)
     if approval.request_type != ApprovalRequest.TYPE_DEPLOYMENT or not approval.deployment_release_id:
         return True
     return can_access_hosts(request, approval.deployment_release.hosts.all())
@@ -2760,6 +2775,46 @@ def create_command_approval(host, command, requester='', reason=''):
     return approval
 
 
+class RunbookInitiationError(ValueError):
+    pass
+
+
+def initiate_runbook(request, runbook, host):
+    """Create a pending command and approval; never invoke SSH from this path."""
+    if not has_role(request, DevOpsRole.ROLE_OPERATOR, DevOpsModulePermission.MODULE_COMMAND):
+        raise PermissionError('没有命令执行权限')
+    if not runbook.enabled:
+        raise RunbookInitiationError('运行手册未启用')
+    if not runbook.requires_approval:
+        raise RunbookInitiationError('运行手册必须经过审批')
+    if not can_access_host(request, host):
+        raise PermissionError('目标主机不在当前用户授权范围内')
+    if not runbook.allowed_hosts.filter(id=host.id).exists():
+        raise RunbookInitiationError('目标主机不在运行手册授权范围内')
+    if runbook.service_id and not runbook.service.hosts.filter(id=host.id).exists():
+        raise RunbookInitiationError('目标主机不属于运行手册关联服务')
+
+    decision, policy = evaluate_command_policy(runbook.command_template, user_role(request))
+    if decision == COMMAND_BLOCKED:
+        raise RunbookInitiationError(command_denied_message(decision, policy))
+    record = CommandExecution.objects.create(
+        host=host,
+        runbook_template=runbook,
+        command=runbook.command_template,
+        created_by=request.session.get('user_name', ''),
+    )
+    approval = create_command_approval(
+        host, runbook.command_template, request.session.get('user_name', ''),
+        '受控运行手册 #%s v%s' % (runbook.id, runbook.version),
+    )
+    approval.command_execution = record
+    approval.save(update_fields=['command_execution'])
+    audit(request, '发起受控运行手册', 'RunbookTemplate', runbook.id, '版本=%s, 主机=%s, 审批=%s' % (
+        runbook.version, host.id, approval.id,
+    ))
+    return record, approval
+
+
 def create_deployment_approval(release, requester='', reason=''):
     approval = ApprovalRequest.objects.create(
         request_type=ApprovalRequest.TYPE_DEPLOYMENT,
@@ -2784,8 +2839,33 @@ def create_rollback_approval(release, requester='', reason=''):
     return approval
 
 
+def finalize_command_approval(record):
+    """Move a queued runbook approval only after its existing command worker reaches a terminal state."""
+    if not record.runbook_template_id:
+        return
+    if record.status == CommandExecution.STATUS_SUCCESS:
+        status = ApprovalRequest.STATUS_EXECUTED
+    elif record.status in (CommandExecution.STATUS_FAILED, CommandExecution.STATUS_BLOCKED):
+        status = ApprovalRequest.STATUS_FAILED
+    else:
+        return
+    for approval in ApprovalRequest.objects.filter(
+            request_type=ApprovalRequest.TYPE_COMMAND,
+            command_execution=record,
+            status=ApprovalRequest.STATUS_APPROVED):
+        approval.status = status
+        approval.executed_at = timezone.now()
+        approval.save(update_fields=['status', 'executed_at'])
+        notify_approval(approval, '执行')
+
+
 def execute_approval_request(approval, role=DevOpsRole.ROLE_ADMIN):
     if approval.request_type == ApprovalRequest.TYPE_COMMAND:
+        if approval.command_execution_id:
+            record = approval.command_execution
+            enqueue_background_job(execute_command_record, record, role)
+            finalize_command_approval(record)
+            return approval
         record = CommandExecution.objects.create(
             host=approval.host,
             command=approval.command,

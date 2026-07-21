@@ -10,7 +10,8 @@ from django.shortcuts import get_object_or_404
 from django.utils import timezone
 from django.views.decorators.http import require_http_methods
 
-from .forms import ServiceSloForm
+from RemoteLinux.models import NewLinux
+from .forms import ServiceSloForm, RunbookTemplateForm
 from .models import (
     AlertEvent,
     ApprovalRequest,
@@ -30,6 +31,7 @@ from .models import (
     NotificationLog,
     ServiceCatalog,
     ServiceSlo,
+    RunbookTemplate,
 )
 from .services import (
     COMMAND_ALLOWED,
@@ -56,6 +58,8 @@ from .services import (
     visible_hosts_for_request,
     summarize_integration_health,
     evaluate_service_slo,
+    initiate_runbook,
+    RunbookInitiationError,
 )
 
 
@@ -144,19 +148,21 @@ def serialize_host(host):
 
 
 def serialize_command(record):
-    return {
+    result = {
         'id': record.id,
         'host': serialize_host(record.host) if record.host else None,
-        'command': record.command,
         'status': record.status,
         'status_label': label(record, 'status'),
-        'output': record.output,
-        'error': record.error,
         'duration_ms': record.duration_ms,
         'created_by': record.created_by,
         'created_at': iso(record.created_at),
         'finished_at': iso(record.finished_at),
     }
+    if not record.runbook_template_id:
+        result['command'] = record.command
+        result['output'] = record.output
+        result['error'] = record.error
+    return result
 
 
 def visible_host_count(hosts, visible_hosts=None):
@@ -172,7 +178,7 @@ def scoped_alert_queryset(visible_hosts):
 
 
 def scoped_approval_queryset(visible_hosts):
-    return ApprovalRequest.objects.select_related('host', 'deployment_release').filter(
+    return ApprovalRequest.objects.select_related('host', 'deployment_release', 'command_execution').filter(
         models.Q(host__in=visible_hosts) |
         models.Q(host__isnull=True, deployment_release__hosts__in=visible_hosts) |
         models.Q(host__isnull=True, deployment_release__isnull=True)
@@ -213,6 +219,12 @@ def serialize_alert(alert):
 
 
 def serialize_incident_reference(incident):
+    command = None
+    if incident.command_execution_id:
+        command_payload = serialize_command(incident.command_execution)
+        command = {'id': command_payload['id'], 'status': command_payload['status']}
+        if 'command' in command_payload:
+            command['command'] = command_payload['command']
     return {
         'host': serialize_host(incident.host) if incident.host_id else None,
         'alert': {
@@ -227,11 +239,7 @@ def serialize_incident_reference(incident):
             'status': incident.deployment_release.status,
         } if incident.deployment_release_id else None,
         # Command output and error are deliberately excluded from incident APIs.
-        'command': {
-            'id': incident.command_execution_id,
-            'command': incident.command_execution.command,
-            'status': incident.command_execution.status,
-        } if incident.command_execution_id else None,
+        'command': command,
     }
 
 
@@ -291,7 +299,7 @@ def incident_from_payload(payload, field, model):
 
 
 def serialize_approval(approval):
-    return {
+    result = {
         'id': approval.id,
         'request_type': approval.request_type,
         'request_type_label': label(approval, 'request_type'),
@@ -303,13 +311,15 @@ def serialize_approval(approval):
         'approver': approval.approver,
         'comment': approval.comment,
         'host': serialize_host(approval.host) if approval.host else None,
-        'command': approval.command,
         'deployment_release_id': approval.deployment_release_id,
         'command_execution_id': approval.command_execution_id,
         'created_at': iso(approval.created_at),
         'decided_at': iso(approval.decided_at),
         'executed_at': iso(approval.executed_at),
     }
+    if not (approval.command_execution_id and approval.command_execution.runbook_template_id):
+        result['command'] = approval.command
+    return result
 
 
 def serialize_release(release, visible_hosts=None):
@@ -675,6 +685,107 @@ def service_slo_evaluate(request, id):
     result = evaluate_service_slo(slo)
     audit(request, 'API手动评估服务SLO', 'ServiceSlo', slo.id, '状态=%s' % result['state'])
     return JsonResponse({'ok': True, 'slo': serialize_service_slo(slo)})
+
+
+def serialize_runbook(runbook):
+    """Runbook command bodies remain server-side and never enter list payloads."""
+    return {
+        'id': runbook.id,
+        'name': runbook.name,
+        'version': runbook.version,
+        'trigger_kind': runbook.trigger_kind,
+        'trigger_kind_label': label(runbook, 'trigger_kind'),
+        'service': {'id': runbook.service_id, 'name': runbook.service.name} if runbook.service_id else None,
+        'enabled': runbook.enabled,
+        'requires_approval': runbook.requires_approval,
+        'updated_at': iso(runbook.updated_at),
+    }
+
+
+def scoped_runbook_queryset(request):
+    return RunbookTemplate.objects.select_related('service').filter(
+        allowed_hosts__in=visible_hosts_for_request(request)
+    ).distinct()
+
+
+def runbook_form(request, data, instance=None):
+    form = RunbookTemplateForm(data, instance=instance)
+    form.fields['allowed_hosts'].queryset = visible_hosts_for_request(request)
+    form.fields['service'].queryset = ServiceCatalog.objects.filter(
+        models.Q(hosts__in=visible_hosts_for_request(request)) | models.Q(hosts__isnull=True)
+    ).distinct()
+    return form
+
+
+@api_login_required
+@require_http_methods(['GET', 'POST'])
+def runbooks(request):
+    if request.method == 'GET':
+        if not has_role(request, DevOpsRole.ROLE_VIEWER, MODULE_COMMAND):
+            return api_error('没有运行手册查看权限', status=403, code='forbidden')
+        return JsonResponse({'ok': True, 'results': [serialize_runbook(item) for item in scoped_runbook_queryset(request)]})
+    if not has_role(request, DevOpsRole.ROLE_ADMIN, MODULE_SECURITY):
+        return api_error('没有运行手册管理权限', status=403, code='forbidden')
+    payload = request_json(request)
+    if not isinstance(payload, dict):
+        return invalid_json_error()
+    form = runbook_form(request, payload)
+    if not form.is_valid():
+        return api_error('运行手册配置无效', status=400, code='validation_error')
+    runbook = form.save(commit=False)
+    runbook.created_by = request.session.get('user_name', '')
+    runbook.save()
+    form.save_m2m()
+    audit(request, 'API创建受控运行手册', 'RunbookTemplate', runbook.id, '版本=%s, 启用=%s' % (runbook.version, bool(runbook.enabled)))
+    return JsonResponse({'ok': True, 'runbook': serialize_runbook(runbook)}, status=201)
+
+
+@api_login_required
+@require_http_methods(['POST'])
+def runbook_update(request, id):
+    if not has_role(request, DevOpsRole.ROLE_ADMIN, MODULE_SECURITY):
+        return api_error('没有运行手册管理权限', status=403, code='forbidden')
+    try:
+        runbook = scoped_runbook_queryset(request).get(id=id)
+    except RunbookTemplate.DoesNotExist:
+        return api_error('运行手册不存在', status=404, code='not_found')
+    payload = request_json(request)
+    if not isinstance(payload, dict):
+        return invalid_json_error()
+    form = runbook_form(request, payload, instance=runbook)
+    if not form.is_valid():
+        return api_error('运行手册配置无效', status=400, code='validation_error')
+    runbook = form.save()
+    audit(request, 'API更新受控运行手册', 'RunbookTemplate', runbook.id, '版本=%s, 启用=%s' % (runbook.version, bool(runbook.enabled)))
+    return JsonResponse({'ok': True, 'runbook': serialize_runbook(runbook)})
+
+
+@api_login_required
+@require_http_methods(['POST'])
+def runbook_initiate(request, id):
+    if not has_role(request, DevOpsRole.ROLE_OPERATOR, MODULE_COMMAND):
+        return api_error('没有命令执行权限', status=403, code='forbidden')
+    payload = request_json(request)
+    if not isinstance(payload, dict):
+        return invalid_json_error()
+    try:
+        runbook = scoped_runbook_queryset(request).get(id=id)
+    except RunbookTemplate.DoesNotExist:
+        return api_error('运行手册不存在', status=404, code='not_found')
+    try:
+        host = visible_hosts_for_request(request).get(id=payload.get('host_id'))
+    except (TypeError, ValueError, NewLinux.DoesNotExist):
+        return api_error('目标主机不在当前用户授权范围内', status=403, code='host_forbidden')
+    try:
+        record, approval = initiate_runbook(request, runbook, host)
+    except PermissionError:
+        return api_error('目标主机不在当前用户授权范围内', status=403, code='host_forbidden')
+    except RunbookInitiationError as exc:
+        return api_error(str(exc), status=400, code='validation_error')
+    return JsonResponse({
+        'ok': True, 'requires_approval': True, 'runbook': serialize_runbook(runbook),
+        'command_execution_id': record.id, 'approval': serialize_approval(approval),
+    }, status=202)
 
 
 @api_login_required

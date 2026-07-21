@@ -38,7 +38,7 @@
                     <td>{{ item.reason }}</td>
                     <td>
                         {% if item.request_type == "command" %}
-                        {{ item.host.linux_name }} <code>{{ item.command|truncatechars:60 }}</code>
+                        {{ item.host.linux_name }} {% if item.command_execution.runbook_template_id %}<span class="text-muted">受控运行手册</span>{% else %}<code>{{ item.command|truncatechars:60 }}</code>{% endif %}
                         {% elif item.deployment_release %}
                         {{ item.deployment_release.app.name }} {{ item.deployment_release.version }}
                         {% else %}-{% endif %}

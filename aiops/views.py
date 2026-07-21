@@ -32,11 +32,12 @@ from django.db.models import Avg, Count, Max, Q
 from django.http import HttpResponseNotAllowed, JsonResponse
 from django.middleware.csrf import get_token
 from django.shortcuts import redirect, render
+from django.urls import reverse
 from django.views.decorators.csrf import csrf_exempt
 from django.utils import timezone
 
-from devops.models import AlertEvent, AuditLog, CommandExecution, MetricSample, NotificationLog
-from devops.services import visible_hosts_for_request
+from devops.models import AlertEvent, AuditLog, CommandExecution, DevOpsModulePermission, DevOpsRole, MetricSample, NotificationLog, RunbookTemplate
+from devops.services import has_role, visible_hosts_for_request
 from userprofile.decorators import session_login_required
 from .models import AiopsAlertAnalysis, AiopsIntegration
 
@@ -296,12 +297,15 @@ def _build_capacity(hosts):
 	return sorted(capacity, key=lambda row: row['average'], reverse=True)[:8]
 
 
-def _runbooks():
+def _runbooks(request, hosts):
+	"""AIOps only suggests safe identifiers; it cannot initiate a runbook."""
+	if not has_role(request, DevOpsRole.ROLE_VIEWER, DevOpsModulePermission.MODULE_COMMAND):
+		return []
 	return [
-		{'title': 'CPU 异常处置', 'trigger': 'CPU > 80% 或 CPU 告警聚合', 'steps': ['查看 top 进程', '确认近期发布/批量任务', '必要时重启异常服务或扩容']},
-		{'title': '内存泄漏排查', 'trigger': '内存持续增长且未恢复', 'steps': ['查看进程 RSS', '检查应用日志 OOM', '保留现场后重启服务']},
-		{'title': '磁盘空间治理', 'trigger': '磁盘 > 80% 或日志增长异常', 'steps': ['定位大文件', '清理过期日志', '评估分区扩容']},
-		{'title': '自动化失败恢复', 'trigger': '命令、文件分发、发布任务失败', 'steps': ['检查 SSH 连通性', '确认账号权限', '重试前检查审批和策略拦截']},
+		{'id': item.id, 'name': item.name, 'version': item.version, 'initiate_url': reverse('devops:runbooks')}
+		for item in RunbookTemplate.objects.filter(
+			enabled=True, requires_approval=True, allowed_hosts__in=hosts,
+		).distinct().order_by('name', '-version', 'id')[:20]
 	]
 
 
@@ -460,7 +464,7 @@ def dashboard(request):
 		'correlations': correlations,
 		'root_causes': root_causes,
 		'capacity': capacity,
-		'runbooks': _runbooks(),
+		'runbooks': _runbooks(request, hosts),
 		'integration': {
 			'alertmanager_configured': bool(config.alertmanager_url),
 			'llm_configured': bool(config.llm_url),

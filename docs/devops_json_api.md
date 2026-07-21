@@ -43,6 +43,15 @@
   - 更新同一授权范围内的 SLO 配置；需要安全策略模块管理员权限。只接受受限的服务、指标类型、目标、窗口和启用状态，不接受 PromQL 或指标标签表达式。
 - `POST /devops/api/service-slos/<id>/evaluate/`
   - 手动刷新同一授权范围内 SLO 的安全状态摘要；需要安全策略模块管理员权限。仅记录状态审计，不返回查询语句或原始 Prometheus 数据。
+- `GET /devops/api/runbooks/`
+  - 返回当前用户主机范围内、已明确绑定主机的运行手册安全摘要。需要命令模块只读权限。
+  - 返回 ID、名称、版本、触发类型、关联服务、启用和审批标记；不返回固定命令、命令输出、主机凭据或审批命令正文。
+- `POST /devops/api/runbooks/` 和 `POST /devops/api/runbooks/<id>/update/`
+  - 创建或更新版本化运行手册。需要安全策略模块管理员权限，关联服务和允许主机必须在当前主机范围内。
+  - 命令只接受固定单行文本，拒绝花括号插值、Shell 替换、反引号、换行和调用方参数；运行手册始终要求审批。创建和更新写入摘要审计。
+- `POST /devops/api/runbooks/<id>/initiate/`
+  - JSON：`{"host_id": 1}`。需要命令模块运维操作权限，目标主机必须同时位于当前主机范围、运行手册允许主机和关联服务范围内。
+  - 成功返回 `202`，创建待执行 `CommandExecution` 和 `ApprovalRequest.TYPE_COMMAND`；审批前不连接 SSH。批准后仅复用既有命令 Worker，不创建新的作业类型。AIOps 只提供运行手册 ID 和管理页链接，不能调用此接口或排队执行。
 - `GET /devops/api/dashboard/`
   - DevOps 概览、最近命令、最近告警、主机最新指标。
   - `recent_commands`、`recent_alerts`、`host_metrics` 和相关统计均按当前用户可见主机范围过滤。

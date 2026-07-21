@@ -47,6 +47,7 @@ from .forms import (
     ServiceOperationForm,
     ServiceCatalogForm,
     ServiceSloForm,
+    RunbookTemplateForm,
     ProjectOnboardingForm,
 )
 from .models import (
@@ -76,6 +77,7 @@ from .models import (
     ServiceOperation,
     ServiceCatalog,
     ServiceSlo,
+    RunbookTemplate,
     ServiceDependency,
     DevOpsProject,
     ComplianceBaseline,
@@ -123,6 +125,8 @@ from .services import (
     clear_module_permissions,
     revoke_module_permission,
     summarize_integration_health,
+    initiate_runbook,
+    RunbookInitiationError,
 )
 
 
@@ -733,6 +737,85 @@ def service_slo_evaluate(request, id):
     result = evaluate_service_slo(slo)
     audit(request, '手动评估服务SLO', 'ServiceSlo', slo.id, '状态=%s' % result['state'])
     return redirect('devops:service_slos')
+
+
+def runbook_queryset(request):
+    return RunbookTemplate.objects.select_related('service').filter(
+        allowed_hosts__in=visible_hosts_for_request(request)
+    ).distinct()
+
+
+def runbook_form(request, *args, **kwargs):
+    form = RunbookTemplateForm(*args, **kwargs)
+    form.fields['allowed_hosts'].queryset = visible_hosts_for_request(request)
+    form.fields['service'].queryset = topology_service_choices(request)
+    return form
+
+
+@session_login_required
+def runbooks(request):
+    can_manage = has_role(request, DevOpsRole.ROLE_ADMIN, MODULE_SECURITY)
+    can_initiate = has_role(request, DevOpsRole.ROLE_OPERATOR, MODULE_COMMAND)
+    if not can_manage and not can_initiate:
+        denied = require_devops_role(request, DevOpsRole.ROLE_VIEWER, MODULE_COMMAND)
+        if denied:
+            return denied
+    if request.method == 'POST':
+        if not can_manage:
+            return HttpResponseForbidden('没有运行手册管理权限')
+        form = runbook_form(request, request.POST)
+        if form.is_valid():
+            runbook = form.save(commit=False)
+            runbook.created_by = request.session.get('user_name', '')
+            runbook.save()
+            form.save_m2m()
+            audit(request, '创建受控运行手册', 'RunbookTemplate', runbook.id, '版本=%s, 启用=%s' % (runbook.version, bool(runbook.enabled)))
+            return redirect('devops:runbooks')
+        return render(request, 'devops/runbooks.html', {
+            'runbooks': runbook_queryset(request), 'form': form, 'can_manage': can_manage, 'can_initiate': can_initiate,
+        }, status=400)
+    if request.method != 'GET':
+        return HttpResponseNotAllowed(['GET', 'POST'])
+    editing_runbook = None
+    if can_manage and request.GET.get('edit'):
+        editing_runbook = get_object_or_404(runbook_queryset(request), id=request.GET.get('edit'))
+    return render(request, 'devops/runbooks.html', {
+        'runbooks': runbook_queryset(request), 'form': runbook_form(request, instance=editing_runbook),
+        'editing_runbook': editing_runbook, 'can_manage': can_manage, 'can_initiate': can_initiate,
+        'visible_host_ids': set(visible_hosts_for_request(request).values_list('id', flat=True)),
+    })
+
+
+@session_login_required
+def runbook_update(request, id):
+    if request.method != 'POST':
+        return HttpResponseNotAllowed(['POST'])
+    denied = require_devops_role(request, DevOpsRole.ROLE_ADMIN, MODULE_SECURITY)
+    if denied:
+        return denied
+    runbook = get_object_or_404(runbook_queryset(request), id=id)
+    form = runbook_form(request, request.POST, instance=runbook)
+    if form.is_valid():
+        runbook = form.save()
+        audit(request, '更新受控运行手册', 'RunbookTemplate', runbook.id, '版本=%s, 启用=%s' % (runbook.version, bool(runbook.enabled)))
+        return redirect('devops:runbooks')
+    return render(request, 'devops/runbooks.html', {
+        'runbooks': runbook_queryset(request), 'form': form, 'editing_runbook': runbook,
+        'can_manage': True, 'can_initiate': has_role(request, DevOpsRole.ROLE_OPERATOR, MODULE_COMMAND),
+    }, status=400)
+
+
+@session_login_required
+def runbook_initiate(request, id):
+    if request.method != 'POST':
+        return HttpResponseNotAllowed(['POST'])
+    runbook = get_object_or_404(runbook_queryset(request), id=id)
+    try:
+        host = visible_hosts_for_request(request).get(id=request.POST.get('host_id'))
+        initiate_runbook(request, runbook, host)
+    except (NewLinux.DoesNotExist, TypeError, ValueError, PermissionError):
+        return HttpResponseForbidden('无法发起该运行手册')
+    return redirect('devops:approvals')
 
 
 def topology_service_form(request, *args, **kwargs):

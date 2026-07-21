@@ -10,7 +10,7 @@ from django.utils import timezone
 from unittest import mock
 
 from RemoteLinux.models import NewLinux, User
-from devops.models import AlertEvent, CommandExecution, DevOpsHostScope, HostGroup, MetricSample
+from devops.models import AlertEvent, CommandExecution, DevOpsHostScope, HostGroup, MetricSample, RunbookTemplate
 from .models import AiopsAlertAnalysis, AiopsIntegration
 from .views import sanitize_alert
 
@@ -395,3 +395,45 @@ class AiopsDataGovernanceTests(TestCase):
 
 		self.assertEqual(output.getvalue(), '0\n')
 		self.assertEqual(AiopsAlertAnalysis.objects.count(), 1)
+
+
+class AiopsRunbookSuggestionTests(TestCase):
+	def setUp(self):
+		self.user = User.objects.create(user='aiops-runbook', email='aiops-runbook@example.com', password='pwd', confirm_pwd='pwd')
+		session = self.client.session
+		session['is_login'] = True
+		session['user_id'] = self.user.id
+		session['user_name'] = self.user.user
+		session.save()
+		self.host = NewLinux.objects.create(linux_name='aiops-runbook-host', linux_ip='127.0.0.230', linux_hostname='aiops-runbook-host')
+		self.runbook = RunbookTemplate.objects.create(
+			name='AIOps 安全建议', version=1, trigger_kind=RunbookTemplate.TRIGGER_ALERT,
+			command_template='systemctl status nginx', enabled=True, requires_approval=True,
+		)
+		self.runbook.allowed_hosts.add(self.host)
+
+	def test_dashboard_suggests_safe_runbook_identifier_without_creating_command(self):
+		response = self.client.get(reverse('aiops:dashboard'))
+
+		self.assertEqual(response.status_code, 200)
+		payload = response.context['aiops_payload']
+		self.assertEqual(payload['runbooks'], [{'id': self.runbook.id, 'name': self.runbook.name, 'version': 1, 'initiate_url': reverse('devops:runbooks')}])
+		self.assertNotIn(self.runbook.command_template, str(payload['runbooks']))
+		self.assertEqual(CommandExecution.objects.count(), 0)
+
+	def test_dashboard_hides_runbook_suggestions_without_command_view_permission(self):
+		from devops.models import DevOpsHostScope, DevOpsModulePermission, DevOpsRole, HostGroup
+		DevOpsRole.objects.create(user=self.user, role=DevOpsRole.ROLE_VIEWER)
+		DevOpsModulePermission.objects.create(
+			user=self.user, module=DevOpsModulePermission.MODULE_COMMAND,
+			role=DevOpsModulePermission.ROLE_NONE,
+		)
+		group = HostGroup.objects.create(name='aiops-runbook-visible')
+		group.hosts.add(self.host)
+		scope = DevOpsHostScope.objects.create(user=self.user)
+		scope.groups.add(group)
+
+		response = self.client.get(reverse('aiops:dashboard'))
+
+		self.assertEqual(response.status_code, 200)
+		self.assertEqual(response.context['aiops_payload']['runbooks'], [])

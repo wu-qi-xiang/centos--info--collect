@@ -22,7 +22,7 @@
                     <table class="table table-sm">
                         <tr><th>主机</th><th>状态</th><th>命令</th></tr>
                         {% for item in recent_commands %}
-                        <tr><td>{{ item.host.linux_name }}</td><td>{{ item.get_status_display }}</td><td><code>{{ item.command|truncatechars:60 }}</code></td></tr>
+                        <tr><td>{{ item.host.linux_name }}</td><td>{{ item.get_status_display }}</td><td>{% if item.runbook_template_id %}<span class="text-muted">受控运行手册</span>{% else %}<code>{{ item.command|truncatechars:60 }}</code>{% endif %}</td></tr>
                         {% empty %}<tr><td colspan="3" class="text-muted">暂无记录</td></tr>{% endfor %}
                     </table>
                 </div>

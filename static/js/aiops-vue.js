@@ -134,12 +134,12 @@
 
                 <section v-if="active === 'runbook'" class="aiops-panel">
                     <h2>运行手册</h2>
-                    <div class="aiops-runbook" v-for="book in data.runbooks" :key="book.title">
+                    <div class="aiops-runbook" v-for="book in data.runbooks" :key="book.id">
                         <div>
-                            <strong>[[ book.title ]]</strong>
-                            <span>触发：[[ book.trigger ]]</span>
+                            <strong>[[ book.name ]]</strong>
+                            <span>版本：[[ book.version ]]</span>
                         </div>
-                        <ol><li v-for="step in book.steps" :key="step">[[ step ]]</li></ol>
+                        <a class="btn btn-outline-primary btn-sm" :href="book.initiate_url">查看并发起审批</a>
                     </div>
                 </section>
 

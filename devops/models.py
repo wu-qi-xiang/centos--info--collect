@@ -220,6 +220,59 @@ class ServiceSlo(models.Model):
         return '%s:%s' % (self.service, self.metric_kind)
 
 
+class RunbookTemplate(models.Model):
+    """A fixed command template which can only enter the existing approval flow."""
+    TRIGGER_ALERT = 'alert'
+    TRIGGER_SERVICE = 'service'
+    TRIGGER_MANUAL = 'manual'
+    TRIGGER_CHOICES = (
+        (TRIGGER_ALERT, '告警'),
+        (TRIGGER_SERVICE, '服务处置'),
+        (TRIGGER_MANUAL, '人工发起'),
+    )
+
+    name = models.CharField(max_length=120)
+    version = models.PositiveIntegerField(default=1)
+    trigger_kind = models.CharField(max_length=20, choices=TRIGGER_CHOICES, default=TRIGGER_MANUAL)
+    command_template = models.TextField()
+    service = models.ForeignKey(ServiceCatalog, null=True, blank=True, on_delete=models.SET_NULL, related_name='runbook_templates')
+    allowed_hosts = models.ManyToManyField(NewLinux, blank=True, related_name='runbook_templates')
+    enabled = models.BooleanField(default=True)
+    requires_approval = models.BooleanField(default=True)
+    created_by = models.CharField(max_length=100, blank=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        db_table = 'devops_runbook_template'
+        ordering = ['name', '-version', 'id']
+        unique_together = ('name', 'version')
+
+    def clean(self):
+        super(RunbookTemplate, self).clean()
+        if self.pk:
+            original = RunbookTemplate.objects.filter(id=self.pk).values('name', 'version', 'command_template').first()
+            if original:
+                immutable_fields = {}
+                if original['name'] != self.name:
+                    immutable_fields['name'] = '已创建运行手册的名称不可修改，请创建新版本'
+                if original['version'] != self.version:
+                    immutable_fields['version'] = '已创建运行手册的版本不可修改，请创建新版本'
+                if original['command_template'] != self.command_template:
+                    immutable_fields['command_template'] = '已创建运行手册的命令不可修改，请创建新版本'
+                if immutable_fields:
+                    raise ValidationError(immutable_fields)
+        command = self.command_template or ''
+        forbidden = ('{', '}', '$', '`', '\n', '\r', '%s', '%(')
+        if not command.strip() or any(token in command for token in forbidden):
+            raise ValidationError({'command_template': '运行手册命令必须是固定的单行命令，不能包含插值、替换或调用方参数'})
+        if not self.requires_approval:
+            raise ValidationError({'requires_approval': '受控运行手册必须经过审批'})
+
+    def __str__(self):
+        return '%s v%s' % (self.name, self.version)
+
+
 class ServiceDependency(models.Model):
     service = models.ForeignKey(ServiceCatalog, on_delete=models.CASCADE, related_name='upstream_links')
     upstream_service = models.ForeignKey(ServiceCatalog, on_delete=models.CASCADE, related_name='downstream_links')
@@ -330,6 +383,7 @@ class CommandExecution(models.Model):
     )
 
     host = models.ForeignKey(NewLinux, on_delete=models.CASCADE)
+    runbook_template = models.ForeignKey(RunbookTemplate, null=True, blank=True, on_delete=models.PROTECT, related_name='command_executions')
     command = models.TextField()
     status = models.CharField(max_length=20, choices=STATUS_CHOICES, default=STATUS_PENDING)
     output = models.TextField(blank=True)

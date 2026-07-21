@@ -23,12 +23,16 @@
                 <div class="col-md-3"><div class="text-muted">命令超时</div><strong>{{ runtime_config.command_timeout }}秒</strong></div>
             </div>
             <hr>
+            {% if record.runbook_template_id %}
+            <div class="text-muted">此记录来自受控运行手册，命令和执行输出已隐藏。</div>
+            {% else %}
             <div class="text-muted mb-1">命令</div>
             <pre class="bg-light p-3 mb-0"><code>{{ record.command }}</code></pre>
+            {% endif %}
         </div>
     </div>
 
-    <div class="row g-3">
+    {% if not record.runbook_template_id %}<div class="row g-3">
         <div class="col-lg-6">
             <div class="card h-100">
                 <div class="card-header">标准输出</div>
@@ -42,6 +46,7 @@
             </div>
         </div>
     </div>
+    {% endif %}
 </div>
 {% include "devops/_auto_refresh.html" with object=record %}
 {% endblock %}
