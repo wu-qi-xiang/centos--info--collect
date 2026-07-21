@@ -484,6 +484,37 @@ class K8sClusterForm(forms.ModelForm):
         raise forms.ValidationError('Kubeconfig 不能为空')
 
 
+class PrometheusRuleYamlForm(forms.Form):
+    yaml = forms.CharField(
+        label='PrometheusRule YAML',
+        widget=forms.Textarea(attrs={
+            'class': 'form-control font-monospace',
+            'rows': 24,
+            'spellcheck': 'false',
+            'autocomplete': 'off',
+        }),
+    )
+
+
+class PrometheusRuleDeleteForm(forms.Form):
+    confirmation = forms.CharField(
+        label='删除确认',
+        max_length=16,
+        strip=False,
+        widget=forms.TextInput(attrs={
+            'class': 'form-control',
+            'autocomplete': 'off',
+        }),
+    )
+    resource_version = forms.CharField(widget=forms.HiddenInput(), max_length=255)
+
+    def clean_confirmation(self):
+        confirmation = self.cleaned_data.get('confirmation') or ''
+        if confirmation != 'DELETE':
+            raise forms.ValidationError('请输入 DELETE 确认删除。')
+        return confirmation
+
+
 class K8sClusterConnectionForm(forms.ModelForm):
     MAX_KUBECONFIG_SIZE = 1024 * 1024
     NAMESPACE_PATTERN = re.compile(r'^[a-z0-9]([-a-z0-9]*[a-z0-9])?$')

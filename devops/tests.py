@@ -1956,6 +1956,202 @@ spec:
         self.assertEqual(observed.get('close_count'), 1)
 
 
+class PrometheusRuleViewTests(K8sClusterTests):
+    rule_yaml = '''apiVersion: monitoring.coreos.com/v1
+kind: PrometheusRule
+metadata:
+  name: api-errors
+  namespace: monitoring
+  resourceVersion: "42"
+spec:
+  groups: []
+'''
+
+    def _rule_summary(self):
+        return {
+            'namespace': 'monitoring',
+            'name': 'api-errors',
+            'resource_version': '42',
+            'created_at': '2026-07-21T08:00:00Z',
+        }
+
+    def _detail_url(self, cluster):
+        return reverse('devops:prometheus_rule_detail', args=[cluster.id, 'monitoring', 'api-errors'])
+
+    def _set_cluster_viewer(self):
+        DevOpsModulePermission.objects.update_or_create(
+            user=self.user,
+            module=DevOpsModulePermission.MODULE_CLUSTER,
+            defaults={'role': DevOpsRole.ROLE_VIEWER},
+        )
+
+    def test_viewer_can_list_and_view_rule_yaml(self):
+        cluster = self.create_cluster()
+        self._set_cluster_viewer()
+        with mock.patch('devops.views.list_prometheus_rules', return_value={
+            'ok': True, 'code': 'ok', 'rules': [self._rule_summary()],
+        }) as list_rules:
+            response = self.client.get(reverse('devops:prometheus_rules'), {'cluster': cluster.id})
+        self.assertEqual(response.status_code, 200)
+        self.assertTemplateUsed(response, 'devops/prometheus_rules.html')
+        self.assertContains(response, 'api-errors')
+        self.assertNotContains(response, self.secret)
+        list_rules.assert_called_once_with(cluster)
+
+        with mock.patch('devops.views.get_prometheus_rule', return_value={
+            'ok': True, 'code': 'ok', 'yaml': self.rule_yaml,
+        }) as get_rule:
+            detail = self.client.get(self._detail_url(cluster))
+        self.assertEqual(detail.status_code, 200)
+        self.assertContains(detail, 'resourceVersion')
+        self.assertNotContains(detail, self.secret)
+        self.assertNotContains(detail, 'name="confirm_delete"')
+        get_rule.assert_called_once_with(cluster, 'monitoring', 'api-errors')
+
+    def test_list_rejects_invalid_cluster_query_without_orm_error(self):
+        raw_marker = 'private cluster query failure'
+        response = self.client.get(reverse('devops:prometheus_rules'), {'cluster': 'not-an-id-' + raw_marker})
+        self.assertEqual(response.status_code, 400)
+        self.assertContains(response, '集群参数无效', status_code=400)
+        self.assertNotContains(response, raw_marker, status_code=400)
+
+    def test_list_and_detail_service_failures_use_safe_status_and_message(self):
+        cluster = self.create_cluster()
+        raw_marker = 'private kubernetes endpoint token body'
+        with mock.patch('devops.views.list_prometheus_rules', return_value={
+            'ok': False, 'code': 'offline', 'message': raw_marker,
+        }):
+            list_response = self.client.get(reverse('devops:prometheus_rules'), {'cluster': cluster.id})
+        self.assertEqual(list_response.status_code, 503)
+        self.assertContains(list_response, '无法连接 Kubernetes 集群', status_code=503)
+        self.assertNotContains(list_response, raw_marker, status_code=503)
+
+        with mock.patch('devops.views.get_prometheus_rule', return_value={
+            'ok': False, 'code': 'crd_not_found', 'message': raw_marker,
+        }):
+            detail_response = self.client.get(self._detail_url(cluster))
+        self.assertEqual(detail_response.status_code, 404)
+        self.assertContains(detail_response, '未安装 PrometheusRule CRD', status_code=404)
+        self.assertNotContains(detail_response, raw_marker, status_code=404)
+
+        with mock.patch('devops.views.get_prometheus_rule', return_value={
+            'ok': False, 'code': 'invalid_identity', 'message': raw_marker,
+        }):
+            invalid_identity = self.client.get(self._detail_url(cluster))
+        self.assertEqual(invalid_identity.status_code, 400)
+        self.assertNotContains(invalid_identity, raw_marker, status_code=400)
+
+    def test_list_failure_statuses_match_prometheus_rule_error_contract(self):
+        cluster = self.create_cluster()
+        raw_marker = 'private raw kubernetes failure'
+        for code, expected_status in (('crd_not_found', 404), ('conflict', 409)):
+            with self.subTest(code=code):
+                with mock.patch('devops.views.list_prometheus_rules', return_value={
+                    'ok': False, 'code': code, 'message': raw_marker,
+                }):
+                    response = self.client.get(reverse('devops:prometheus_rules'), {'cluster': cluster.id})
+                self.assertEqual(response.status_code, expected_status)
+                self.assertNotContains(response, raw_marker, status_code=expected_status)
+
+    def test_viewer_cannot_update_or_delete_rule(self):
+        cluster = self.create_cluster()
+        self._set_cluster_viewer()
+        update = self.client.post(
+            reverse('devops:prometheus_rule_update', args=[cluster.id, 'monitoring', 'api-errors']),
+            {'yaml': self.rule_yaml},
+        )
+        delete = self.client.post(
+            reverse('devops:prometheus_rule_delete', args=[cluster.id, 'monitoring', 'api-errors']),
+            {'confirmation': 'DELETE', 'resource_version': '42'},
+        )
+        self.assertEqual(update.status_code, 403)
+        self.assertEqual(delete.status_code, 403)
+
+    def test_prometheus_rule_navigation_uses_cluster_viewer_permission(self):
+        DevOpsModulePermission.objects.update_or_create(
+            user=self.user,
+            module=DevOpsModulePermission.MODULE_CLUSTER,
+            defaults={'role': DevOpsModulePermission.ROLE_NONE},
+        )
+        denied = self.client.get(reverse('devops:legacy_dashboard'))
+        self.assertNotContains(denied, 'PrometheusRule 管理')
+
+        self._set_cluster_viewer()
+        allowed = self.client.get(reverse('devops:legacy_dashboard'))
+        self.assertContains(allowed, 'PrometheusRule 管理')
+
+    def test_admin_update_audits_only_safe_identity(self):
+        cluster = self.create_cluster()
+        submitted_yaml = self.rule_yaml.replace('groups: []', 'groups:\n  - name: private-group')
+        with mock.patch('devops.views.replace_prometheus_rule', return_value={
+            'ok': True, 'code': 'ok', 'message': 'PrometheusRule 已同步到集群。',
+            'rule': {'metadata': {'resourceVersion': '43'}},
+        }) as replace_rule:
+            response = self.client.post(
+                reverse('devops:prometheus_rule_update', args=[cluster.id, 'monitoring', 'api-errors']),
+                {'yaml': submitted_yaml},
+            )
+        self.assertEqual(response.status_code, 302)
+        self.assertEqual(response.url, self._detail_url(cluster))
+        replace_rule.assert_called_once_with(cluster, 'monitoring', 'api-errors', submitted_yaml.rstrip())
+        audit_log = AuditLog.objects.get(action='更新PrometheusRule')
+        self.assertIn('集群=%s' % cluster.id, audit_log.detail)
+        self.assertIn('命名空间=monitoring', audit_log.detail)
+        self.assertIn('规则=api-errors', audit_log.detail)
+        self.assertIn('资源版本=43', audit_log.detail)
+        self.assertNotIn('private-group', audit_log.detail)
+        self.assertNotIn(self.secret, audit_log.detail)
+
+    def test_conflict_keeps_editor_and_requires_refresh_without_raw_error(self):
+        cluster = self.create_cluster()
+        raw_error = 'private kube error body never render'
+        with mock.patch('devops.views.replace_prometheus_rule', return_value={
+            'ok': False, 'code': 'conflict',
+            'message': '规则已被其他操作更新，请刷新后重试。 ' + raw_error,
+        }):
+            response = self.client.post(
+                reverse('devops:prometheus_rule_update', args=[cluster.id, 'monitoring', 'api-errors']),
+                {'yaml': self.rule_yaml},
+            )
+        self.assertEqual(response.status_code, 409)
+        self.assertContains(response, '刷新后重试', status_code=409)
+        self.assertNotContains(response, raw_error, status_code=409)
+        audit_log = AuditLog.objects.get(action='更新PrometheusRule')
+        self.assertIn('结果=conflict', audit_log.detail)
+        self.assertNotIn(raw_error, audit_log.detail)
+        self.assertNotIn(self.rule_yaml, audit_log.detail)
+
+    def test_delete_requires_exact_confirmation_and_safe_service_failure(self):
+        cluster = self.create_cluster()
+        url = reverse('devops:prometheus_rule_delete', args=[cluster.id, 'monitoring', 'api-errors'])
+        rejected = self.client.post(url, {'confirmation': 'delete', 'resource_version': '42'})
+        self.assertEqual(rejected.status_code, 400)
+        self.assertContains(rejected, 'DELETE', status_code=400)
+
+        raw_error = 'raw cluster endpoint and token never render'
+        with mock.patch('devops.views.delete_prometheus_rule', return_value={
+            'ok': False, 'code': 'offline',
+            'message': '无法连接 Kubernetes 集群，请确认集群状态后重试。 ' + raw_error,
+        }):
+            failed = self.client.post(url, {'confirmation': 'DELETE', 'resource_version': '42'})
+        self.assertEqual(failed.status_code, 503)
+        self.assertContains(failed, '无法连接 Kubernetes 集群', status_code=503)
+        self.assertNotContains(failed, raw_error, status_code=503)
+        audit_log = AuditLog.objects.get(action='删除PrometheusRule')
+        self.assertIn('结果=offline', audit_log.detail)
+        self.assertNotIn(raw_error, audit_log.detail)
+
+    def test_successful_delete_returns_to_same_cluster_rule_list(self):
+        cluster = self.create_cluster()
+        url = reverse('devops:prometheus_rule_delete', args=[cluster.id, 'monitoring', 'api-errors'])
+        with mock.patch('devops.views.delete_prometheus_rule', return_value={
+            'ok': True, 'code': 'ok', 'message': 'PrometheusRule 已从集群删除。',
+        }):
+            response = self.client.post(url, {'confirmation': 'DELETE', 'resource_version': '42'})
+        self.assertEqual(response.status_code, 302)
+        self.assertEqual(response.url, '%s?cluster=%s' % (reverse('devops:prometheus_rules'), cluster.id))
+
+
 class DevOpsViewTests(TestCase):
     def setUp(self):
         self.user = User.objects.create(

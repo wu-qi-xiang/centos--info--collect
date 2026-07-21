@@ -43,6 +43,7 @@
     {% endif %}
     {% if devops_navigation.can_view_cluster %}
     <a class="btn btn-outline-primary btn-sm" href="{% url 'devops:clusters' %}">K8s集群管理</a>
+    <a class="btn btn-outline-primary btn-sm" href="{% url 'devops:prometheus_rules' %}">PrometheusRule 管理</a>
     {% endif %}
     {% if devops_navigation.can_view_security %}
     <a class="btn btn-outline-primary btn-sm" href="{% url 'devops:security_settings' %}">安全策略</a>

@@ -12,6 +12,7 @@ from django.core.paginator import Paginator
 from django.db import models
 from django.http import Http404, HttpResponse, HttpResponseBadRequest, HttpResponseForbidden, HttpResponseNotAllowed
 from django.shortcuts import get_object_or_404, redirect, render
+from django.urls import reverse
 from django.utils import timezone
 try:
     from django.utils.http import url_has_allowed_host_and_scheme
@@ -41,6 +42,8 @@ from .forms import (
     HostTagForm,
     K8sClusterConnectionForm,
     K8sClusterForm,
+    PrometheusRuleDeleteForm,
+    PrometheusRuleYamlForm,
     NotificationChannelForm,
     NotificationTemplateForm,
     AlertNotificationEscalationForm,
@@ -127,6 +130,10 @@ from .services import (
     summarize_integration_health,
     initiate_runbook,
     RunbookInitiationError,
+    delete_prometheus_rule,
+    get_prometheus_rule,
+    list_prometheus_rules,
+    replace_prometheus_rule,
 )
 
 
@@ -1895,6 +1902,189 @@ def notification_escalation_update(request):
                   escalation.channel.name if escalation.channel else '-',
               )))
     return redirect('devops:notification_channels')
+
+
+PROMETHEUS_RULE_SAFE_MESSAGES = {
+    'conflict': '规则已被其他操作更新，请刷新后重试。',
+    'forbidden': '当前集群权限不足，无法操作 PrometheusRule。',
+    'crd_not_found': '集群未安装 PrometheusRule CRD，或规则不存在。',
+    'timeout': '连接 Kubernetes 集群超时，请稍后重试。',
+    'offline': '无法连接 Kubernetes 集群，请确认集群状态后重试。',
+    'invalid_yaml': '规则 YAML 格式或资源身份无效。',
+    'invalid_identity': '规则命名空间、名称或资源版本无效。',
+    'dependency_missing': '缺少必要依赖，无法操作 PrometheusRule。',
+}
+
+
+def _prometheus_rule_message(result):
+    code = (result or {}).get('code', '')
+    if code == 'ok':
+        return (result or {}).get('message', '操作成功。')
+    return PROMETHEUS_RULE_SAFE_MESSAGES.get(code, '无法操作 PrometheusRule，请稍后重试。')
+
+
+def _prometheus_rule_failure_status(code):
+    if code == 'crd_not_found':
+        return 404
+    if code in ('invalid_yaml', 'invalid_identity'):
+        return 400
+    if code == 'conflict':
+        return 409
+    return 503
+
+
+def _prometheus_rule_audit_detail(cluster, namespace, name, action, outcome, resource_version=''):
+    return '集群=%s, 集群名称=%s, 命名空间=%s, 规则=%s, 操作=%s, 结果=%s, 资源版本=%s' % (
+        cluster.id, cluster.name, namespace, name, action, outcome, resource_version or '-',
+    )
+
+
+def _prometheus_rule_page_context(request, cluster=None, rules=None, selected_rule=None,
+                                  yaml_text='', yaml_form=None, delete_form=None, error=''):
+    return {
+        'clusters': K8sCluster.objects.all(),
+        'selected_cluster': cluster,
+        'rules': rules or [],
+        'selected_rule': selected_rule,
+        'yaml_text': yaml_text,
+        'yaml_form': yaml_form,
+        'delete_form': delete_form,
+        'error': error,
+        'can_manage': has_role(request, DevOpsRole.ROLE_ADMIN, MODULE_CLUSTER),
+    }
+
+
+def _prometheus_rule_detail_context(request, cluster, namespace, name, yaml_text='', yaml_form=None,
+                                    delete_form=None, error='', resource_version=''):
+    selected_rule = {'namespace': namespace, 'name': name, 'resource_version': resource_version}
+    return _prometheus_rule_page_context(
+        request,
+        cluster=cluster,
+        selected_rule=selected_rule,
+        yaml_text=yaml_text,
+        yaml_form=yaml_form or PrometheusRuleYamlForm(initial={'yaml': yaml_text}),
+        delete_form=delete_form or PrometheusRuleDeleteForm(),
+        error=error,
+    )
+
+
+@session_login_required
+def prometheus_rules(request):
+    denied = require_devops_role(request, DevOpsRole.ROLE_VIEWER, MODULE_CLUSTER)
+    if denied:
+        return denied
+    if request.method != 'GET':
+        return HttpResponseNotAllowed(['GET'])
+    cluster_id = request.GET.get('cluster')
+    if not cluster_id:
+        return render(request, 'devops/prometheus_rules.html', _prometheus_rule_page_context(request))
+    try:
+        cluster_id = int(cluster_id)
+    except (TypeError, ValueError):
+        return HttpResponseBadRequest('集群参数无效。')
+    if cluster_id <= 0:
+        return HttpResponseBadRequest('集群参数无效。')
+    cluster = get_object_or_404(K8sCluster, id=cluster_id)
+    result = list_prometheus_rules(cluster)
+    error = '' if result.get('ok') else _prometheus_rule_message(result)
+    return render(request, 'devops/prometheus_rules.html', _prometheus_rule_page_context(
+        request, cluster=cluster, rules=result.get('rules', []), error=error,
+    ), status=200 if result.get('ok') else _prometheus_rule_failure_status(result.get('code', 'offline')))
+
+
+@session_login_required
+def prometheus_rule_detail(request, cluster_id, namespace, name):
+    denied = require_devops_role(request, DevOpsRole.ROLE_VIEWER, MODULE_CLUSTER)
+    if denied:
+        return denied
+    if request.method != 'GET':
+        return HttpResponseNotAllowed(['GET'])
+    cluster = get_object_or_404(K8sCluster, id=cluster_id)
+    result = get_prometheus_rule(cluster, namespace, name)
+    if not result.get('ok'):
+        return render(
+            request, 'devops/prometheus_rules.html',
+            _prometheus_rule_detail_context(request, cluster, namespace, name, error=_prometheus_rule_message(result)),
+            status=_prometheus_rule_failure_status(result.get('code', 'offline')),
+        )
+    return render(
+        request, 'devops/prometheus_rules.html',
+        _prometheus_rule_detail_context(
+            request, cluster, namespace, name, yaml_text=result.get('yaml', ''),
+            resource_version=((result.get('rule') or {}).get('metadata') or {}).get('resourceVersion', ''),
+        ),
+    )
+
+
+@session_login_required
+def prometheus_rule_update(request, cluster_id, namespace, name):
+    denied = require_devops_role(request, DevOpsRole.ROLE_ADMIN, MODULE_CLUSTER)
+    if denied:
+        return denied
+    if request.method != 'POST':
+        return HttpResponseNotAllowed(['POST'])
+    cluster = get_object_or_404(K8sCluster, id=cluster_id)
+    form = PrometheusRuleYamlForm(request.POST)
+    if not form.is_valid():
+        return render(
+            request, 'devops/prometheus_rules.html',
+            _prometheus_rule_detail_context(request, cluster, namespace, name, yaml_form=form),
+            status=400,
+        )
+    yaml_text = form.cleaned_data['yaml']
+    result = replace_prometheus_rule(cluster, namespace, name, yaml_text)
+    code = result.get('code', 'offline')
+    if result.get('ok'):
+        resource_version = ((result.get('rule') or {}).get('metadata') or {}).get('resourceVersion', '')
+        audit(request, '更新PrometheusRule', 'K8sCluster', cluster.id,
+              _prometheus_rule_audit_detail(cluster, namespace, name, 'update', 'ok', resource_version))
+        return redirect('devops:prometheus_rule_detail', cluster_id=cluster.id, namespace=namespace, name=name)
+    audit(request, '更新PrometheusRule', 'K8sCluster', cluster.id,
+          _prometheus_rule_audit_detail(cluster, namespace, name, 'update', code))
+    status = _prometheus_rule_failure_status(code)
+    return render(
+        request, 'devops/prometheus_rules.html',
+        _prometheus_rule_detail_context(request, cluster, namespace, name, yaml_text=yaml_text,
+                                        yaml_form=form, error=_prometheus_rule_message(result)),
+        status=status,
+    )
+
+
+@session_login_required
+def prometheus_rule_delete(request, cluster_id, namespace, name):
+    denied = require_devops_role(request, DevOpsRole.ROLE_ADMIN, MODULE_CLUSTER)
+    if denied:
+        return denied
+    if request.method != 'POST':
+        return HttpResponseNotAllowed(['POST'])
+    cluster = get_object_or_404(K8sCluster, id=cluster_id)
+    form = PrometheusRuleDeleteForm(request.POST)
+    if not form.is_valid():
+        return render(
+            request, 'devops/prometheus_rules.html',
+            _prometheus_rule_detail_context(
+                request, cluster, namespace, name, delete_form=form,
+                resource_version=request.POST.get('resource_version', ''),
+            ),
+            status=400,
+        )
+    resource_version = form.cleaned_data['resource_version']
+    result = delete_prometheus_rule(cluster, namespace, name, resource_version)
+    code = result.get('code', 'offline')
+    audit(request, '删除PrometheusRule', 'K8sCluster', cluster.id,
+          _prometheus_rule_audit_detail(cluster, namespace, name, 'delete', 'ok' if result.get('ok') else code,
+                                        resource_version))
+    if result.get('ok'):
+        return redirect('%s?cluster=%s' % (reverse('devops:prometheus_rules'), cluster.id))
+    status = _prometheus_rule_failure_status(code)
+    return render(
+        request, 'devops/prometheus_rules.html',
+        _prometheus_rule_detail_context(
+            request, cluster, namespace, name, delete_form=form,
+            error=_prometheus_rule_message(result), resource_version=resource_version,
+        ),
+        status=status,
+    )
 
 
 def cluster_count_context(request):
