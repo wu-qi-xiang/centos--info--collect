@@ -135,7 +135,9 @@ docker compose -f deploy/docker-compose.yml run --rm web python manage.py migrat
 docker compose -f deploy/docker-compose.yml up --build
 ```
 
-必须先完成迁移，再启动 Worker。Compose 会同时启动 `web` 和 `worker`，两者使用同一数据库、`uploads/` 和 `logs/` 挂载；Worker 的启动命令为 `python manage.py devops_worker`。本地 SQLite 仅运行一个 Worker；生产环境建议使用 MySQL 或 PostgreSQL 后再横向扩展 Worker。
+必须先完成迁移，再启动 Worker。Compose 会同时启动 `web` 和 `worker`，两者使用同一数据库、`uploads/` 和 `logs/` 挂载；Worker 的启动命令为 `python manage.py devops_worker`。本地 SQLite 仅运行一个 Worker。
+
+可选的 PostgreSQL + Nginx 生产参考使用 `deploy/docker-compose.production.yml` 作为叠加文件，不会替换以上本地 SQLite 流程，也不会自动启动任何服务。它通过未跟踪的环境文件提供数据库凭据、只由 Nginx 发布 80 端口，并用命名卷共享静态文件；该拓扑刻意不对外提供上传文件，`/uploads/` 没有生产路由。迁移、静态文件收集、`check --deploy`、健康探针、备份预检、Docker Compose 版本要求和回退步骤见 [生产部署参考](docs/production_deployment.md)。
 
 如使用 Kubernetes，参考 `k8s/` 目录内的镜像构建和部署 YAML，并按实际镜像仓库修改镜像地址。
 

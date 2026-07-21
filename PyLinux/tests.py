@@ -2,6 +2,7 @@ from django.core.exceptions import ImproperlyConfigured
 from django.core.management import call_command
 from unittest import mock
 from io import StringIO
+from pathlib import Path
 
 from django.test import SimpleTestCase, TestCase, override_settings
 
@@ -52,6 +53,76 @@ class DatabaseConfigTests(SimpleTestCase):
 	def test_non_sqlite_requires_database_name(self):
 		with self.assertRaises(ImproperlyConfigured):
 			database_config_from_env({'DB_ENGINE': 'postgres'}, '/app')
+
+
+class ProductionComposeReferenceTests(SimpleTestCase):
+	"""Guard the opt-in PostgreSQL/Nginx reference without starting Docker."""
+
+	def setUp(self):
+		self.project_root = Path(__file__).resolve().parent.parent
+		self.compose_path = self.project_root / 'deploy' / 'docker-compose.production.yml'
+		self.nginx_path = self.project_root / 'deploy' / 'nginx' / 'default.conf'
+		self.requirements_path = self.project_root / 'deploy' / 'requirements-prod.txt'
+		self.production_doc_path = self.project_root / 'docs' / 'production_deployment.md'
+
+	def test_production_override_has_private_postgres_and_existing_runtime_services(self):
+		self.assertTrue(self.compose_path.exists())
+		compose = self.compose_path.read_text(encoding='utf-8')
+
+		for service in ('postgres:', 'web:', 'worker:', 'nginx:'):
+			with self.subTest(service=service):
+				self.assertIn(service, compose)
+		self.assertIn('DB_ENGINE: postgresql', compose)
+		self.assertIn('DB_CHARSET: ""', compose)
+		self.assertIn('POSTGRES_PASSWORD: ${DB_PASSWORD', compose)
+		self.assertIn('volumes: !override', compose)
+		self.assertIn('static_data:/app/staticfiles', compose)
+		self.assertIn('uploads_data:/app/uploads', compose)
+		self.assertNotIn('uploads_data:/var/www/uploads', compose)
+		self.assertNotIn('ports:', compose.split('postgres:', 1)[1].split('web:', 1)[0])
+		self.assertNotIn('change-me', compose)
+		web_section = compose.split('web:', 1)[1].split('worker:', 1)[0]
+		worker_section = compose.split('worker:', 1)[1].split('nginx:', 1)[0]
+		nginx_section = compose.split('nginx:', 1)[1]
+		self.assertIn('ports: !reset []', web_section)
+		self.assertNotIn('ports:', worker_section)
+		self.assertIn('"80:80"', nginx_section)
+
+	def test_nginx_serves_shared_files_and_proxies_health_endpoints(self):
+		self.assertTrue(self.nginx_path.exists())
+		nginx = self.nginx_path.read_text(encoding='utf-8')
+
+		for path in ('/static/', '/health/live/', '/health/ready/'):
+			with self.subTest(path=path):
+				self.assertIn(path, nginx)
+		self.assertNotIn('location /uploads/', nginx)
+		self.assertNotIn('/var/www/uploads', nginx)
+		self.assertIn('proxy_pass http://web:8000', nginx)
+		self.assertIn('proxy_set_header X-Forwarded-For', nginx)
+
+	def test_postgresql_reference_uses_database_environment_mapping(self):
+		config = database_config_from_env({
+			'DB_ENGINE': 'postgresql',
+			'DB_NAME': 'pylinux',
+			'DB_USER': 'pylinux',
+			'DB_PASSWORD': 'test-only-password',
+			'DB_HOST': 'postgres',
+			'DB_PORT': '5432',
+		}, '/app')
+
+		self.assertEqual(config['default']['ENGINE'], 'django.db.backends.postgresql')
+		self.assertEqual(config['default']['HOST'], 'postgres')
+
+	def test_production_image_includes_a_pinned_postgresql_driver(self):
+		requirements = self.requirements_path.read_text(encoding='utf-8')
+
+		self.assertIn('psycopg2-binary==2.9.10', requirements)
+
+	def test_production_reference_leaves_uploads_without_an_external_route(self):
+		documentation = self.production_doc_path.read_text(encoding='utf-8')
+
+		self.assertIn('`/uploads/` 没有生产路由', documentation)
+		self.assertIn('刻意不对外提供上传文件', documentation)
 
 
 class K8sCacheConfigTests(SimpleTestCase):
