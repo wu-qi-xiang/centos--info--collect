@@ -2446,6 +2446,30 @@
                         <button class="btn btn-primary" type="submit">保存</button>
                     </form>
                     <div class="ops-muted mt-3">当前未处理告警：[[ data.open_alert_count || 0 ]]</div>
+                    <section v-if="data.prometheus_rules" class="mt-4">
+                        <div class="ops-section-head"><div><div class="ops-section-title">PrometheusRule</div><div class="ops-muted">仅展示集群中的安全摘要</div></div></div>
+                        <form method="get" :action="data.action" class="form-inline mb-3">
+                            <label class="sr-only" for="monitor-prometheus-rule-cluster">K8s 集群</label>
+                            <select id="monitor-prometheus-rule-cluster" class="form-control form-control-sm mr-2" name="cluster" :value="data.prometheus_rules.selected_cluster_id || ''">
+                                <option value="">选择 K8s 集群</option>
+                                <option v-for="cluster in data.prometheus_rules.clusters" :key="cluster.id" :value="cluster.id">[[ cluster.name ]]</option>
+                            </select>
+                            <button type="submit" class="btn btn-sm btn-outline-primary">查看</button>
+                        </form>
+                        <div v-if="data.prometheus_rules.error" class="alert alert-danger" role="alert">[[ data.prometheus_rules.error ]]</div>
+                        <div v-else-if="data.prometheus_rules.configured && data.prometheus_rules.rules.length" class="table-responsive">
+                            <table class="table table-sm"><thead><tr><th>命名空间</th><th>名称</th><th>资源版本</th><th>创建时间</th></tr></thead>
+                                <tbody><tr v-for="rule in data.prometheus_rules.rules" :key="rule.namespace + '/' + rule.name"><td>[[ rule.namespace ]]</td><td><a :href="rule.detail_url">[[ rule.name ]]</a></td><td>[[ rule.resource_version || '-' ]]</td><td>[[ rule.created_at || '-' ]]</td></tr></tbody>
+                            </table>
+                        </div>
+                        <div v-else-if="data.prometheus_rules.configured" class="ops-muted">当前集群没有可展示的 PrometheusRule。</div>
+                        <form v-if="data.prometheus_rules.can_create && data.prometheus_rules.configured" method="post" :action="data.prometheus_rules.create_url" class="ops-form mt-3" @submit="submitForm">
+                            <input type="hidden" name="csrfmiddlewaretoken" :value="data.csrf">
+                            <input type="hidden" name="cluster" :value="data.prometheus_rules.selected_cluster_id">
+                            <div><label class="form-label" for="monitor-prometheus-rule-yaml">PrometheusRule YAML</label><textarea id="monitor-prometheus-rule-yaml" class="form-control font-monospace" name="yaml" rows="16" spellcheck="false" autocomplete="off">[[ data.prometheus_rules.form.yaml || '' ]]</textarea></div>
+                            <button class="btn btn-primary mt-2" type="submit">创建 PrometheusRule</button>
+                        </form>
+                    </section>
                 </section>
 
                 <section v-else-if="kind === 'alert-notification-list'" class="ops-notification-list-page">

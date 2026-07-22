@@ -1731,6 +1731,9 @@ spec:
             def replace_namespaced_custom_object(self, **kwargs):
                 return handler('replace', observed, kwargs)
 
+            def create_namespaced_custom_object(self, **kwargs):
+                return handler('create', observed, kwargs)
+
             def delete_namespaced_custom_object(self, **kwargs):
                 return handler('delete', observed, kwargs)
 
@@ -1894,6 +1897,96 @@ spec:
         self.assertEqual(observed['kwargs']['body']['metadata']['resourceVersion'], '42')
         self.assertEqual(observed['kwargs']['namespace'], 'monitoring')
         self.assertEqual(observed['kwargs']['name'], 'api-errors')
+        self.assertEqual(observed.get('close_count'), 1)
+
+    def test_create_uses_yaml_identity_and_fixed_gvk_without_resource_version(self):
+        from .services import create_prometheus_rule
+
+        def handler(action, observed, kwargs):
+            self.assertEqual(action, 'create')
+            observed['kwargs'] = kwargs
+            return {
+                'metadata': {
+                    'name': 'api-errors',
+                    'namespace': 'monitoring',
+                    'annotations': {'private.example/token': 'private-create-response'},
+                },
+                'kubeconfig': 'private-create-response',
+            }
+
+        create_yaml = self.rule_yaml.replace('  resourceVersion: "42"\n', '')
+        observed, modules = self._kubernetes_modules(handler)
+        with mock.patch.dict(sys.modules, modules):
+            result = create_prometheus_rule(self._cluster(), create_yaml)
+
+        self.assertTrue(result['ok'])
+        self.assertEqual(result['code'], 'ok')
+        self.assertEqual(result['rule'], {
+            'namespace': 'monitoring', 'name': 'api-errors',
+        })
+        self.assertNotIn('private-create-response', str(result))
+        self.assertEqual(observed['kwargs'], {
+            'group': 'monitoring.coreos.com', 'version': 'v1',
+            'namespace': 'monitoring', 'plural': 'prometheusrules',
+            'body': {
+                'apiVersion': 'monitoring.coreos.com/v1',
+                'kind': 'PrometheusRule',
+                'metadata': {'name': 'api-errors', 'namespace': 'monitoring'},
+                'spec': {'groups': []},
+            },
+            '_request_timeout': 8,
+        })
+        self.assertNotIn('yaml', result)
+        self.assertNotIn('kubeconfig', result)
+        self.assertFalse(os.path.exists(observed['config_file']))
+        self.assertEqual(observed.get('close_count'), 1)
+
+    def test_create_rejects_invalid_yaml_before_api(self):
+        from .services import create_prometheus_rule
+
+        cluster = self._cluster()
+        create_yaml = self.rule_yaml.replace('  resourceVersion: "42"\n', '')
+        invalid_cases = (
+            'apiVersion: [broken',
+            create_yaml + '---\nkind: PrometheusRule\n',
+            create_yaml.replace('kind: PrometheusRule', 'kind: ConfigMap'),
+            create_yaml.replace('metadata:\n', ''),
+            create_yaml.replace('  name: api-errors\n', ''),
+            create_yaml.replace('  namespace: monitoring\n', ''),
+            create_yaml.replace('namespace: monitoring', 'namespace: invalid_namespace'),
+            create_yaml.replace('name: api-errors', 'name: invalid/name'),
+            create_yaml.replace('name: api-errors', 'name: 42'),
+            self.rule_yaml,
+        )
+        for yaml_text in invalid_cases:
+            with self.subTest(yaml_text=yaml_text):
+                with mock.patch('devops.services._prometheus_rule_custom_objects_api') as api:
+                    result = create_prometheus_rule(cluster, yaml_text)
+                self.assertFalse(result['ok'])
+                self.assertEqual(result['code'], 'invalid_yaml')
+                api.assert_not_called()
+
+    def test_create_api_error_is_safe_and_cleans_up_client_and_temp_config(self):
+        from .services import create_prometheus_rule
+
+        class ApiError(Exception):
+            status = 403
+            reason = 'private kubeconfig detail must not leak'
+
+        def handler(action, observed, kwargs):
+            self.assertEqual(action, 'create')
+            raise ApiError('raw Kubernetes create response')
+
+        create_yaml = self.rule_yaml.replace('  resourceVersion: "42"\n', '')
+        observed, modules = self._kubernetes_modules(handler)
+        with mock.patch.dict(sys.modules, modules):
+            result = create_prometheus_rule(self._cluster(), create_yaml)
+
+        self.assertFalse(result['ok'])
+        self.assertEqual(result['code'], 'forbidden')
+        self.assertNotIn('private kubeconfig detail', result['message'])
+        self.assertNotIn('raw Kubernetes create response', result['message'])
+        self.assertFalse(os.path.exists(observed['config_file']))
         self.assertEqual(observed.get('close_count'), 1)
 
     def test_replace_rejects_invalid_yaml_before_api(self):

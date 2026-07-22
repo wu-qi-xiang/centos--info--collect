@@ -1,5 +1,10 @@
 import json
 
+try:
+	import yaml
+except ImportError:
+	yaml = None
+
 from django.shortcuts import get_object_or_404, render, redirect
 from django.http import HttpResponseNotAllowed, JsonResponse
 from django.middleware.csrf import get_token
@@ -33,11 +38,14 @@ from .services import (
 	test_alertmanager_connection,
 	test_prometheus_connection,
 )
-from devops.models import AlertEvent, DevOpsModulePermission, DevOpsRole, IntegrationHealthEvent
+from devops.forms import PrometheusRuleYamlForm, normalize_prometheus_rule_identity
+from devops.models import AlertEvent, DevOpsModulePermission, DevOpsRole, IntegrationHealthEvent, K8sCluster
 from devops.services import (
 	audit,
+	create_prometheus_rule,
 	integration_health_summary,
 	has_role,
+	list_prometheus_rules,
 	record_integration_health_event,
 	summarize_integration_health,
 )
@@ -48,6 +56,16 @@ from userprofile.decorators import session_login_required
 
 PROMETHEUS_SELECTION_ERROR = '选择的 Prometheus 对接不可用'
 ALERTMANAGER_SELECTION_ERROR = '选择的 Alertmanager 对接不可用'
+PROMETHEUS_RULE_SAFE_MESSAGES = {
+	'conflict': '规则已存在或被其他操作更新，请刷新后重试。',
+	'forbidden': '当前集群权限不足，无法操作 PrometheusRule。',
+	'crd_not_found': '集群未安装 PrometheusRule CRD。',
+	'timeout': '连接 Kubernetes 集群超时，请稍后重试。',
+	'offline': '无法连接 Kubernetes 集群，请确认集群状态后重试。',
+	'invalid_yaml': '规则 YAML 格式或资源身份无效。',
+	'invalid_identity': '规则 YAML 格式或资源身份无效。',
+	'dependency_missing': '缺少必要依赖，无法操作 PrometheusRule。',
+}
 
 
 def _available_prometheus_configs():
@@ -559,8 +577,110 @@ def _monitor_context(request, monitor=None, form=None):
 	return content
 
 
-def _monitor_payload(request, monitor_obj=None, form=None, action=''):
+def _can_view_prometheus_rules(request):
+	return has_role(
+		request,
+		DevOpsRole.ROLE_VIEWER,
+		DevOpsModulePermission.MODULE_CLUSTER,
+	)
+
+
+def _can_create_prometheus_rules(request):
+	return has_role(
+		request,
+		DevOpsRole.ROLE_ADMIN,
+		DevOpsModulePermission.MODULE_CLUSTER,
+	)
+
+
+def _prometheus_rule_message(result):
+	return PROMETHEUS_RULE_SAFE_MESSAGES.get((result or {}).get('code', ''), '无法操作 PrometheusRule，请稍后重试。')
+
+
+def _prometheus_rule_failure_status(code):
+	if code in ('invalid_yaml', 'invalid_identity'):
+		return 400
+	if code == 'conflict':
+		return 409
+	if code == 'crd_not_found':
+		return 404
+	return 503
+
+
+def _prometheus_rule_audit_outcome(code):
+	return code if code in PROMETHEUS_RULE_SAFE_MESSAGES else 'offline'
+
+
+def _safe_prometheus_rule_summary(cluster, rule):
+	if not isinstance(rule, dict):
+		return None
+	namespace, name = normalize_prometheus_rule_identity(rule.get('namespace'), rule.get('name'))
+	if not namespace or not name:
+		return None
+	resource_version = str(rule.get('resource_version') or '').strip()
+	created_at = str(rule.get('created_at') or '').strip()
+	if len(resource_version) > 255 or not resource_version.isprintable():
+		resource_version = ''
+	if len(created_at) > 128 or not created_at.isprintable():
+		created_at = ''
 	return {
+		'namespace': namespace,
+		'name': name,
+		'resource_version': resource_version,
+		'created_at': created_at,
+		'detail_url': reverse('devops:prometheus_rule_detail', args=[cluster.id, namespace, name]),
+	}
+
+
+def _prometheus_rules_payload(request, yaml_form=None, error='', selected_cluster=None):
+	if not _can_view_prometheus_rules(request):
+		return None
+	clusters = list(K8sCluster.objects.order_by('name', 'id'))
+	can_create = _can_create_prometheus_rules(request)
+	yaml_text = ''
+	if can_create and yaml_form is not None:
+		yaml_text = (yaml_form.cleaned_data.get('yaml') if yaml_form.is_valid()
+			else yaml_form.data.get('yaml', '')) or ''
+	payload = {
+		'clusters': [{'id': cluster.id, 'name': cluster.name} for cluster in clusters],
+		'selected_cluster_id': None,
+		'configured': False,
+		'rules': [],
+		'error': error,
+		'can_create': can_create,
+		'create_url': reverse('monitor:prometheus_rule_create'),
+		'form': {'yaml': yaml_text},
+	}
+	if selected_cluster is not None:
+		if selected_cluster.id not in [cluster.id for cluster in clusters]:
+			return payload
+		payload['selected_cluster_id'] = selected_cluster.id
+		payload['configured'] = True
+		return payload
+	try:
+		cluster_id = int(request.GET.get('cluster') or 0)
+	except (TypeError, ValueError):
+		return payload
+	if cluster_id <= 0:
+		return payload
+	cluster = next((item for item in clusters if item.id == cluster_id), None)
+	if not cluster:
+		return payload
+	payload['selected_cluster_id'] = cluster.id
+	payload['configured'] = True
+	result = list_prometheus_rules(cluster)
+	if not result.get('ok'):
+		payload['error'] = _prometheus_rule_message(result)
+		return payload
+	payload['rules'] = [summary for summary in (
+		_safe_prometheus_rule_summary(cluster, item) for item in result.get('rules', [])
+	) if summary]
+	return payload
+
+
+def _monitor_payload(request, monitor_obj=None, form=None, action='', prometheus_rule_form=None,
+					 prometheus_rule_error='', prometheus_rule_cluster=None):
+	payload = {
 		'subtitle': '配置 CPU、内存、磁盘阈值和告警邮箱',
 		'csrf': get_token(request),
 		'action': action or reverse('monitor:monitor_index'),
@@ -570,6 +690,12 @@ def _monitor_payload(request, monitor_obj=None, form=None, action=''):
 		'latest_alert_message': (AlertEvent.objects.order_by('-created_at').first().message if AlertEvent.objects.exists() else ''),
 		'actions': _monitor_actions(),
 	}
+	prometheus_rules = _prometheus_rules_payload(
+		request, prometheus_rule_form, prometheus_rule_error, prometheus_rule_cluster,
+	)
+	if prometheus_rules is not None:
+		payload['prometheus_rules'] = prometheus_rules
+	return payload
 
 
 def _alert_query_payload(request, query, table, error, configs, selected_config):
@@ -1187,6 +1313,90 @@ def alert_notifications_test(request):
 	content = {}
 	content.update(security_context(request))
 	return render_vue_page(request, 'alert-notifications', '告警通知', _alert_notification_payload(request, configs, form, test_message), content, status=status)
+
+
+@session_login_required
+def prometheus_rule_create(request):
+	if not _can_create_prometheus_rules(request):
+		return JsonResponse({'detail': '没有权限执行此操作。'}, status=403)
+	if request.method != 'POST':
+		return HttpResponseNotAllowed(['POST'])
+	try:
+		cluster_id = int(request.POST.get('cluster') or 0)
+	except (TypeError, ValueError):
+		cluster_id = 0
+	cluster = K8sCluster.objects.filter(id=cluster_id).first() if cluster_id > 0 else None
+	form = PrometheusRuleYamlForm(request.POST)
+	if not cluster or not form.is_valid():
+		content = _monitor_context(request, Monitor.objects.all(), form)
+		return render_vue_page(
+			request, 'monitor', '告警设置',
+			_monitor_payload(request, Monitor.objects.order_by('id').first(), prometheus_rule_form=form,
+				prometheus_rule_error='规则 YAML 格式或资源身份无效。', prometheus_rule_cluster=cluster),
+			content, status=400,
+		)
+	yaml_text = form.cleaned_data['yaml']
+	if not yaml:
+		return render_vue_page(
+			request, 'monitor', '告警设置',
+			_monitor_payload(request, Monitor.objects.order_by('id').first(), prometheus_rule_form=form,
+				prometheus_rule_error='规则 YAML 格式或资源身份无效。', prometheus_rule_cluster=cluster),
+			_monitor_context(request, Monitor.objects.all(), form), status=400,
+		)
+	try:
+		document = yaml.safe_load(yaml_text)
+	except Exception:
+		document = None
+	metadata = document.get('metadata') if isinstance(document, dict) else None
+	if (not isinstance(metadata, dict) or document.get('apiVersion') != 'monitoring.coreos.com/v1'
+			or document.get('kind') != 'PrometheusRule'):
+		document = None
+	namespace, name = normalize_prometheus_rule_identity(
+		metadata.get('namespace') if isinstance(metadata, dict) else None,
+		metadata.get('name') if isinstance(metadata, dict) else None,
+	)
+	if not document or not namespace or not name:
+		return render_vue_page(
+			request, 'monitor', '告警设置',
+			_monitor_payload(request, Monitor.objects.order_by('id').first(), prometheus_rule_form=form,
+				prometheus_rule_error='规则 YAML 格式或资源身份无效。', prometheus_rule_cluster=cluster),
+			_monitor_context(request, Monitor.objects.all(), form), status=400,
+		)
+	result = create_prometheus_rule(cluster, yaml_text)
+	if not result.get('ok'):
+		audit(
+			request, '创建PrometheusRule', 'K8sCluster', cluster.id,
+			'cluster=%s, namespace=%s, name=%s, action=create, outcome=%s' % (
+				cluster.id, namespace, name,
+				_prometheus_rule_audit_outcome(result.get('code', 'offline')),
+			),
+		)
+		return render_vue_page(
+			request, 'monitor', '告警设置',
+			_monitor_payload(request, Monitor.objects.order_by('id').first(), prometheus_rule_form=form,
+				prometheus_rule_error=_prometheus_rule_message(result), prometheus_rule_cluster=cluster),
+			_monitor_context(request, Monitor.objects.all(), form),
+			status=_prometheus_rule_failure_status(result.get('code', 'offline')),
+		)
+	created_rule = result.get('rule') if isinstance(result.get('rule'), dict) else {}
+	created_namespace, created_name = normalize_prometheus_rule_identity(
+		created_rule.get('namespace'),
+		created_rule.get('name'),
+	)
+	if not created_namespace or not created_name:
+		return render_vue_page(
+			request, 'monitor', '告警设置',
+			_monitor_payload(request, Monitor.objects.order_by('id').first(), prometheus_rule_form=form,
+				prometheus_rule_error='无法操作 PrometheusRule，请稍后重试。', prometheus_rule_cluster=cluster),
+			_monitor_context(request, Monitor.objects.all(), form), status=503,
+		)
+	audit(
+		request, '创建PrometheusRule', 'K8sCluster', cluster.id,
+		'cluster=%s, namespace=%s, name=%s, action=create, outcome=ok' % (
+			cluster.id, created_namespace, created_name,
+		),
+	)
+	return redirect('%s?cluster=%s' % (reverse('monitor:monitor_index'), cluster.id))
 
 
 @session_login_required

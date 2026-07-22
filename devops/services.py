@@ -302,6 +302,36 @@ def _validate_prometheus_rule_yaml(yaml_text, namespace, name):
     return document, None
 
 
+def _validate_prometheus_rule_create_yaml(yaml_text):
+    if not yaml:
+        return None, _prometheus_rule_result(False, 'dependency_missing', '缺少 YAML 解析依赖，无法创建 PrometheusRule。')
+    try:
+        documents = list(yaml.safe_load_all(yaml_text))
+    except Exception:
+        return None, _prometheus_rule_result(False, 'invalid_yaml', '规则 YAML 格式无效。')
+    if len(documents) != 1 or not isinstance(documents[0], dict):
+        return None, _prometheus_rule_result(False, 'invalid_yaml', '规则 YAML 必须且只能包含一个对象。')
+    document = documents[0]
+    if document.get('apiVersion') != PROMETHEUS_RULE_API_VERSION or document.get('kind') != PROMETHEUS_RULE_KIND:
+        return None, _prometheus_rule_result(False, 'invalid_yaml', '规则 YAML 必须是 monitoring.coreos.com/v1 PrometheusRule。')
+    metadata = document.get('metadata')
+    if not isinstance(metadata, dict):
+        return None, _prometheus_rule_result(False, 'invalid_yaml', '规则 YAML 缺少 metadata。')
+    if 'resourceVersion' in metadata:
+        return None, _prometheus_rule_result(False, 'invalid_yaml', '创建规则 YAML 不允许包含 metadata.resourceVersion。')
+    if not all(isinstance(value, str) for value in (
+            metadata.get('namespace'), metadata.get('name'))):
+        return None, _prometheus_rule_result(False, 'invalid_yaml', '规则 YAML 的命名空间或名称无效。')
+    namespace, name = _safe_prometheus_rule_identity(
+        metadata.get('namespace'), metadata.get('name'),
+    )
+    if not namespace or not name:
+        return None, _prometheus_rule_result(False, 'invalid_yaml', '规则 YAML 的命名空间或名称无效。')
+    metadata['namespace'] = namespace
+    metadata['name'] = name
+    return document, None
+
+
 def _prometheus_rule_summary(item):
     metadata = item.get('metadata') if isinstance(item, dict) else {}
     metadata = metadata if isinstance(metadata, dict) else {}
@@ -403,6 +433,35 @@ def replace_prometheus_rule(cluster, namespace, name, yaml_text, timeout=8):
             body=rule, _request_timeout=timeout,
         )
         return _prometheus_rule_result(True, 'ok', 'PrometheusRule 已同步到集群。', rule=updated)
+    except Exception as exc:
+        return _prometheus_rule_error(exc)
+    finally:
+        _close_prometheus_rule_api_client(api_client)
+        if path:
+            try:
+                os.unlink(path)
+            except OSError:
+                pass
+
+
+def create_prometheus_rule(cluster, yaml_text, timeout=8):
+    rule, error = _validate_prometheus_rule_create_yaml(yaml_text)
+    if error:
+        return error
+    namespace = rule['metadata']['namespace']
+    path = ''
+    api_client = None
+    try:
+        api, api_client, path = _prometheus_rule_custom_objects_api(cluster)
+        api.create_namespaced_custom_object(
+            group=PROMETHEUS_RULE_GROUP, version=PROMETHEUS_RULE_VERSION,
+            namespace=namespace, plural=PROMETHEUS_RULE_PLURAL,
+            body=rule, _request_timeout=timeout,
+        )
+        return _prometheus_rule_result(
+            True, 'ok', 'PrometheusRule 已创建。',
+            rule={'namespace': namespace, 'name': rule['metadata']['name']},
+        )
     except Exception as exc:
         return _prometheus_rule_error(exc)
     finally:

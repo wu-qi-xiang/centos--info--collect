@@ -28,6 +28,7 @@ urlpatterns = [
 	path('notifications/<int:id>/update/', views.alert_notification_update, name='alert_notification_update'),
 	path('notifications/<int:id>/delete/', views.alert_notification_delete, name='alert_notification_delete'),
 	path('notifications/test/', views.alert_notifications_test, name='alert_notifications_test'),
+	path('prometheus-rules/create/', views.prometheus_rule_create, name='prometheus_rule_create'),
 	path('', views.monitor_index, name='monitor_index'),
 	path('monitor_update/<int:id>/', views.monitor_update, name='monitor_update'),
 ]

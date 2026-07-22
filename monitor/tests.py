@@ -10,7 +10,7 @@ from django.urls import reverse
 from django.utils import timezone
 from unittest import mock
 
-from devops.models import AlertEvent, AlertHistory, AuditLog, DevOpsModulePermission, DevOpsRole, IntegrationHealthEvent, MaintenanceWindow
+from devops.models import AlertEvent, AlertHistory, AuditLog, DevOpsModulePermission, DevOpsRole, IntegrationHealthEvent, K8sCluster, MaintenanceWindow
 from devops.models import MetricSample
 from PyLinux.crypto import decrypt_text
 from RemoteLinux.models import User
@@ -3680,3 +3680,160 @@ class MonitorCollectionTests(TestCase):
 		alert.refresh_from_db()
 		self.assertEqual(alert.status, AlertEvent.STATUS_RESOLVED)
 		cleanup_metric_samples.assert_called_once_with()
+
+
+class MonitorPrometheusRulePageTests(TestCase):
+	def setUp(self):
+		self.user = User.objects.create(
+			user='prometheus-rule-user',
+			email='prometheus-rule@example.com',
+			password='plain-password',
+			confirm_pwd='plain-password',
+		)
+		session = self.client.session
+		session['is_login'] = True
+		session['user_id'] = self.user.id
+		session['user_name'] = self.user.user
+		session.save()
+		self.cluster = K8sCluster.objects.create(
+			name='monitor-cluster', api_server='https://k8s.example.test',
+			default_namespace='monitoring', kubeconfig='apiVersion: v1\nclusters: []',
+		)
+
+	def set_cluster_permission(self, role):
+		DevOpsRole.objects.update_or_create(user=self.user, defaults={'role': role})
+		DevOpsModulePermission.objects.update_or_create(
+			user=self.user,
+			module=DevOpsModulePermission.MODULE_CLUSTER,
+			defaults={'role': role},
+		)
+
+	def vue_data(self, response):
+		return json.loads(response.context['vue_page_payload'])['data']
+
+	def valid_yaml(self):
+		return '''apiVersion: monitoring.coreos.com/v1
+kind: PrometheusRule
+metadata:
+  name: api-errors
+  namespace: monitoring
+spec:
+  groups: []
+'''
+
+	@mock.patch('monitor.views.list_prometheus_rules')
+	def test_viewer_sees_selected_cluster_rule_summaries_without_create_form(self, list_rules):
+		self.set_cluster_permission(DevOpsRole.ROLE_VIEWER)
+		list_rules.return_value = {'ok': True, 'code': 'ok', 'rules': [{
+			'namespace': 'monitoring', 'name': 'api-errors',
+			'resource_version': '42', 'created_at': '2026-07-22T10:00:00Z',
+		}]}
+
+		response = self.client.get(reverse('monitor:monitor_index'), {'cluster': self.cluster.id})
+		data = self.vue_data(response)
+
+		self.assertEqual(response.status_code, 200)
+		self.assertTrue(data['prometheus_rules']['configured'])
+		self.assertFalse(data['prometheus_rules']['can_create'])
+		self.assertEqual(data['prometheus_rules']['rules'][0], {
+			'namespace': 'monitoring', 'name': 'api-errors', 'resource_version': '42',
+			'created_at': '2026-07-22T10:00:00Z',
+			'detail_url': reverse('devops:prometheus_rule_detail', args=[self.cluster.id, 'monitoring', 'api-errors']),
+		})
+		list_rules.assert_called_once_with(self.cluster)
+
+	@mock.patch('monitor.views.list_prometheus_rules')
+	def test_admin_sees_create_form_and_user_without_cluster_permission_sees_nothing(self, list_rules):
+		self.set_cluster_permission(DevOpsRole.ROLE_ADMIN)
+
+		admin_data = self.vue_data(self.client.get(reverse('monitor:monitor_index'), {'cluster': self.cluster.id}))
+
+		self.assertTrue(admin_data['prometheus_rules']['can_create'])
+		self.assertEqual(admin_data['prometheus_rules']['create_url'], '/monitor/prometheus-rules/create/')
+		self.assertIn('yaml', admin_data['prometheus_rules']['form'])
+		self.assertEqual(list_rules.call_count, 1)
+		DevOpsRole.objects.filter(user=self.user).update(role=DevOpsRole.ROLE_VIEWER)
+		DevOpsModulePermission.objects.update_or_create(
+			user=self.user,
+			module=DevOpsModulePermission.MODULE_CLUSTER,
+			defaults={'role': DevOpsModulePermission.ROLE_NONE},
+		)
+
+		no_permission_data = self.vue_data(self.client.get(reverse('monitor:monitor_index'), {'cluster': self.cluster.id}))
+
+		self.assertNotIn('prometheus_rules', no_permission_data)
+		self.assertEqual(list_rules.call_count, 1)
+
+	def test_create_requires_cluster_admin_and_post(self):
+		self.set_cluster_permission(DevOpsRole.ROLE_VIEWER)
+
+		response = self.client.post('/monitor/prometheus-rules/create/', {
+			'cluster': self.cluster.id, 'yaml': self.valid_yaml(),
+		})
+
+		self.assertEqual(response.status_code, 403)
+		self.assertNotContains(response, self.valid_yaml(), status_code=403)
+		self.assertFalse(AuditLog.objects.filter(action='创建PrometheusRule').exists())
+		self.set_cluster_permission(DevOpsRole.ROLE_ADMIN)
+		self.assertEqual(self.client.get('/monitor/prometheus-rules/create/').status_code, 405)
+
+	@mock.patch('monitor.views.create_prometheus_rule')
+	def test_successful_create_audits_safe_identity_and_redirects(self, create_rule):
+		self.set_cluster_permission(DevOpsRole.ROLE_ADMIN)
+		create_rule.return_value = {'ok': True, 'code': 'ok', 'rule': {
+			'name': 'api-errors', 'namespace': 'monitoring',
+		}}
+
+		response = self.client.post('/monitor/prometheus-rules/create/', {
+			'cluster': self.cluster.id, 'yaml': self.valid_yaml(),
+		})
+
+		self.assertEqual(response.status_code, 302)
+		self.assertEqual(response.url, '%s?cluster=%s' % (reverse('monitor:monitor_index'), self.cluster.id))
+		create_rule.assert_called_once_with(self.cluster, self.valid_yaml().strip())
+		audit_log = AuditLog.objects.get(action='创建PrometheusRule')
+		self.assertEqual(audit_log.target_type, 'K8sCluster')
+		self.assertEqual(audit_log.target_id, str(self.cluster.id))
+		self.assertEqual(audit_log.detail, 'cluster=%s, namespace=monitoring, name=api-errors, action=create, outcome=ok' % self.cluster.id)
+		self.assertNotIn('spec:', audit_log.detail)
+
+	@mock.patch('monitor.views.create_prometheus_rule')
+	def test_service_failures_keep_admin_yaml_and_write_safe_audits(self, create_rule):
+		self.set_cluster_permission(DevOpsRole.ROLE_ADMIN)
+		yaml_text = self.valid_yaml().strip()
+		with open('static/js/ops-vue-pages.js', 'r') as handle:
+			self.assertIn('monitor-prometheus-rule-yaml', handle.read())
+		for result, status, message, outcome in (
+			({'ok': False, 'code': 'invalid_yaml', 'message': 'raw yaml parser detail'}, 400,
+				'规则 YAML 格式或资源身份无效。', 'invalid_yaml'),
+			({'ok': False, 'code': 'offline', 'message': 'raw token=secret'}, 503,
+				'无法连接 Kubernetes 集群，请确认集群状态后重试。', 'offline'),
+			({'ok': False, 'code': 'untrusted_code', 'message': 'raw kubeconfig marker'}, 503,
+				'无法操作 PrometheusRule，请稍后重试。', 'offline'),
+		):
+			create_rule.return_value = result
+			response = self.client.post('/monitor/prometheus-rules/create/', {
+				'cluster': self.cluster.id, 'yaml': yaml_text,
+			})
+			data = self.vue_data(response)
+			rules_data = data['prometheus_rules']
+
+			self.assertEqual(response.status_code, status)
+			self.assertEqual(rules_data['selected_cluster_id'], self.cluster.id)
+			self.assertTrue(rules_data['configured'])
+			self.assertTrue(rules_data['can_create'])
+			self.assertEqual(rules_data['form']['yaml'], yaml_text)
+			self.assertEqual(rules_data['error'], message)
+			self.assertNotContains(response, result['message'], status_code=status)
+			audit_log = AuditLog.objects.filter(
+				action='创建PrometheusRule', target_id=str(self.cluster.id),
+			).order_by('id').last()
+			self.assertEqual(
+				audit_log.detail,
+				'cluster=%s, namespace=monitoring, name=api-errors, action=create, outcome=%s' % (
+					self.cluster.id, outcome,
+				),
+			)
+			self.assertNotIn(yaml_text, audit_log.detail)
+			self.assertNotIn(result['message'], audit_log.detail)
+		self.assertEqual(AuditLog.objects.filter(action='创建PrometheusRule').count(), 3)
