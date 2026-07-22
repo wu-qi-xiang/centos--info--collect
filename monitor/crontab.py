@@ -3,7 +3,7 @@ import time
 from PyLinux.settings import EMAIL_HOST_USER
 from .models import Monitor
 from devops.models import AlertEvent, AuditLog
-from devops.services import cleanup_metric_samples, record_alert, record_metric_sample, resolve_alert
+from devops.services import cleanup_metric_samples, cleanup_service_slo_evaluations, evaluate_enabled_service_slos, record_alert, record_metric_sample, resolve_alert
 from devops.services import scan_compliance_baselines
 from RemoteLinux.models import NewLinux
 from RemoteLinux.collectors import collect_remote_usage
@@ -134,3 +134,16 @@ def scan_compliance_baselines_daily():
         detail='扫描主机数=%s' % scanned,
     )
     return scanned
+
+
+def evaluate_service_slos_periodically():
+    result = evaluate_enabled_service_slos()
+    deleted = cleanup_service_slo_evaluations()
+    AuditLog.objects.create(
+        user='system', action='定期评估服务SLO', target_type='ServiceSlo',
+        detail='评估=%s, 耗尽=%s, 不可用=%s, 错误=%s, 清理=%s' % (
+            result.get('evaluated', 0), result.get('exhausted', 0),
+            result.get('unavailable', 0), result.get('errors', 0), deleted,
+        )[:200],
+    )
+    return result

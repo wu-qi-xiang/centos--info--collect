@@ -13,7 +13,7 @@
 ## File Map
 
 - `.github/workflows/django.yml`, `PyLinux/tests.py`: offline production configuration and Compose CI guard.
-- `devops/models.py`, `devops/migrations/0032_service_slo_evaluation.py`, `devops/services.py`, `monitor/crontab.py`, `devops/tests.py`, `monitor/tests.py`: periodic safe SLO history and transition notification.
+- `devops/models.py`, `devops/migrations/0026_service_slo_evaluation.py`, `devops/migrations/0027_serviceslo_last_notification_state.py`, `devops/services.py`, `monitor/crontab.py`, `devops/tests.py`, `monitor/tests.py`: periodic safe SLO history and transition notification.
 - `devops/services.py`, `devops/api.py`, `devops/urls.py`, `devops/views.py`, `templates/devops/metrics.html`, `devops/tests.py`, `docs/devops_json_api.md`: host-scoped capacity forecasting.
 - `devops/management/commands/restore_runtime.py`, `devops/tests.py`, `docs/runtime_recovery.md`: local archive recovery drill wrapper and documentation.
 - `docs/devops_next_optimizations.md`, `README.md`: completed-state and operator documentation.
@@ -31,7 +31,7 @@
 ### Task 2: Periodic SLO Evaluation History
 
 **Files:**
-- Create: `devops/migrations/0032_service_slo_evaluation.py`
+- Create: `devops/migrations/0026_service_slo_evaluation.py`, `devops/migrations/0027_serviceslo_last_notification_state.py`
 - Modify: `devops/models.py`, `devops/services.py`, `monitor/crontab.py`, `devops/tests.py`, `monitor/tests.py`
 
 - [ ] **Step 1: Write failing SLO scheduler tests.** Add tests proving `evaluate_enabled_service_slos()` evaluates every enabled SLO, records only `slo`, `state`, `summary`, and `evaluated_at`, does not persist query or raw response data, and calls `send_notifications(NotificationLog.EVENT_ALERT, ...)` exactly once when the preceding state is not `exhausted` and the new state is `exhausted`.

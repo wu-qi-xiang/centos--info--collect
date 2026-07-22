@@ -52,6 +52,7 @@ from .services import (
     record_incident_postmortem,
     update_incident_status,
     evaluate_command_policy,
+    forecast_host_capacity,
     has_role,
     latest_metric_map,
     notify_approval,
@@ -1101,6 +1102,14 @@ def metrics(request):
         'labels': labels,
         'series': series,
     })
+
+
+@api_login_required
+@require_http_methods(['GET'])
+def capacity_forecast(request):
+    if not has_role(request, DevOpsRole.ROLE_VIEWER, MODULE_METRIC):
+        return api_error('没有监控历史权限', status=403, code='forbidden')
+    return JsonResponse({'ok': True, 'results': forecast_host_capacity(visible_hosts_for_request(request))})
 
 
 @api_login_required

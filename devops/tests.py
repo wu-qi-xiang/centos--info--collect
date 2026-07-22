@@ -15,8 +15,10 @@ import os
 import sys
 import shutil
 import socket
+import sqlite3
 import tempfile
 import types
+from pathlib import Path
 try:
     from unittest import mock
 except ImportError:
@@ -60,12 +62,13 @@ from .models import (
     ServiceCatalog,
     ServiceDependency,
     ServiceSlo,
+    ServiceSloEvaluation,
     RunbookTemplate,
     ComplianceBaseline,
     ComplianceResult,
 )
-from .services import active_maintenance_windows_for_host, active_maintenance_windows_for_release, cleanup_audit_logs, cleanup_metric_samples, deployment_risk_preview, enqueue_background_job, evaluate_worker_alert_thresholds, latest_metric_map, notify_alert, record_alert, record_metric_sample, run_background_job, send_notification_channel, validate_remote_path, scan_compliance_baseline, create_project_onboarding, claim_next_background_job, process_next_background_job, background_job_spec, fail_timed_out_background_jobs, require_deployment_maintenance_approval, summarize_background_jobs
-from .services import execute_batch_task, execute_command_record, execute_deployment_release, execute_deployment_rollback, execute_file_distribution, evaluate_service_slo, require_deployment_slo_approval
+from .services import active_maintenance_windows_for_host, active_maintenance_windows_for_release, cleanup_audit_logs, cleanup_metric_samples, deployment_risk_preview, enqueue_background_job, evaluate_worker_alert_thresholds, forecast_host_capacity, latest_metric_map, notify_alert, record_alert, record_metric_sample, run_background_job, send_notification_channel, validate_remote_path, scan_compliance_baseline, create_project_onboarding, claim_next_background_job, process_next_background_job, background_job_spec, fail_timed_out_background_jobs, require_deployment_maintenance_approval, summarize_background_jobs
+from .services import cleanup_service_slo_evaluations, execute_batch_task, execute_command_record, execute_deployment_release, execute_deployment_rollback, execute_file_distribution, evaluate_enabled_service_slos, evaluate_service_slo, require_deployment_slo_approval
 from .services import COMMAND_ALLOWED, COMMAND_BLOCKED, evaluate_command_policy, has_role
 from .services import (
     build_k8s_resource_matches,
@@ -6531,6 +6534,136 @@ class ServiceSloTests(TestCase):
         self.assertNotIn(raw_value, '\n'.join(AuditLog.objects.values_list('detail', flat=True)))
 
 
+class ServiceSloHistoryTests(TestCase):
+    def setUp(self):
+        self.service = ServiceCatalog.objects.create(name='scheduled-slo-service')
+        self.first = ServiceSlo.objects.create(
+            service=self.service,
+            metric_kind=ServiceSlo.KIND_AVAILABILITY,
+            target=99,
+            enabled=True,
+        )
+        self.second = ServiceSlo.objects.create(
+            service=self.service,
+            metric_kind=ServiceSlo.KIND_LATENCY,
+            target=250,
+            enabled=True,
+        )
+        self.disabled = ServiceSlo.objects.create(
+            service=self.service,
+            metric_kind=ServiceSlo.KIND_ERROR_RATE,
+            target=1,
+            enabled=False,
+        )
+
+    @mock.patch('devops.services.send_notifications')
+    @mock.patch('devops.services.evaluate_service_slo')
+    def test_scheduler_records_safe_history_and_notifies_only_new_exhaustion(self, evaluate, notify):
+        evaluated_at = timezone.now()
+        ServiceSloEvaluation.objects.create(
+            slo=self.first,
+            state=ServiceSlo.STATE_HEALTHY,
+            summary='previously healthy',
+            evaluated_at=evaluated_at - timedelta(minutes=5),
+        )
+        evaluate.side_effect = lambda slo, now: {
+            'state': ServiceSlo.STATE_EXHAUSTED if slo == self.first else ServiceSlo.STATE_HEALTHY,
+            'summary': 'bounded status',
+        }
+
+        result = evaluate_enabled_service_slos(now=evaluated_at)
+
+        self.assertEqual(result, {'evaluated': 2, 'exhausted': 1, 'unavailable': 0, 'errors': 0})
+        self.assertEqual(evaluate.call_count, 2)
+        self.assertEqual(ServiceSloEvaluation.objects.count(), 3)
+        history = ServiceSloEvaluation.objects.filter(evaluated_at=evaluated_at).order_by('slo_id')
+        self.assertEqual(list(history.values_list('state', flat=True)), [
+            ServiceSlo.STATE_EXHAUSTED, ServiceSlo.STATE_HEALTHY,
+        ])
+        self.assertEqual(
+            set(field.name for field in ServiceSloEvaluation._meta.fields),
+            {'id', 'slo', 'state', 'summary', 'evaluated_at'},
+        )
+        notify.assert_called_once()
+        self.assertEqual(notify.call_args[0][0], NotificationLog.EVENT_ALERT)
+        self.assertNotIn('scheduled-slo-service', notify.call_args[0][1])
+
+    @mock.patch('devops.services.send_notifications', side_effect=RuntimeError('receiver unavailable'))
+    @mock.patch('devops.services.evaluate_service_slo')
+    def test_notification_failure_keeps_history_and_slo_errors_are_isolated(self, evaluate, notify):
+        ServiceSloEvaluation.objects.create(
+            slo=self.first,
+            state=ServiceSlo.STATE_HEALTHY,
+            summary='previously healthy',
+            evaluated_at=timezone.now() - timedelta(minutes=5),
+        )
+        evaluate.side_effect = [
+            {'state': ServiceSlo.STATE_EXHAUSTED, 'summary': 'budget exhausted'},
+            RuntimeError('https://private.invalid/ secret-token'),
+        ]
+
+        result = evaluate_enabled_service_slos()
+
+        self.assertEqual(result, {'evaluated': 2, 'exhausted': 1, 'unavailable': 1, 'errors': 1})
+        self.assertEqual(ServiceSloEvaluation.objects.filter(slo=self.first).count(), 2)
+        failed = ServiceSloEvaluation.objects.get(slo=self.second)
+        self.assertEqual(failed.state, ServiceSlo.STATE_UNAVAILABLE)
+        self.assertEqual(failed.summary, '指标不可用')
+        self.assertNotIn('private.invalid', failed.summary)
+        notify.assert_called_once()
+
+    @mock.patch('devops.services.send_notifications')
+    @mock.patch('devops.services.evaluate_service_slo')
+    def test_atomic_history_claim_rechecks_exhaustion_before_notification(self, evaluate, notify):
+        """A competing evaluator that persists exhaustion first owns notification."""
+        self.second.enabled = False
+        self.second.save(update_fields=['enabled'])
+        evaluated_at = timezone.now()
+
+        def concurrent_completion(slo, now):
+            ServiceSloEvaluation.objects.create(
+                slo=slo,
+                state=ServiceSlo.STATE_EXHAUSTED,
+                summary='other evaluator completed first',
+                evaluated_at=now - timedelta(seconds=1),
+            )
+            ServiceSlo.objects.filter(pk=slo.pk).update(
+                last_notification_state=ServiceSlo.STATE_EXHAUSTED,
+            )
+            return {'state': ServiceSlo.STATE_EXHAUSTED, 'summary': 'bounded status'}
+
+        evaluate.side_effect = concurrent_completion
+
+        result = evaluate_enabled_service_slos(now=evaluated_at)
+
+        self.assertEqual(result, {'evaluated': 1, 'exhausted': 1, 'unavailable': 0, 'errors': 0})
+        self.assertEqual(ServiceSloEvaluation.objects.filter(slo=self.first).count(), 2)
+        notify.assert_not_called()
+        self.first.refresh_from_db()
+        self.assertEqual(self.first.last_notification_state, ServiceSlo.STATE_EXHAUSTED)
+
+    def test_cleanup_service_slo_evaluations_respects_retention_days(self):
+        now = timezone.now()
+        stale = ServiceSloEvaluation.objects.create(
+            slo=self.first,
+            state=ServiceSlo.STATE_HEALTHY,
+            summary='old',
+            evaluated_at=now - timedelta(days=8),
+        )
+        recent = ServiceSloEvaluation.objects.create(
+            slo=self.first,
+            state=ServiceSlo.STATE_HEALTHY,
+            summary='recent',
+            evaluated_at=now - timedelta(days=6),
+        )
+
+        deleted = cleanup_service_slo_evaluations(retention_days=7, now=now)
+
+        self.assertEqual(deleted, 1)
+        self.assertFalse(ServiceSloEvaluation.objects.filter(id=stale.id).exists())
+        self.assertTrue(ServiceSloEvaluation.objects.filter(id=recent.id).exists())
+
+
 class RunbookTemplateTests(TestCase):
     def setUp(self):
         self.admin = User.objects.create(user='runbook-admin', email='runbook-admin@example.com', password='pwd', confirm_pwd='pwd')
@@ -6812,6 +6945,250 @@ class RunbookTemplateTests(TestCase):
         self.assertEqual(response.status_code, 200)
         self.assertContains(response, self.host.linux_name)
         self.assertNotContains(response, self.other_host.linux_name)
+
+
+class CapacityForecastTests(TestCase):
+    def setUp(self):
+        self.user = User.objects.create(
+            user='capacity-viewer', email='capacity-viewer@example.com',
+            password='plain-password', confirm_pwd='plain-password',
+        )
+        DevOpsRole.objects.create(user=self.user, role=DevOpsRole.ROLE_VIEWER)
+        DevOpsModulePermission.objects.create(
+            user=self.user,
+            module=DevOpsModulePermission.MODULE_METRIC,
+            role=DevOpsRole.ROLE_VIEWER,
+        )
+        self.host = NewLinux.objects.create(
+            linux_name='capacity-visible', linux_ip='127.0.10.1',
+            linux_hostname='capacity-visible', linux_port='22', linux_user='root',
+            linux_passwd='not-exposed', linux_app='',
+        )
+        session = self.client.session
+        session['is_login'] = True
+        session['user_id'] = self.user.id
+        session['user_name'] = self.user.user
+        session.save()
+        self.now = timezone.now().replace(microsecond=0)
+
+    def sample(self, host, value, days_ago, metric=MetricSample.METRIC_CPU):
+        return record_metric_sample(
+            host, metric, value,
+            collected_at=self.now - timedelta(days=days_ago),
+        )
+
+    def test_rising_series_returns_bounded_risk_days(self):
+        self.sample(self.host, 60, 2)
+        self.sample(self.host, 80, 1)
+        self.sample(self.host, 95, 0)
+
+        forecasts = forecast_host_capacity([self.host], now=self.now)
+
+        self.assertEqual(len(forecasts), 3)
+        cpu = next(item for item in forecasts if item['metric'] == MetricSample.METRIC_CPU)
+        self.assertEqual(cpu['host'], {'id': self.host.id, 'name': self.host.linux_name})
+        self.assertEqual(cpu['state'], 'risk')
+        self.assertEqual(cpu['sample_count'], 3)
+        self.assertIsInstance(cpu['days_to_threshold'], int)
+        self.assertGreater(cpu['days_to_threshold'], 0)
+        self.assertEqual(set(cpu), {'host', 'metric', 'state', 'sample_count', 'days_to_threshold'})
+
+    def test_non_positive_slope_is_stable_without_threshold_days(self):
+        self.sample(self.host, 80, 2, MetricSample.METRIC_MEMORY)
+        self.sample(self.host, 70, 1, MetricSample.METRIC_MEMORY)
+        self.sample(self.host, 60, 0, MetricSample.METRIC_MEMORY)
+
+        forecasts = forecast_host_capacity([self.host], now=self.now)
+
+        memory = next(item for item in forecasts if item['metric'] == MetricSample.METRIC_MEMORY)
+        self.assertEqual(memory['state'], 'stable')
+        self.assertEqual(memory['sample_count'], 3)
+        self.assertNotIn('days_to_threshold', memory)
+
+    def test_sparse_duplicate_timestamps_are_insufficient(self):
+        timestamp = self.now - timedelta(days=1)
+        record_metric_sample(self.host, MetricSample.METRIC_DISK, 50, collected_at=timestamp)
+        record_metric_sample(self.host, MetricSample.METRIC_DISK, 70, collected_at=timestamp)
+        record_metric_sample(self.host, MetricSample.METRIC_DISK, 90, collected_at=timestamp)
+
+        forecasts = forecast_host_capacity([self.host], now=self.now)
+
+        disk = next(item for item in forecasts if item['metric'] == MetricSample.METRIC_DISK)
+        self.assertEqual(disk, {
+            'host': {'id': self.host.id, 'name': self.host.linux_name},
+            'metric': MetricSample.METRIC_DISK,
+            'state': 'insufficient_data',
+            'sample_count': 1,
+        })
+
+    def test_out_of_range_samples_are_excluded_from_forecast_points(self):
+        cases = (
+            ('negative normalized value', -0.1),
+            ('value above percentage range', 101),
+        )
+        for label, invalid_value in cases:
+            with self.subTest(label=label):
+                self.sample(self.host, 60, 2, MetricSample.METRIC_MEMORY)
+                self.sample(self.host, 80, 1, MetricSample.METRIC_MEMORY)
+                self.sample(self.host, invalid_value, 0, MetricSample.METRIC_MEMORY)
+
+                forecasts = forecast_host_capacity([self.host], now=self.now)
+
+                memory = next(item for item in forecasts if item['metric'] == MetricSample.METRIC_MEMORY)
+                self.assertEqual(memory, {
+                    'host': {'id': self.host.id, 'name': self.host.linux_name},
+                    'metric': MetricSample.METRIC_MEMORY,
+                    'state': 'insufficient_data',
+                    'sample_count': 2,
+                })
+                MetricSample.objects.filter(host=self.host, metric=MetricSample.METRIC_MEMORY).delete()
+
+    def test_current_threshold_usage_is_immediate_risk(self):
+        self.sample(self.host, 100, 2, MetricSample.METRIC_DISK)
+        self.sample(self.host, 80, 1, MetricSample.METRIC_DISK)
+        self.sample(self.host, 100, 0, MetricSample.METRIC_DISK)
+
+        forecasts = forecast_host_capacity([self.host], now=self.now)
+
+        disk = next(item for item in forecasts if item['metric'] == MetricSample.METRIC_DISK)
+        self.assertEqual(disk['state'], 'risk')
+        self.assertEqual(disk['days_to_threshold'], 1)
+
+    def test_api_and_page_only_return_visible_safe_forecasts(self):
+        hidden = NewLinux.objects.create(
+            linux_name='capacity-hidden', linux_ip='127.0.10.2',
+            linux_hostname='capacity-hidden', linux_port='22', linux_user='root',
+            linux_passwd='do-not-expose', linux_app='',
+        )
+        group = HostGroup.objects.create(name='capacity-visible-group')
+        group.hosts.add(self.host)
+        scope = DevOpsHostScope.objects.create(user=self.user)
+        scope.groups.add(group)
+        for host in (self.host, hidden):
+            self.sample(host, 60, 2)
+            self.sample(host, 80, 1)
+            self.sample(host, 95, 0)
+
+        response = self.client.get(reverse('devops:api_capacity_forecast'))
+        page = self.client.get(reverse('devops:metrics_history'))
+
+        self.assertEqual(response.status_code, 200)
+        payload = response.json()
+        self.assertEqual([item['host']['id'] for item in payload['results']], [self.host.id] * 3)
+        self.assertNotIn(hidden.linux_name, json.dumps(payload))
+        self.assertNotIn('not-exposed', json.dumps(payload))
+        for item in payload['results']:
+            self.assertTrue(set(item).issubset({
+                'host', 'metric', 'state', 'sample_count', 'days_to_threshold',
+            }))
+        self.assertEqual(page.status_code, 200)
+        self.assertEqual(page.context['capacity_forecasts'], payload['results'])
+        self.assertContains(page, '容量预测')
+        self.assertNotContains(page, hidden.linux_name)
+
+    def test_api_requires_metric_read_permission(self):
+        DevOpsModulePermission.objects.filter(
+            user=self.user,
+            module=DevOpsModulePermission.MODULE_METRIC,
+        ).update(role=DevOpsModulePermission.ROLE_NONE)
+
+        response = self.client.get(reverse('devops:api_capacity_forecast'))
+
+        self.assertEqual(response.status_code, 403)
+        self.assertEqual(response.json()['code'], 'forbidden')
+
+
+class RestoreRuntimeCommandTests(TestCase):
+    encryption_key = 'restore-runtime-command-test-key'
+
+    def create_encrypted_archive(self, directory):
+        scripts_directory = str(Path(settings.BASE_DIR) / 'scripts')
+        if scripts_directory not in sys.path:
+            sys.path.insert(0, scripts_directory)
+        from backup_local import create_backup
+
+        source_database = Path(directory) / 'source.sqlite3'
+        connection = sqlite3.connect(str(source_database))
+        try:
+            connection.execute('CREATE TABLE restore_probe (value TEXT)')
+            connection.execute("INSERT INTO restore_probe (value) VALUES ('restored')")
+            connection.commit()
+        finally:
+            connection.close()
+        uploads = Path(directory) / 'uploads-source'
+        uploads.mkdir()
+        (uploads / 'probe.txt').write_text('restore upload probe', encoding='utf-8')
+        archive = Path(directory) / 'runtime.tar.gz.enc'
+        with mock.patch.dict(os.environ, {'DATA_ENCRYPTION_KEY': self.encryption_key}, clear=False):
+            create_backup(types.SimpleNamespace(
+                database=str(source_database), uploads=str(uploads), output=str(archive),
+                encrypt=True, force=False,
+            ))
+        return archive
+
+    def test_restore_runtime_restores_valid_local_encrypted_archive(self):
+        with tempfile.TemporaryDirectory(dir=settings.BASE_DIR) as directory:
+            archive = self.create_encrypted_archive(directory)
+            target = Path(directory) / 'isolated-restore'
+            target.mkdir()
+
+            with mock.patch.dict(os.environ, {'DATA_ENCRYPTION_KEY': self.encryption_key}, clear=False):
+                call_command('restore_runtime', '--archive=%s' % archive, '--target-dir=%s' % target)
+
+            connection = sqlite3.connect(str(target / 'database.sqlite3'))
+            try:
+                self.assertEqual(connection.execute('SELECT value FROM restore_probe').fetchone()[0], 'restored')
+            finally:
+                connection.close()
+            self.assertEqual((target / 'uploads' / 'probe.txt').read_text(encoding='utf-8'), 'restore upload probe')
+
+    def test_restore_runtime_rejects_valid_unencrypted_archive(self):
+        with tempfile.TemporaryDirectory(dir=settings.BASE_DIR) as directory:
+            encrypted_archive = self.create_encrypted_archive(directory)
+            scripts_directory = str(Path(settings.BASE_DIR) / 'scripts')
+            if scripts_directory not in sys.path:
+                sys.path.insert(0, scripts_directory)
+            from backup_crypto import decrypt_file
+
+            unencrypted_archive = Path(directory) / 'runtime.tar.gz'
+            target = Path(directory) / 'isolated-restore'
+            target.mkdir()
+            with mock.patch.dict(os.environ, {'DATA_ENCRYPTION_KEY': self.encryption_key}, clear=False):
+                decrypt_file(encrypted_archive, unencrypted_archive)
+                with self.assertRaisesRegex(CommandError, r'encrypted.*\.tar\.gz\.enc'):
+                    call_command(
+                        'restore_runtime', '--archive=%s' % unencrypted_archive,
+                        '--target-dir=%s' % target,
+                    )
+
+    def test_restore_runtime_rejects_unsafe_local_inputs_without_subprocesses(self):
+        with tempfile.TemporaryDirectory(dir=settings.BASE_DIR) as directory:
+            archive = self.create_encrypted_archive(directory)
+            nonempty_target = Path(directory) / 'nonempty'
+            nonempty_target.mkdir()
+            (nonempty_target / 'existing.txt').write_text('keep', encoding='utf-8')
+            empty_target = Path(directory) / 'empty'
+            empty_target.mkdir()
+            symlink_target = Path(directory) / 'symlink-target'
+            symlink_target.symlink_to(empty_target, target_is_directory=True)
+            malformed_archive = Path(directory) / 'broken.tar.gz.enc'
+            malformed_archive.write_bytes(b'not an encrypted archive')
+
+            with mock.patch('subprocess.run') as run, mock.patch.dict(
+                    os.environ, {'DATA_ENCRYPTION_KEY': self.encryption_key}, clear=False):
+                for archive_value, target_value in (
+                    (archive, nonempty_target),
+                    (archive, symlink_target),
+                    (archive, str(empty_target / '..' / 'empty')),
+                    (malformed_archive, empty_target),
+                ):
+                    with self.subTest(archive=archive_value, target=target_value):
+                        with self.assertRaises(CommandError):
+                            call_command(
+                                'restore_runtime', '--archive=%s' % archive_value,
+                                '--target-dir=%s' % target_value,
+                            )
+                run.assert_not_called()
 
 
 class RbacAdministrationClosureTests(TestCase):

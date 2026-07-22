@@ -4,6 +4,7 @@ import socket
 import ssl
 from datetime import timedelta
 
+from django.conf import settings
 from django.test import TestCase
 from django.urls import reverse
 from django.utils import timezone
@@ -16,7 +17,7 @@ from RemoteLinux.models import User
 from RemoteLinux.models import NewLinux
 from devops.services import record_alert, resolve_alert
 from . import services
-from .crontab import monitor_send_email, parse_percent, poll_alertmanager_notifications, record_collection_failure, send_threshold_alert, scan_compliance_baselines_daily
+from .crontab import evaluate_service_slos_periodically, monitor_send_email, parse_percent, poll_alertmanager_notifications, record_collection_failure, send_threshold_alert, scan_compliance_baselines_daily
 from .models import AlertmanagerConfig, AlertNotificationConfig, Monitor, PrometheusConfig
 
 
@@ -28,6 +29,29 @@ class MockWebhookResponse(object):
 
 	def read(self):
 		return self.body.encode('utf-8')
+
+
+class SloScheduleTests(TestCase):
+	def test_slo_evaluation_is_registered_every_five_minutes(self):
+		self.assertIn(
+			('*/5 * * * *', 'monitor.crontab.evaluate_service_slos_periodically', '>>/tmp/service_slo_evaluation.log'),
+			settings.CRONJOBS,
+		)
+
+	@mock.patch('monitor.crontab.cleanup_service_slo_evaluations', return_value=3)
+	@mock.patch('monitor.crontab.evaluate_enabled_service_slos')
+	def test_periodic_slo_evaluation_writes_only_bounded_aggregate_audit(self, evaluate, cleanup):
+		evaluate.return_value = {'evaluated': 12, 'exhausted': 2, 'unavailable': 1, 'errors': 1}
+
+		result = evaluate_service_slos_periodically()
+
+		self.assertEqual(result, evaluate.return_value)
+		evaluate.assert_called_once_with()
+		cleanup.assert_called_once_with()
+		audit_log = AuditLog.objects.get(action='定期评估服务SLO', user='system')
+		self.assertEqual(audit_log.target_type, 'ServiceSlo')
+		self.assertEqual(audit_log.detail, '评估=12, 耗尽=2, 不可用=1, 错误=1, 清理=3')
+		self.assertLessEqual(len(audit_log.detail), 200)
 
 
 class MonitorSecurityTests(TestCase):

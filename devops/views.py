@@ -109,6 +109,7 @@ from .services import (
     execute_deployment_rollback,
     execute_command_record,
     evaluate_command_policy,
+    forecast_host_capacity,
     has_role,
     update_alert_status,
     user_role,
@@ -1068,6 +1069,7 @@ def metrics_history(request):
             ('30d', '最近 30 天'),
         ],
         'host_metrics': host_metrics,
+        'capacity_forecasts': forecast_host_capacity(hosts),
         'sample_rows': sample_rows,
         'chart_json': json.dumps(chart_data),
     })

@@ -125,6 +125,85 @@ class ProductionComposeReferenceTests(SimpleTestCase):
 		self.assertIn('刻意不对外提供上传文件', documentation)
 
 
+class ProductionCiGuardTests(SimpleTestCase):
+	"""Keep the CI production guard offline and free of real credentials."""
+
+	def setUp(self):
+		self.workflow_path = Path(__file__).resolve().parent.parent / '.github' / 'workflows' / 'django.yml'
+
+	def test_production_guard_validates_configuration_without_runtime_side_effects(self):
+		workflow = self.workflow_path.read_text(encoding='utf-8')
+
+		for snippet in (
+			'python -m pip install -r deploy/requirements-prod.txt',
+			'DJANGO_ENV: production',
+			'DJANGO_DEBUG: "False"',
+			'DJANGO_SECRET_KEY: ci-production-placeholder',
+			'DATA_ENCRYPTION_KEY: ci-data-encryption-placeholder',
+			'DJANGO_ALLOWED_HOSTS: ci.invalid',
+			'DB_ENGINE: postgresql',
+			'DB_NAME: pylinux_ci',
+			'DB_USER: pylinux_ci',
+			'DB_PASSWORD: ci-database-placeholder',
+			'DB_HOST: postgres',
+			'DB_PORT: "5432"',
+			'python manage.py check --deploy',
+			'python manage.py collectstatic --noinput',
+			'docker compose -f deploy/docker-compose.yml -f deploy/docker-compose.production.yml config --quiet',
+		):
+			with self.subTest(snippet=snippet):
+				self.assertIn(snippet, workflow)
+
+		self.assertIn('touch "$PRODUCTION_ENV_FILE"', workflow)
+		self.assertNotIn('${{ secrets.', workflow)
+		self.assertNotRegex(workflow, r'docker compose\b.*\b(up|build)\b')
+		for forbidden in ('curl ', 'wget ', 'echo $'):
+			with self.subTest(forbidden=forbidden):
+				self.assertNotIn(forbidden, workflow)
+
+
+class DocumentationStatusTests(SimpleTestCase):
+	"""Keep completed governance work out of the pending roadmap."""
+
+	def setUp(self):
+		self.project_root = Path(__file__).resolve().parent.parent
+		self.roadmap_path = self.project_root / 'docs' / 'devops_next_optimizations.md'
+		self.readme_path = self.project_root / 'README.md'
+		self.recovery_path = self.project_root / 'docs' / 'runtime_recovery.md'
+
+	def test_roadmap_lists_completed_navigation_nginx_and_llm_key_work_as_completed(self):
+		roadmap = self.roadmap_path.read_text(encoding='utf-8')
+
+		for stale_recommendation in (
+			'将共享侧边栏也接入模块权限上下文',
+			'增加 Nginx 静态文件和反向代理示例',
+			'AIOps LLM 密钥加密存储，并在留空更新时保留既有值',
+		):
+			with self.subTest(stale_recommendation=stale_recommendation):
+				self.assertNotIn(stale_recommendation, roadmap)
+
+		for completed_capability in ('共享导航权限', 'Nginx 生产参考', 'AIOps LLM 密钥加密'):
+			with self.subTest(completed_capability=completed_capability):
+				self.assertIn(completed_capability, roadmap)
+
+	def test_operator_docs_describe_periodic_slo_forecast_and_local_restore_boundary(self):
+		readme = self.readme_path.read_text(encoding='utf-8')
+		recovery = self.recovery_path.read_text(encoding='utf-8')
+
+		for capability in ('周期性 SLO 评估', '容量预测', '仅限本地的恢复演练'):
+			with self.subTest(capability=capability):
+				self.assertIn(capability, readme)
+
+		for boundary in (
+			'python manage.py restore_runtime',
+			'已存在且为空的隔离目录',
+			'保留在隔离目录中供人工检查',
+			'不会从 S3 下载归档，也不会访问生产服务',
+		):
+			with self.subTest(boundary=boundary):
+				self.assertIn(boundary, recovery)
+
+
 class K8sCacheConfigTests(SimpleTestCase):
 	def test_default_cache_is_persistent_file_cache(self):
 		timeout, caches = k8s_cache_config_from_env({}, '/app')

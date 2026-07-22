@@ -394,6 +394,7 @@ DEFAULT_AUTO_FIELD = 'django.db.models.AutoField'
 CRONJOBS = [
 	('*/1 * * * *', 'monitor.crontab.monitor_send_email', '>>/tmp/test.log'),
 	('*/1 * * * *', 'monitor.crontab.poll_alertmanager_notifications', '>>/tmp/alertmanager_poll.log'),
+	('*/5 * * * *', 'monitor.crontab.evaluate_service_slos_periodically', '>>/tmp/service_slo_evaluation.log'),
 	('30 3 * * *', 'monitor.crontab.scan_compliance_baselines_daily', '>>/tmp/compliance_scan.log'),
 ]
 
@@ -433,3 +434,8 @@ NOTIFICATION_TIMEOUT_SECONDS = int(os.environ.get('NOTIFICATION_TIMEOUT_SECONDS'
 AUDIT_LOG_RETENTION_DAYS = int(os.environ.get('AUDIT_LOG_RETENTION_DAYS', '0'))
 METRIC_SAMPLE_RETENTION_DAYS = int(os.environ.get('METRIC_SAMPLE_RETENTION_DAYS', '30'))
 AIOPS_ANALYSIS_RETENTION_DAYS = int(os.environ.get('AIOPS_ANALYSIS_RETENTION_DAYS', '90'))
+SERVICE_SLO_EVALUATION_RETENTION_DAYS = env_int(
+	os.environ, 'SERVICE_SLO_EVALUATION_RETENTION_DAYS', 90,
+)
+if SERVICE_SLO_EVALUATION_RETENTION_DAYS <= 0:
+	raise ImproperlyConfigured('SERVICE_SLO_EVALUATION_RETENTION_DAYS 必须是正整数')

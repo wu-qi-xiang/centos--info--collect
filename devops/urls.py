@@ -24,6 +24,7 @@ urlpatterns = [
     path('api/commands/<int:id>/', api.command_detail, name='api_command_detail'),
     path('api/tasks/', api.tasks, name='api_tasks'),
     path('api/metrics/', api.metrics, name='api_metrics'),
+    path('api/capacity-forecast/', api.capacity_forecast, name='api_capacity_forecast'),
     path('api/alerts/', api.alerts, name='api_alerts'),
     path('api/incidents/', api.incidents, name='api_incidents'),
     path('api/incidents/<int:id>/', api.incident_detail, name='api_incident_detail'),

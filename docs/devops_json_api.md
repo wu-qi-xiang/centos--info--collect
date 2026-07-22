@@ -96,6 +96,13 @@
   - `range` 支持 `6h`、`24h`、`7d`、`30d`。
   - 返回 `labels` 和 `series.cpu/memory/disk`。
   - `host` 必须在当前用户可见主机范围内；未指定时默认选择第一个可见主机。
+- `GET /devops/api/capacity-forecast/`
+  - 需要 session 登录和监控历史模块只读权限，仅计算当前用户可见主机的 CPU、内存、磁盘历史采样。
+  - 未登录返回 `401` 和 `{"ok": false, "code": "unauthorized", "message": "..."}`；权限不足返回 `403` 和 `{"ok": false, "code": "forbidden", "message": "..."}`。
+  - 每项仅返回 `host.id`、`host.name`、`metric`、`state`、`sample_count`，以及风险状态下正整数 `days_to_threshold`。状态为 `risk`、`stable` 或 `insufficient_data`。
+  - `days_to_threshold` 是风险日桶：`1` 表示当前最后观测值或当前趋势估计已经达到阈值，或预计在未来 24 小时内达到，并不表示还需等待一天；大于 `1` 表示预测将在对应天数内达到。
+  - 使用最近 30 天去重后的有效采样进行最小二乘每日趋势估算；原始比例先归一化为百分比，归一化后不在 `0..100`（含）范围内的值无效。少于 3 个不同时间点、无效值或不可计算趋势均为 `insufficient_data`。预测最多展示 50 台主机，每项最多预测 365 天。
+  - 不返回采样值、时间戳、原始监控响应、标签、来源 URL、主机 IP、凭据或其他敏感字段。
 - `GET /devops/api/alerts/?limit=50`
   - 告警记录列表，仅返回当前用户可见主机上的告警和无主机关联的全局告警。
 - `GET /devops/api/incidents/?limit=50`

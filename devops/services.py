@@ -90,6 +90,7 @@ from .models import (
     MaintenanceWindow,
     ServiceCatalog,
     ServiceSlo,
+    ServiceSloEvaluation,
     RunbookTemplate,
 )
 from RemoteLinux.models import NewLinux
@@ -2549,6 +2550,19 @@ def cleanup_metric_samples(retention_days=None, now=None):
     return deleted
 
 
+def cleanup_service_slo_evaluations(retention_days=None, now=None):
+    """Remove only expired bounded SLO state summaries."""
+    days = retention_days
+    if days is None:
+        days = int(getattr(settings, 'SERVICE_SLO_EVALUATION_RETENTION_DAYS', 90) or 0)
+    days = int(days or 0)
+    if days <= 0:
+        return 0
+    cutoff = (now or timezone.now()) - timezone.timedelta(days=days)
+    deleted, details = ServiceSloEvaluation.objects.filter(evaluated_at__lt=cutoff).delete()
+    return deleted
+
+
 def latest_metric_map(hosts=None):
     hosts = hosts or []
     host_ids = [host.id for host in hosts]
@@ -2559,6 +2573,104 @@ def latest_metric_map(hosts=None):
         if key not in result:
             result[key] = sample
     return result
+
+
+CAPACITY_FORECAST_WINDOW_DAYS = 30
+CAPACITY_FORECAST_MAX_DAYS = 365
+CAPACITY_FORECAST_MAX_HOSTS = 50
+CAPACITY_FORECAST_MIN_SAMPLES = 3
+
+
+def _capacity_percent(value):
+    try:
+        percent = float(value)
+    except (TypeError, ValueError):
+        return None
+    if not math.isfinite(percent):
+        return None
+    percent = percent * 100 if 0 <= percent <= 1 else percent
+    return percent if 0 <= percent <= 100 else None
+
+
+def forecast_host_capacity(hosts, now=None):
+    """Return a bounded, safe capacity forecast for the supplied hosts."""
+    now = now or timezone.now()
+    hosts = list(hosts)[:CAPACITY_FORECAST_MAX_HOSTS]
+    host_ids = [host.id for host in hosts]
+    metrics = (
+        MetricSample.METRIC_CPU,
+        MetricSample.METRIC_MEMORY,
+        MetricSample.METRIC_DISK,
+    )
+    samples_by_key = {(host.id, metric): {} for host in hosts for metric in metrics}
+    cutoff = now - timezone.timedelta(days=CAPACITY_FORECAST_WINDOW_DAYS)
+    samples = MetricSample.objects.filter(
+        host_id__in=host_ids,
+        metric__in=metrics,
+        collected_at__gte=cutoff,
+        collected_at__lte=now,
+    ).order_by('host_id', 'metric', 'collected_at', 'id')
+    for sample in samples.iterator():
+        value = _capacity_percent(sample.value)
+        if value is None:
+            continue
+        key = (sample.host_id, sample.metric)
+        # A later row for the same timestamp replaces the earlier duplicate.
+        samples_by_key[key][sample.collected_at] = value
+
+    forecasts = []
+    for host in hosts:
+        safe_host = {'id': host.id, 'name': host.linux_name}
+        for metric in metrics:
+            points = sorted(samples_by_key[(host.id, metric)].items())
+            result = {
+                'host': safe_host,
+                'metric': metric,
+                'state': 'insufficient_data',
+                'sample_count': len(points),
+            }
+            if len(points) < CAPACITY_FORECAST_MIN_SAMPLES:
+                forecasts.append(result)
+                continue
+
+            x_values = [(point[0] - now).total_seconds() / 86400.0 for point in points]
+            y_values = [point[1] for point in points]
+            if y_values[-1] >= 100:
+                result['state'] = 'risk'
+                result['days_to_threshold'] = 1
+                forecasts.append(result)
+                continue
+            x_mean = sum(x_values) / len(x_values)
+            y_mean = sum(y_values) / len(y_values)
+            denominator = sum((value - x_mean) ** 2 for value in x_values)
+            if not denominator:
+                forecasts.append(result)
+                continue
+            slope = sum(
+                (x_value - x_mean) * (y_value - y_mean)
+                for x_value, y_value in zip(x_values, y_values)
+            ) / denominator
+            current = y_mean + slope * (0 - x_mean)
+            if not math.isfinite(slope) or not math.isfinite(current):
+                forecasts.append(result)
+                continue
+            if current >= 100:
+                result['state'] = 'risk'
+                result['days_to_threshold'] = 1
+                forecasts.append(result)
+                continue
+            if slope <= 0:
+                result['state'] = 'stable'
+                forecasts.append(result)
+                continue
+            days = max(1, int(math.ceil((100.0 - current) / slope)))
+            if days <= CAPACITY_FORECAST_MAX_DAYS:
+                result['state'] = 'risk'
+                result['days_to_threshold'] = days
+            else:
+                result['state'] = 'stable'
+            forecasts.append(result)
+    return forecasts
 
 
 def deployment_risk_preview(hosts, now=None):
@@ -2762,6 +2874,71 @@ def evaluate_service_slo(slo, now=None):
     slo.last_evaluated_at = now
     slo.save(update_fields=['last_state', 'last_summary', 'last_evaluated_at', 'updated_at'])
     return {'state': state, 'summary': slo.last_summary}
+
+
+def _record_service_slo_evaluation(slo_id, state, summary, evaluated_at):
+    """Persist one evaluation and atomically claim a new exhaustion notification."""
+    with transaction.atomic():
+        locked_slo = ServiceSlo.objects.select_for_update().get(pk=slo_id)
+        previous = ServiceSloEvaluation.objects.filter(
+            slo=locked_slo,
+        ).order_by('-evaluated_at', '-id').first()
+        ServiceSloEvaluation.objects.create(
+            slo=locked_slo,
+            state=state,
+            summary=summary,
+            evaluated_at=evaluated_at,
+        )
+        if state != ServiceSlo.STATE_EXHAUSTED:
+            ServiceSlo.objects.filter(pk=locked_slo.pk).update(
+                last_notification_state=state,
+            )
+            return False
+        if previous and previous.state == ServiceSlo.STATE_EXHAUSTED:
+            return False
+        # Conditional update is the durable claim. A second overlapping job
+        # observes zero updated rows and must not send the same notification.
+        claimed = ServiceSlo.objects.filter(pk=locked_slo.pk).exclude(
+            last_notification_state=ServiceSlo.STATE_EXHAUSTED,
+        ).update(last_notification_state=ServiceSlo.STATE_EXHAUSTED)
+        return claimed == 1
+
+
+def evaluate_enabled_service_slos(now=None):
+    """Evaluate enabled SLOs without retaining upstream query data or errors."""
+    now = now or timezone.now()
+    result = {'evaluated': 0, 'exhausted': 0, 'unavailable': 0, 'errors': 0}
+    enabled_slos = ServiceSlo.objects.filter(enabled=True).select_related('service').order_by('id')
+    valid_states = set(dict(ServiceSlo.STATE_CHOICES))
+    for slo in enabled_slos:
+        try:
+            evaluation = evaluate_service_slo(slo, now=now)
+            state = evaluation.get('state')
+            summary = str(evaluation.get('summary') or '')[:200]
+            if state not in valid_states:
+                raise ValueError('unsupported SLO state')
+        except Exception:
+            state = ServiceSlo.STATE_UNAVAILABLE
+            summary = '指标不可用'
+            result['errors'] += 1
+
+        should_notify = _record_service_slo_evaluation(slo.id, state, summary, now)
+        result['evaluated'] += 1
+        if state == ServiceSlo.STATE_EXHAUSTED:
+            result['exhausted'] += 1
+            if should_notify:
+                try:
+                    send_notifications(
+                        NotificationLog.EVENT_ALERT,
+                        '服务 SLO 预算耗尽',
+                        'SLO #%s 指标=%s 状态=预算耗尽' % (slo.id, slo.metric_kind),
+                    )
+                except Exception:
+                    # Persisted evaluation history is independent of notification delivery.
+                    pass
+        elif state == ServiceSlo.STATE_UNAVAILABLE:
+            result['unavailable'] += 1
+    return result
 
 
 def deployment_service_slos(release):

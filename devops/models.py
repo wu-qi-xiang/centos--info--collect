@@ -194,6 +194,9 @@ class ServiceSlo(models.Model):
     window_minutes = models.PositiveIntegerField(default=60)
     enabled = models.BooleanField(default=True)
     last_state = models.CharField(max_length=20, choices=STATE_CHOICES, default=STATE_UNAVAILABLE)
+    # Separately tracks the state that has claimed an exhaustion notification.
+    # It is updated conditionally by the scheduler to prevent duplicate sends.
+    last_notification_state = models.CharField(max_length=20, choices=STATE_CHOICES, default=STATE_UNAVAILABLE)
     last_summary = models.CharField(max_length=200, blank=True)
     last_evaluated_at = models.DateTimeField(null=True, blank=True)
     created_at = models.DateTimeField(auto_now_add=True)
@@ -218,6 +221,21 @@ class ServiceSlo(models.Model):
 
     def __str__(self):
         return '%s:%s' % (self.service, self.metric_kind)
+
+
+class ServiceSloEvaluation(models.Model):
+    """A safe, bounded history record for scheduled SLO evaluations."""
+    slo = models.ForeignKey(ServiceSlo, on_delete=models.CASCADE, related_name='evaluations')
+    state = models.CharField(max_length=20, choices=ServiceSlo.STATE_CHOICES)
+    summary = models.CharField(max_length=200)
+    evaluated_at = models.DateTimeField()
+
+    class Meta:
+        db_table = 'devops_service_slo_evaluation'
+        ordering = ['-evaluated_at', '-id']
+        indexes = [
+            models.Index(fields=['slo', '-evaluated_at'], name='devops_slo_eval_time_idx'),
+        ]
 
 
 class RunbookTemplate(models.Model):
