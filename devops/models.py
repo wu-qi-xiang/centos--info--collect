@@ -168,6 +168,40 @@ class ServiceCatalog(models.Model):
         return self.name
 
 
+class K8sWorkloadServiceMapping(models.Model):
+    """A deliberate service-directory association for one K8s workload."""
+    KIND_DEPLOYMENT = 'Deployment'
+    KIND_STATEFUL_SET = 'StatefulSet'
+    KIND_DAEMON_SET = 'DaemonSet'
+    WORKLOAD_KIND_CHOICES = (
+        (KIND_DEPLOYMENT, 'Deployment'),
+        (KIND_STATEFUL_SET, 'StatefulSet'),
+        (KIND_DAEMON_SET, 'DaemonSet'),
+    )
+
+    service = models.ForeignKey(
+        ServiceCatalog, on_delete=models.CASCADE, related_name='k8s_workload_mappings'
+    )
+    cluster = models.ForeignKey(
+        'K8sCluster', on_delete=models.PROTECT, related_name='service_workload_mappings'
+    )
+    namespace = models.CharField(max_length=63)
+    workload_kind = models.CharField(max_length=20, choices=WORKLOAD_KIND_CHOICES)
+    workload_name = models.CharField(max_length=253)
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        db_table = 'devops_k8s_workload_service_mapping'
+        ordering = ['cluster__name', 'namespace', 'workload_kind', 'workload_name']
+        unique_together = ('cluster', 'namespace', 'workload_kind', 'workload_name')
+
+    def __str__(self):
+        return '%s/%s %s:%s' % (
+            self.cluster, self.namespace, self.workload_kind, self.workload_name,
+        )
+
+
 class ServiceSlo(models.Model):
     """A bounded, safe-to-display service level objective configuration."""
     KIND_AVAILABILITY = 'availability'
@@ -383,6 +417,92 @@ class K8sCluster(models.Model):
     def save(self, *args, **kwargs):
         self.kubeconfig = encrypt_text(self.kubeconfig)
         super(K8sCluster, self).save(*args, **kwargs)
+
+
+class PrometheusRuleRevision(models.Model):
+    """Server-side desired state for a PrometheusRule change request."""
+    ACTION_CREATE = 'create'
+    ACTION_UPDATE = 'update'
+    ACTION_DELETE = 'delete'
+    ACTION_CHOICES = (
+        (ACTION_CREATE, '创建'),
+        (ACTION_UPDATE, '更新'),
+        (ACTION_DELETE, '删除'),
+    )
+    STATUS_DRAFT = 'draft'
+    STATUS_SUBMITTED = 'submitted'
+    STATUS_APPROVED = 'approved'
+    STATUS_REJECTED = 'rejected'
+    STATUS_PUBLISHED = 'published'
+    STATUS_FAILED = 'failed'
+    STATUS_CHOICES = (
+        (STATUS_DRAFT, '草稿'),
+        (STATUS_SUBMITTED, '待复核'),
+        (STATUS_APPROVED, '已批准'),
+        (STATUS_REJECTED, '已拒绝'),
+        (STATUS_PUBLISHED, '已发布'),
+        (STATUS_FAILED, '发布失败'),
+    )
+
+    cluster = models.ForeignKey(K8sCluster, on_delete=models.PROTECT, related_name='prometheus_rule_revisions')
+    namespace = models.CharField(max_length=63)
+    name = models.CharField(max_length=253)
+    action = models.CharField(max_length=20, choices=ACTION_CHOICES)
+    # Desired YAML is intentionally never serialized by the governance API.
+    desired_yaml = models.TextField(blank=True)
+    desired_digest = models.CharField(max_length=64, blank=True)
+    baseline_resource_version = models.CharField(max_length=255, blank=True)
+    status = models.CharField(max_length=20, choices=STATUS_CHOICES, default=STATUS_DRAFT)
+    created_by = models.ForeignKey(User, on_delete=models.PROTECT, related_name='prometheus_rule_revisions')
+    submitted_at = models.DateTimeField(null=True, blank=True)
+    approved_at = models.DateTimeField(null=True, blank=True)
+    publish_claimed_at = models.DateTimeField(null=True, blank=True)
+    published_at = models.DateTimeField(null=True, blank=True)
+    failure_code = models.CharField(max_length=40, blank=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        db_table = 'devops_prometheus_rule_revision'
+        ordering = ['-created_at', '-id']
+        indexes = [
+            models.Index(fields=['cluster', 'namespace', 'name']),
+            models.Index(fields=['status']),
+        ]
+
+    def clean(self):
+        if not self.pk:
+            return
+        original = PrometheusRuleRevision.objects.get(pk=self.pk)
+        immutable_fields = ('cluster_id', 'namespace', 'name', 'action', 'desired_yaml',
+                            'desired_digest', 'baseline_resource_version', 'created_by_id')
+        for field in immutable_fields:
+            if getattr(original, field) != getattr(self, field):
+                raise ValidationError('PrometheusRule 修订内容创建后不可修改。')
+
+
+class PrometheusRuleRevisionReview(models.Model):
+    DECISION_APPROVE = 'approve'
+    DECISION_REJECT = 'reject'
+    DECISION_CHOICES = (
+        (DECISION_APPROVE, '批准'),
+        (DECISION_REJECT, '拒绝'),
+    )
+
+    revision = models.ForeignKey(PrometheusRuleRevision, on_delete=models.PROTECT, related_name='reviews')
+    reviewer = models.ForeignKey(User, on_delete=models.PROTECT, related_name='prometheus_rule_reviews')
+    decision = models.CharField(max_length=20, choices=DECISION_CHOICES)
+    comment = models.CharField(max_length=500, blank=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        db_table = 'devops_prometheus_rule_revision_review'
+        ordering = ['created_at', 'id']
+
+    def save(self, *args, **kwargs):
+        if self.pk:
+            raise ValidationError('PrometheusRule 复核记录不可修改。')
+        super(PrometheusRuleRevisionReview, self).save(*args, **kwargs)
 
 
 class CommandExecution(models.Model):
@@ -781,6 +901,98 @@ class AlertNotificationEscalation(models.Model):
     @classmethod
     def current(cls):
         return cls.objects.first() or cls()
+
+
+class ServiceOnCallPolicy(models.Model):
+    """The current, explicitly maintained on-call route for one service."""
+    service = models.OneToOneField(ServiceCatalog, on_delete=models.CASCADE, related_name='oncall_policy')
+    primary_user = models.ForeignKey(
+        'RemoteLinux.User', on_delete=models.PROTECT, related_name='primary_oncall_policies'
+    )
+    primary_channel = models.ForeignKey(
+        NotificationChannel, on_delete=models.PROTECT, related_name='primary_oncall_policies'
+    )
+    backup_user = models.ForeignKey(
+        'RemoteLinux.User', on_delete=models.PROTECT, related_name='backup_oncall_policies'
+    )
+    backup_channel = models.ForeignKey(
+        NotificationChannel, on_delete=models.PROTECT, related_name='backup_oncall_policies'
+    )
+    enabled = models.BooleanField(default=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        db_table = 'devops_service_oncall_policy'
+        ordering = ['service__name']
+
+    def __str__(self):
+        return '%s 值班策略' % self.service
+
+
+class ServiceOnCallRotationMember(models.Model):
+    """One ordered weekly primary on-call route for a service policy."""
+    policy = models.ForeignKey(
+        ServiceOnCallPolicy, on_delete=models.CASCADE, related_name='rotation_members'
+    )
+    user = models.ForeignKey(
+        'RemoteLinux.User', on_delete=models.PROTECT, related_name='oncall_rotation_members'
+    )
+    channel = models.ForeignKey(
+        NotificationChannel, on_delete=models.PROTECT, related_name='oncall_rotation_members'
+    )
+    position = models.PositiveIntegerField()
+    enabled = models.BooleanField(default=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        db_table = 'devops_service_oncall_rotation_member'
+        ordering = ['policy_id', 'position', 'id']
+        unique_together = ('policy', 'position')
+
+    def __str__(self):
+        return '%s #%s' % (self.policy, self.position)
+
+
+class AlertOnCallEscalation(models.Model):
+    """One immutable delivery path for an alert matched to a service policy."""
+    STATUS_ACTIVE = 'active'
+    STATUS_ACKNOWLEDGED = 'acknowledged'
+    STATUS_ESCALATED = 'escalated'
+    STATUS_CANCELLED = 'cancelled'
+    STATUS_FAILED = 'failed'
+    STATUS_CHOICES = (
+        (STATUS_ACTIVE, '等待确认'),
+        (STATUS_ACKNOWLEDGED, '已确认'),
+        (STATUS_ESCALATED, '已升级'),
+        (STATUS_CANCELLED, '已取消'),
+        (STATUS_FAILED, '发送失败'),
+    )
+
+    alert = models.ForeignKey(AlertEvent, on_delete=models.CASCADE, related_name='oncall_escalations')
+    service = models.ForeignKey(ServiceCatalog, on_delete=models.PROTECT, related_name='alert_oncall_escalations')
+    policy = models.ForeignKey(
+        ServiceOnCallPolicy, null=True, blank=True, on_delete=models.SET_NULL,
+        related_name='alert_escalations'
+    )
+    status = models.CharField(max_length=20, choices=STATUS_CHOICES, default=STATUS_ACTIVE)
+    primary_notified_at = models.DateTimeField(null=True, blank=True)
+    acknowledged_at = models.DateTimeField(null=True, blank=True)
+    backup_claimed_at = models.DateTimeField(null=True, blank=True)
+    backup_notified_at = models.DateTimeField(null=True, blank=True)
+    cancelled_at = models.DateTimeField(null=True, blank=True)
+    failure_category = models.CharField(max_length=30, blank=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        db_table = 'devops_alert_oncall_escalation'
+        ordering = ['-created_at', '-id']
+        unique_together = ('alert', 'service')
+        indexes = [
+            models.Index(fields=['status', 'primary_notified_at'], name='devops_oncall_due_idx'),
+        ]
 
 
 class ComplianceBaseline(models.Model):

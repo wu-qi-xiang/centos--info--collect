@@ -147,3 +147,20 @@ def evaluate_service_slos_periodically():
         )[:200],
     )
     return result
+
+
+def process_due_oncall_escalations_periodically():
+    """Run due on-call escalation work without allowing one cron failure to stop later jobs."""
+    try:
+        from devops.services import process_due_oncall_escalations
+        result = process_due_oncall_escalations()
+    except Exception:
+        print('值班升级扫描失败')
+        return {'scanned': 0, 'escalated': 0, 'cancelled': 0, 'errors': 1}
+    print(
+        '值班升级扫描完成：扫描%s条，升级%s条，取消%s条，错误%s条' % (
+            result.get('scanned', 0), result.get('escalated', 0),
+            result.get('cancelled', 0), result.get('errors', 0),
+        )
+    )
+    return result

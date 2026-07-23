@@ -1,0 +1,47 @@
+{% extends "base.html" %}
+
+{% block title %}K8s服务发现 - DevOps平台{% endblock %}
+
+{% block content %}
+<div class="container-fluid px-4">
+    <h1 class="h3 mb-3">K8s服务发现</h1>
+    {% include "devops/_nav.html" %}
+    <div class="card mb-3"><div class="card-header">选择发现范围</div><div class="card-body">
+        <form method="get" class="row g-3 align-items-end">
+            <div class="col-md-5"><label class="form-label">集群</label>{{ discovery_form.cluster }}{{ discovery_form.cluster.errors }}</div>
+            <div class="col-md-5"><label class="form-label">命名空间</label>{{ discovery_form.namespace }}{{ discovery_form.namespace.errors }}</div>
+            <div class="col-md-2"><button class="btn btn-primary" type="submit">发现工作负载</button></div>
+        </form>
+    </div></div>
+    {% if error_message %}<div class="alert alert-warning" role="alert">{{ error_message }}</div>{% endif %}
+    {% if candidates %}
+    <div class="card"><div class="card-header">发现结果</div><div class="card-body table-responsive">
+        <table class="table table-sm align-middle">
+            <tr><th>集群</th><th>命名空间</th><th>工作负载</th><th>状态</th><th>副本</th><th>关联服务</th></tr>
+            {% for candidate in candidates %}
+            <tr>
+                <td>{{ candidate.cluster_name }}</td><td>{{ candidate.namespace }}</td><td>{{ candidate.workload_kind }} / {{ candidate.workload_name }}</td><td>{{ candidate.status }}</td><td>{{ candidate.replicas }}</td>
+                <td>
+                    {% if candidate.mapped_service_id %}
+                    {{ candidate.mapped_service_name|default:"已关联" }}
+                    {% else %}
+                    <form method="post" action="{% url 'devops:k8s_service_discovery_associate' %}" class="d-flex gap-2">
+                        {% csrf_token %}
+                        <input type="hidden" name="cluster" value="{{ candidate.cluster_id }}">
+                        <input type="hidden" name="namespace" value="{{ candidate.namespace }}">
+                        <input type="hidden" name="workload_kind" value="{{ candidate.workload_kind }}">
+                        <input type="hidden" name="workload_name" value="{{ candidate.workload_name }}">
+                        {{ association_form.service }}
+                        <button class="btn btn-outline-primary btn-sm text-nowrap" type="submit">关联现有服务</button>
+                    </form>
+                    {% endif %}
+                </td>
+            </tr>
+            {% endfor %}
+        </table>
+    </div></div>
+    {% elif discovery_form.is_bound and not error_message %}
+    <div class="alert alert-info">该范围内没有可关联的工作负载。</div>
+    {% endif %}
+</div>
+{% endblock %}

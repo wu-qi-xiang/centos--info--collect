@@ -20,6 +20,7 @@
                     { key: 'overview', label: '总览', icon: 'fas fa-gauge-high' },
                     { key: 'anomaly', label: '异常检测', icon: 'fas fa-wave-square' },
                     { key: 'correlation', label: '事件关联', icon: 'fas fa-project-diagram' },
+                    { key: 'impact', label: '变更影响', icon: 'fas fa-code-branch' },
                     { key: 'rca', label: '根因分析', icon: 'fas fa-magnifying-glass-chart' },
                     { key: 'capacity', label: '容量预测', icon: 'fas fa-chart-area' },
                     { key: 'runbook', label: '运行手册', icon: 'fas fa-book-open' },
@@ -36,6 +37,23 @@
             metricBar(value) {
                 const number = Number(value || 0);
                 return Math.max(0, Math.min(100, number)) + '%';
+            },
+            items(value) {
+                return Array.isArray(value) ? value : [];
+            },
+            changeImpactCount() {
+                const count = Number(this.data.counts && this.data.counts.change_impacts);
+                return Number.isFinite(count) ? count : this.items(this.data.change_impacts).length;
+            },
+            evidenceLabel(kind) {
+                const labels = {
+                    open_alert: '未恢复告警',
+                    failed_command: '失败执行',
+                    deployment: '发布变更',
+                    prometheus_rule_revision: '监控规则变更',
+                    audit: '审计记录',
+                };
+                return labels[kind] || kind || '关联证据';
             },
         },
         template: `
@@ -61,6 +79,7 @@
                         <div class="aiops-card"><span>异常信号</span><strong>[[ data.counts.anomalies ]]</strong></div>
                         <div class="aiops-card"><span>事件簇</span><strong>[[ data.counts.correlations ]]</strong></div>
                         <div class="aiops-card"><span>失败命令</span><strong>[[ data.counts.failed_commands ]]</strong></div>
+                        <div class="aiops-card"><span>变更影响</span><strong>[[ changeImpactCount() ]]</strong></div>
                         <div class="aiops-card"><span>通知失败</span><strong>[[ data.counts.notification_failures ]]</strong></div>
                     </div>
                     <div class="aiops-grid two">
@@ -105,6 +124,38 @@
                         </div>
                         <b class="aiops-score">[[ item.score ]]</b>
                     </div>
+                </section>
+
+                <section v-if="active === 'impact'" class="aiops-panel aiops-impact-panel">
+                    <div class="aiops-panel-heading">
+                        <div>
+                            <h2>变更影响分析</h2>
+                            <p class="aiops-muted">按时间窗口关联告警、失败执行与已发布变更，仅供人工研判。</p>
+                        </div>
+                        <b class="aiops-score">[[ changeImpactCount() ]] 条</b>
+                    </div>
+                    <div v-if="!items(data.change_impacts).length" class="aiops-empty">当前时间窗口内没有可确认的变更影响证据</div>
+                    <article class="aiops-impact" v-for="item in items(data.change_impacts)" :key="item.target + item.observed_at">
+                        <div class="aiops-impact-main">
+                            <div class="aiops-impact-title">
+                                <strong>[[ item.target || '变更影响记录' ]]</strong>
+                                <b class="aiops-score">[[ item.score ]]</b>
+                            </div>
+                            <div class="aiops-impact-meta">
+                                <span>观测时间：[[ item.observed_at ]]</span>
+                            </div>
+                        </div>
+                        <ol v-if="items(item.evidence).length" class="aiops-impact-timeline">
+                            <li v-for="evidence in items(item.evidence)" :key="evidence.kind + evidence.observed_at + evidence.summary">
+                                <div>
+                                    <strong>[[ evidenceLabel(evidence.kind) ]]</strong>
+                                    <span>[[ evidence.summary ]]</span>
+                                    <small>[[ evidence.observed_at ]]</small>
+                                </div>
+                                <a v-if="evidence.url" class="aiops-evidence-link" :href="evidence.url">查看记录</a>
+                            </li>
+                        </ol>
+                    </article>
                 </section>
 
                 <section v-if="active === 'rca'" class="aiops-panel">

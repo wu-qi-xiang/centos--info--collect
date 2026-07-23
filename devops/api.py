@@ -33,6 +33,15 @@ from .models import (
     ServiceCatalog,
     ServiceSlo,
     RunbookTemplate,
+    PrometheusRuleRevision,
+)
+from .config_governance import (
+    create_prometheus_rule_draft,
+    publish_revision,
+    restore_revision,
+    review_revision,
+    serialize_revision,
+    submit_revision,
 )
 from .services import (
     COMMAND_ALLOWED,
@@ -714,14 +723,18 @@ def prometheus_rule_update(request, cluster_id, namespace, name):
     cluster, error = prometheus_rule_cluster_or_error(cluster_id)
     if error:
         return error
-    result = replace_prometheus_rule(cluster, namespace, name, yaml_text)
-    resource_version = prometheus_rule_update_summary(result.get('rule'), namespace, name)['resource_version']
-    audit(request, 'API更新PrometheusRule', 'K8sCluster', cluster.id,
-          prometheus_rule_audit_detail(cluster, namespace, name, 'update', prometheus_rule_audit_outcome(result),
-                                       resource_version))
+    result = create_prometheus_rule_draft(
+        request, cluster, yaml_text, action=PrometheusRuleRevision.ACTION_UPDATE,
+        namespace=namespace, name=name,
+    )
     if not result.get('ok'):
-        return prometheus_rule_service_error(result)
-    return JsonResponse({'ok': True, 'rule': prometheus_rule_update_summary(result.get('rule'), namespace, name)})
+        return prometheus_rule_service_error(result) if result.get('code') in PROMETHEUS_RULE_SAFE_MESSAGES else api_error(
+            result.get('message', '无法创建修订草稿。'), status=400, code=result.get('code', 'validation_error'),
+        )
+    revision = result['revision']
+    audit(request, '创建PrometheusRule修订草稿', 'PrometheusRuleRevision', revision['id'],
+          prometheus_rule_audit_detail(cluster, namespace, name, 'draft', 'ok', revision['baseline_resource_version']))
+    return JsonResponse({'ok': True, 'revision': revision}, status=202)
 
 
 @api_login_required
@@ -741,13 +754,124 @@ def prometheus_rule_delete(request, cluster_id, namespace, name):
     cluster, error = prometheus_rule_cluster_or_error(cluster_id)
     if error:
         return error
-    result = delete_prometheus_rule(cluster, namespace, name, resource_version)
-    audit(request, 'API删除PrometheusRule', 'K8sCluster', cluster.id,
-          prometheus_rule_audit_detail(cluster, namespace, name, 'delete', prometheus_rule_audit_outcome(result),
-                                       resource_version))
+    result = create_prometheus_rule_draft(
+        request, cluster, '', action=PrometheusRuleRevision.ACTION_DELETE,
+        namespace=namespace, name=name, resource_version=resource_version,
+    )
     if not result.get('ok'):
-        return prometheus_rule_service_error(result)
-    return JsonResponse({'ok': True})
+        return api_error(result.get('message', '无法创建修订草稿。'), status=400,
+                         code=result.get('code', 'validation_error'))
+    revision = result['revision']
+    audit(request, '创建PrometheusRule删除修订草稿', 'PrometheusRuleRevision', revision['id'],
+          prometheus_rule_audit_detail(cluster, namespace, name, 'draft_delete', 'ok', resource_version))
+    return JsonResponse({'ok': True, 'revision': revision}, status=202)
+
+
+def prometheus_revision_or_error(revision_id):
+    revision = PrometheusRuleRevision.objects.select_related('cluster', 'created_by').filter(id=revision_id).first()
+    if not revision:
+        return None, api_error('修订不存在', status=404, code='not_found')
+    return revision, None
+
+
+def prometheus_revision_actor(request):
+    from RemoteLinux.models import User
+    return User.objects.filter(id=request.session.get('user_id')).first()
+
+
+def require_prometheus_governance_admin(request):
+    if not has_role(request, DevOpsRole.ROLE_ADMIN, MODULE_CLUSTER):
+        return api_error('没有 PrometheusRule 配置治理权限', status=403, code='forbidden')
+    return None
+
+
+@api_login_required
+@require_http_methods(['GET'])
+def prometheus_rule_revisions(request, cluster_id):
+    error = require_prometheus_governance_admin(request)
+    if error:
+        return error
+    cluster, error = prometheus_rule_cluster_or_error(cluster_id)
+    if error:
+        return error
+    revisions = PrometheusRuleRevision.objects.filter(cluster=cluster).select_related('created_by')
+    return JsonResponse({'ok': True, 'results': [serialize_revision(item) for item in revisions]})
+
+
+@api_login_required
+@require_http_methods(['POST'])
+def prometheus_rule_revision_submit(request, revision_id):
+    error = require_prometheus_governance_admin(request)
+    if error:
+        return error
+    revision, error = prometheus_revision_or_error(revision_id)
+    if error:
+        return error
+    result = submit_revision(revision, prometheus_revision_actor(request))
+    if not result.get('ok'):
+        return api_error(result['message'], status=403 if result['code'] == 'forbidden' else 400, code=result['code'])
+    audit(request, '提交PrometheusRule修订', 'PrometheusRuleRevision', revision.id,
+          prometheus_rule_audit_detail(revision.cluster, revision.namespace, revision.name, 'submit', 'ok', revision.baseline_resource_version))
+    return JsonResponse({'ok': True, 'revision': result['revision']})
+
+
+@api_login_required
+@require_http_methods(['POST'])
+def prometheus_rule_revision_review(request, revision_id):
+    error = require_prometheus_governance_admin(request)
+    if error:
+        return error
+    payload = request_json(request)
+    if not isinstance(payload, dict):
+        return invalid_json_error()
+    revision, error = prometheus_revision_or_error(revision_id)
+    if error:
+        return error
+    result = review_revision(revision, prometheus_revision_actor(request), payload.get('decision'), payload.get('comment', ''))
+    if not result.get('ok'):
+        return api_error(result['message'], status=400, code=result['code'])
+    audit(request, '复核PrometheusRule修订', 'PrometheusRuleRevision', revision.id,
+          prometheus_rule_audit_detail(revision.cluster, revision.namespace, revision.name, 'review', 'ok', revision.baseline_resource_version))
+    return JsonResponse({'ok': True, 'revision': result['revision']})
+
+
+@api_login_required
+@require_http_methods(['POST'])
+def prometheus_rule_revision_publish(request, revision_id):
+    error = require_prometheus_governance_admin(request)
+    if error:
+        return error
+    revision, error = prometheus_revision_or_error(revision_id)
+    if error:
+        return error
+    result = publish_revision(revision.id, prometheus_revision_actor(request))
+    if not result.get('ok'):
+        status = 409 if result['code'] == 'conflict' else 403 if result['code'] == 'forbidden' else 400
+        audit(request, '发布PrometheusRule修订', 'PrometheusRuleRevision', revision.id,
+              prometheus_rule_audit_detail(revision.cluster, revision.namespace, revision.name, 'publish', result['code'], revision.baseline_resource_version))
+        return api_error(result['message'], status=status, code=result['code'])
+    audit(request, '发布PrometheusRule修订', 'PrometheusRuleRevision', revision.id,
+          prometheus_rule_audit_detail(revision.cluster, revision.namespace, revision.name, 'publish', 'ok', revision.baseline_resource_version))
+    return JsonResponse({'ok': True, 'revision': result['revision']})
+
+
+@api_login_required
+@require_http_methods(['POST'])
+def prometheus_rule_revision_restore(request, revision_id):
+    error = require_prometheus_governance_admin(request)
+    if error:
+        return error
+    revision, error = prometheus_revision_or_error(revision_id)
+    if error:
+        return error
+    result = restore_revision(revision, prometheus_revision_actor(request))
+    if not result.get('ok'):
+        status = 409 if result['code'] == 'conflict' else 400
+        return api_error(result['message'], status=status, code=result['code'])
+    draft = result['revision']
+    audit(request, '恢复PrometheusRule历史修订', 'PrometheusRuleRevision', draft['id'],
+          prometheus_rule_audit_detail(revision.cluster, revision.namespace, revision.name, 'restore_draft', 'ok', draft['baseline_resource_version']))
+    return JsonResponse({'ok': True, 'revision': draft}, status=202)
 
 
 @api_login_required

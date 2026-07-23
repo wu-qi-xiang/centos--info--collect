@@ -1,4 +1,5 @@
 from django import forms
+from django.db.models import Q
 import re
 import posixpath
 import yaml
@@ -26,6 +27,8 @@ from .models import (
     NotificationChannel,
     NotificationTemplate,
     AlertNotificationEscalation,
+    ServiceOnCallPolicy,
+    ServiceOnCallRotationMember,
     ComplianceBaseline,
     ServiceCatalog,
     ServiceSlo,
@@ -419,6 +422,85 @@ class NotificationChannelForm(forms.ModelForm):
         return ''
 
 
+class ServiceOnCallPolicyForm(forms.ModelForm):
+    class Meta:
+        model = ServiceOnCallPolicy
+        fields = (
+            'service',
+            'primary_user',
+            'primary_channel',
+            'backup_user',
+            'backup_channel',
+            'enabled',
+        )
+
+    def __init__(self, *args, **kwargs):
+        super(ServiceOnCallPolicyForm, self).__init__(*args, **kwargs)
+        channels = NotificationChannel.objects.filter(enabled=True).order_by('name')
+        if self.instance and self.instance.pk:
+            channels = NotificationChannel.objects.filter(
+                Q(enabled=True)
+                | Q(id=self.instance.primary_channel_id)
+                | Q(id=self.instance.backup_channel_id)
+            ).order_by('name')
+        self.fields['primary_channel'].queryset = channels
+        self.fields['backup_channel'].queryset = channels
+        self.fields['primary_user'].queryset = User.objects.order_by('user')
+        self.fields['backup_user'].queryset = User.objects.order_by('user')
+
+    def clean(self):
+        cleaned = super(ServiceOnCallPolicyForm, self).clean()
+        primary_user = cleaned.get('primary_user')
+        backup_user = cleaned.get('backup_user')
+        primary_channel = cleaned.get('primary_channel')
+        backup_channel = cleaned.get('backup_channel')
+        if primary_user and backup_user and primary_user == backup_user:
+            self.add_error('backup_user', '主值班人与备值班人不能是同一用户')
+        if primary_channel and backup_channel and primary_channel == backup_channel:
+            self.add_error('backup_channel', '主值班与备值班不能使用同一通知渠道')
+        return cleaned
+
+
+class ServiceOnCallRotationMemberForm(forms.ModelForm):
+    class Meta:
+        model = ServiceOnCallRotationMember
+        fields = ('user', 'channel', 'position', 'enabled')
+
+    def __init__(self, *args, **kwargs):
+        super(ServiceOnCallRotationMemberForm, self).__init__(*args, **kwargs)
+        channels = NotificationChannel.objects.filter(enabled=True).order_by('name')
+        if self.instance and self.instance.pk:
+            channels = NotificationChannel.objects.filter(
+                Q(enabled=True) | Q(id=self.instance.channel_id)
+            ).order_by('name')
+        self.fields['user'].queryset = User.objects.order_by('user')
+        self.fields['channel'].queryset = channels
+
+    def clean_position(self):
+        position = self.cleaned_data.get('position')
+        if position is None or position < 1:
+            raise forms.ValidationError('轮换顺序必须从 1 开始')
+        return position
+
+    def clean(self):
+        cleaned = super(ServiceOnCallRotationMemberForm, self).clean()
+        policy = getattr(self.instance, 'policy', None)
+        position = cleaned.get('position')
+        user = cleaned.get('user')
+        channel = cleaned.get('channel')
+        if policy and user and user == policy.backup_user:
+            self.add_error('user', '轮换成员不能使用固定备值班用户')
+        if policy and channel and channel == policy.backup_channel:
+            self.add_error('channel', '轮换成员不能使用固定备值班通知渠道')
+        if policy and position:
+            duplicate = ServiceOnCallRotationMember.objects.filter(
+                policy=policy, position=position,
+            ).exclude(pk=self.instance.pk).exists()
+            if duplicate:
+                self.add_error('position', '该轮换顺序已被占用')
+        return cleaned
+
+
 class NotificationTemplateForm(forms.ModelForm):
     class Meta:
         model = NotificationTemplate
@@ -535,6 +617,43 @@ class PrometheusRuleDeleteForm(forms.Form):
         if not resource_version:
             raise forms.ValidationError('资源版本无效。')
         return resource_version
+
+
+class PrometheusRuleRevisionReviewForm(forms.Form):
+    decision = forms.ChoiceField(choices=(('approve', '批准'), ('reject', '拒绝')))
+    comment = forms.CharField(max_length=500, required=False)
+
+
+K8S_DISCOVERY_NAMESPACE_PATTERN = re.compile(r'^[a-z0-9]([-a-z0-9]*[a-z0-9])?$')
+K8S_DISCOVERY_WORKLOAD_NAME_PATTERN = re.compile(r'^[a-z0-9]([a-z0-9.-]*[a-z0-9])?$')
+K8S_DISCOVERY_WORKLOAD_KINDS = (
+    ('Deployment', 'Deployment'),
+    ('StatefulSet', 'StatefulSet'),
+    ('DaemonSet', 'DaemonSet'),
+)
+
+
+class K8sServiceDiscoveryForm(forms.Form):
+    cluster = forms.ModelChoiceField(queryset=K8sCluster.objects.all().order_by('name'))
+    namespace = forms.CharField(max_length=63, initial='default')
+
+    def clean_namespace(self):
+        namespace = (self.cleaned_data.get('namespace') or '').strip().lower()
+        if not K8S_DISCOVERY_NAMESPACE_PATTERN.match(namespace):
+            raise forms.ValidationError('命名空间格式无效')
+        return namespace
+
+
+class K8sWorkloadServiceAssociationForm(K8sServiceDiscoveryForm):
+    workload_kind = forms.ChoiceField(choices=K8S_DISCOVERY_WORKLOAD_KINDS)
+    workload_name = forms.CharField(max_length=253)
+    service = forms.ModelChoiceField(queryset=ServiceCatalog.objects.all().order_by('name'))
+
+    def clean_workload_name(self):
+        name = (self.cleaned_data.get('workload_name') or '').strip()
+        if not K8S_DISCOVERY_WORKLOAD_NAME_PATTERN.match(name):
+            raise forms.ValidationError('工作负载名称格式无效')
+        return name
 
 
 class K8sClusterConnectionForm(forms.ModelForm):

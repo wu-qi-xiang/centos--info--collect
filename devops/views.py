@@ -42,6 +42,8 @@ from .forms import (
     HostTagForm,
     K8sClusterConnectionForm,
     K8sClusterForm,
+    K8sServiceDiscoveryForm,
+    K8sWorkloadServiceAssociationForm,
     PrometheusRuleDeleteForm,
     PrometheusRuleYamlForm,
     normalize_prometheus_rule_identity,
@@ -49,6 +51,8 @@ from .forms import (
     NotificationChannelForm,
     NotificationTemplateForm,
     AlertNotificationEscalationForm,
+    ServiceOnCallPolicyForm,
+    ServiceOnCallRotationMemberForm,
     ServiceOperationForm,
     ServiceCatalogForm,
     ServiceSloForm,
@@ -79,6 +83,8 @@ from .models import (
     NotificationLog,
     NotificationTemplate,
     AlertNotificationEscalation,
+    ServiceOnCallPolicy,
+    ServiceOnCallRotationMember,
     ServiceOperation,
     ServiceCatalog,
     ServiceSlo,
@@ -89,7 +95,9 @@ from .models import (
     ComplianceResult,
     IntegrationHealthEvent,
     MaintenanceWindow,
+    PrometheusRuleRevision,
 )
+from .config_governance import create_prometheus_rule_draft, serialize_revision
 from .services import (
     COMMAND_ALLOWED,
     audit,
@@ -133,10 +141,11 @@ from .services import (
     summarize_integration_health,
     initiate_runbook,
     RunbookInitiationError,
-    delete_prometheus_rule,
     get_prometheus_rule,
     list_prometheus_rules,
-    replace_prometheus_rule,
+    inspect_oncall_coverage,
+    discover_k8s_service_candidates,
+    discover_and_associate_k8s_service_candidate,
 )
 
 
@@ -215,6 +224,12 @@ K8S_SAFE_VIEW_FIELDS = (
     'labels', 'annotations', 'ip_address',
 )
 K8S_OFFLINE_DETAIL_MESSAGE = '集群当前处于离线状态，请测试连接或强制刷新后重试。'
+K8S_DISCOVERY_SAFE_CANDIDATE_FIELDS = (
+    'cluster_id', 'cluster_name', 'namespace', 'workload_kind', 'workload_name',
+    'status', 'replicas', 'mapped_service_id', 'mapped_service_name',
+)
+K8S_DISCOVERY_WORKLOAD_KINDS = frozenset(('Deployment', 'StatefulSet', 'DaemonSet'))
+K8S_DISCOVERY_NAME_PATTERN = re.compile(r'^[a-z0-9]([a-z0-9.-]*[a-z0-9])?$')
 
 
 def clean_k8s_namespace(value, fallback='default'):
@@ -223,6 +238,37 @@ def clean_k8s_namespace(value, fallback='default'):
     if namespace and len(namespace) <= 63 and re.match(r'^[a-z0-9]([-a-z0-9]*[a-z0-9])?$', namespace):
         return namespace
     return fallback if re.match(r'^[a-z0-9]([-a-z0-9]*[a-z0-9])?$', fallback) else 'default'
+
+
+def safe_k8s_discovery_candidates(cluster, namespace, candidates):
+    """Accept only the constrained discovery payload before handing it to a template."""
+    safe_candidates = []
+    for candidate in candidates or []:
+        if not isinstance(candidate, dict):
+            continue
+        workload_kind = candidate.get('workload_kind')
+        workload_name = (candidate.get('workload_name') or '').strip()
+        if (
+                candidate.get('cluster_id') != cluster.id
+                or candidate.get('namespace') != namespace
+                or workload_kind not in K8S_DISCOVERY_WORKLOAD_KINDS
+                or not K8S_DISCOVERY_NAME_PATTERN.match(workload_name)
+                or len(workload_name) > 253):
+            continue
+        item = {
+            key: candidate.get(key)
+            for key in K8S_DISCOVERY_SAFE_CANDIDATE_FIELDS
+            if key in candidate
+        }
+        item['cluster_id'] = cluster.id
+        item['cluster_name'] = cluster.name
+        item['namespace'] = namespace
+        item['workload_kind'] = workload_kind
+        item['workload_name'] = workload_name
+        item['status'] = item.get('status') or '-'
+        item['replicas'] = item.get('replicas') or '-'
+        safe_candidates.append(item)
+    return safe_candidates
 
 
 def clean_k8s_created_at(value):
@@ -268,6 +314,13 @@ def require_devops_role(request, minimum_role, module=''):
         return None
     audit(request, '权限拒绝', 'DevOpsRole', '', minimum_role)
     return HttpResponseForbidden('没有足够的 DevOps 权限')
+
+
+def require_k8s_service_discovery_admin(request):
+    denied = require_devops_role(request, DevOpsRole.ROLE_ADMIN, MODULE_CLUSTER)
+    if denied:
+        return denied
+    return require_devops_role(request, DevOpsRole.ROLE_ADMIN, MODULE_SERVICE)
 
 
 def host_forbidden(request, detail=''):
@@ -329,6 +382,29 @@ def notification_channel_audit_detail(channel, action):
 
 def notification_governance_audit_detail(action, detail):
     return '%s %s' % (action, detail)
+
+
+def oncall_policy_audit_detail(policy, action):
+    return '%s 服务=%s, 主值班人=%s, 主渠道=%s, 备值班人=%s, 备渠道=%s, 启用=%s' % (
+        action,
+        policy.service.name,
+        policy.primary_user.user,
+        policy.primary_channel.name,
+        policy.backup_user.user,
+        policy.backup_channel.name,
+        bool(policy.enabled),
+    )
+
+
+def oncall_rotation_member_audit_detail(member, action):
+    return '%s 服务=%s, 用户=%s, 渠道=%s, 顺序=%s, 启用=%s' % (
+        action,
+        member.policy.service.name,
+        member.user.user,
+        member.channel.name,
+        member.position,
+        bool(member.enabled),
+    )
 
 
 def csv_safe_cell(value):
@@ -1770,6 +1846,179 @@ def notification_channels(request):
 
 
 @session_login_required
+def oncall_policies(request):
+    denied = require_devops_role(request, DevOpsRole.ROLE_ADMIN, MODULE_SECURITY)
+    if denied:
+        return denied
+    return render(request, 'devops/oncall.html', {
+        'policies': ServiceOnCallPolicy.objects.select_related(
+            'service', 'primary_user', 'primary_channel', 'backup_user', 'backup_channel'),
+        'create_form': ServiceOnCallPolicyForm(),
+    })
+
+
+@session_login_required
+def oncall_coverage(request):
+    denied = require_devops_role(request, DevOpsRole.ROLE_ADMIN, MODULE_SECURITY)
+    if denied:
+        return denied
+    if request.method != 'GET':
+        return HttpResponseNotAllowed(['GET'])
+    return render(request, 'devops/oncall.html', {
+        'coverage_mode': True,
+        'coverage_rows': inspect_oncall_coverage(),
+    })
+
+
+@session_login_required
+def oncall_policy_create(request):
+    denied = require_devops_role(request, DevOpsRole.ROLE_ADMIN, MODULE_SECURITY)
+    if denied:
+        return denied
+    if request.method != 'POST':
+        return HttpResponseNotAllowed(['POST'])
+    form = ServiceOnCallPolicyForm(request.POST)
+    if form.is_valid():
+        policy = form.save()
+        audit(request, '创建服务值班策略', 'ServiceOnCallPolicy', policy.id,
+              oncall_policy_audit_detail(policy, '创建'))
+        return redirect('devops:oncall_policies')
+    return render(request, 'devops/oncall.html', {
+        'policies': ServiceOnCallPolicy.objects.select_related(
+            'service', 'primary_user', 'primary_channel', 'backup_user', 'backup_channel'),
+        'create_form': form,
+    }, status=400)
+
+
+@session_login_required
+def oncall_policy_update(request, id):
+    denied = require_devops_role(request, DevOpsRole.ROLE_ADMIN, MODULE_SECURITY)
+    if denied:
+        return denied
+    policy = get_object_or_404(ServiceOnCallPolicy, id=id)
+    if request.method == 'GET':
+        return render(request, 'devops/oncall.html', {
+            'policies': ServiceOnCallPolicy.objects.select_related(
+                'service', 'primary_user', 'primary_channel', 'backup_user', 'backup_channel'),
+            'create_form': ServiceOnCallPolicyForm(),
+            'editing_policy': policy,
+            'edit_form': ServiceOnCallPolicyForm(instance=policy),
+        })
+    if request.method != 'POST':
+        return HttpResponseNotAllowed(['GET', 'POST'])
+    form = ServiceOnCallPolicyForm(request.POST, instance=policy)
+    if form.is_valid():
+        policy = form.save()
+        audit(request, '更新服务值班策略', 'ServiceOnCallPolicy', policy.id,
+              oncall_policy_audit_detail(policy, '更新'))
+        return redirect('devops:oncall_policies')
+    return render(request, 'devops/oncall.html', {
+        'policies': ServiceOnCallPolicy.objects.select_related(
+            'service', 'primary_user', 'primary_channel', 'backup_user', 'backup_channel'),
+        'create_form': ServiceOnCallPolicyForm(),
+        'editing_policy': policy,
+        'edit_form': form,
+    }, status=400)
+
+
+@session_login_required
+def oncall_policy_delete(request, id):
+    denied = require_devops_role(request, DevOpsRole.ROLE_ADMIN, MODULE_SECURITY)
+    if denied:
+        return denied
+    if request.method != 'POST':
+        return HttpResponseNotAllowed(['POST'])
+    policy = get_object_or_404(ServiceOnCallPolicy, id=id)
+    audit(request, '删除服务值班策略', 'ServiceOnCallPolicy', policy.id,
+          oncall_policy_audit_detail(policy, '删除'))
+    policy.delete()
+    return redirect('devops:oncall_policies')
+
+
+def oncall_rotation_members_context(policy, form=None, editing_member=None):
+    return {
+        'policies': ServiceOnCallPolicy.objects.select_related(
+            'service', 'primary_user', 'primary_channel', 'backup_user', 'backup_channel'),
+        'create_form': ServiceOnCallPolicyForm(),
+        'rotation_policy': policy,
+        'rotation_members': policy.rotation_members.select_related('user', 'channel').all(),
+        'rotation_form': form or ServiceOnCallRotationMemberForm(),
+        'editing_rotation_member': editing_member,
+    }
+
+
+@session_login_required
+def oncall_rotation_members(request, policy_id):
+    denied = require_devops_role(request, DevOpsRole.ROLE_ADMIN, MODULE_SECURITY)
+    if denied:
+        return denied
+    if request.method != 'GET':
+        return HttpResponseNotAllowed(['GET'])
+    policy = get_object_or_404(ServiceOnCallPolicy.objects.select_related('service'), id=policy_id)
+    return render(request, 'devops/oncall.html', oncall_rotation_members_context(policy))
+
+
+@session_login_required
+def oncall_rotation_member_create(request, policy_id):
+    denied = require_devops_role(request, DevOpsRole.ROLE_ADMIN, MODULE_SECURITY)
+    if denied:
+        return denied
+    if request.method != 'POST':
+        return HttpResponseNotAllowed(['POST'])
+    policy = get_object_or_404(ServiceOnCallPolicy.objects.select_related('service'), id=policy_id)
+    member = ServiceOnCallRotationMember(policy=policy)
+    form = ServiceOnCallRotationMemberForm(request.POST, instance=member)
+    if form.is_valid():
+        member = form.save()
+        audit(request, '创建服务值班轮换成员', 'ServiceOnCallRotationMember', member.id,
+              oncall_rotation_member_audit_detail(member, '创建'))
+        return redirect('devops:oncall_rotation_members', policy_id=policy.id)
+    return render(request, 'devops/oncall.html',
+                  oncall_rotation_members_context(policy, form=form), status=400)
+
+
+@session_login_required
+def oncall_rotation_member_update(request, id):
+    denied = require_devops_role(request, DevOpsRole.ROLE_ADMIN, MODULE_SECURITY)
+    if denied:
+        return denied
+    member = get_object_or_404(
+        ServiceOnCallRotationMember.objects.select_related('policy__service', 'user', 'channel'), id=id)
+    policy = member.policy
+    if request.method == 'GET':
+        return render(request, 'devops/oncall.html', oncall_rotation_members_context(
+            policy, form=ServiceOnCallRotationMemberForm(instance=member), editing_member=member,
+        ))
+    if request.method != 'POST':
+        return HttpResponseNotAllowed(['GET', 'POST'])
+    form = ServiceOnCallRotationMemberForm(request.POST, instance=member)
+    if form.is_valid():
+        member = form.save()
+        audit(request, '更新服务值班轮换成员', 'ServiceOnCallRotationMember', member.id,
+              oncall_rotation_member_audit_detail(member, '更新'))
+        return redirect('devops:oncall_rotation_members', policy_id=policy.id)
+    return render(request, 'devops/oncall.html', oncall_rotation_members_context(
+        policy, form=form, editing_member=member,
+    ), status=400)
+
+
+@session_login_required
+def oncall_rotation_member_delete(request, id):
+    denied = require_devops_role(request, DevOpsRole.ROLE_ADMIN, MODULE_SECURITY)
+    if denied:
+        return denied
+    if request.method != 'POST':
+        return HttpResponseNotAllowed(['POST'])
+    member = get_object_or_404(
+        ServiceOnCallRotationMember.objects.select_related('policy__service', 'user', 'channel'), id=id)
+    policy_id = member.policy_id
+    audit(request, '删除服务值班轮换成员', 'ServiceOnCallRotationMember', member.id,
+          oncall_rotation_member_audit_detail(member, '删除'))
+    member.delete()
+    return redirect('devops:oncall_rotation_members', policy_id=policy_id)
+
+
+@session_login_required
 def integration_health(request):
     denied = require_devops_role(request, DevOpsRole.ROLE_ADMIN, MODULE_SECURITY)
     if denied:
@@ -2003,6 +2252,42 @@ def prometheus_rules(request):
 
 
 @session_login_required
+def prometheus_rule_revisions(request):
+    """Render revision metadata only; all governance actions remain API-backed."""
+    denied = require_devops_role(request, DevOpsRole.ROLE_ADMIN, MODULE_CLUSTER)
+    if denied:
+        return denied
+    clusters = K8sCluster.objects.all().order_by('name')
+    selected_cluster = None
+    cluster_id = request.GET.get('cluster', '').strip()
+    if cluster_id:
+        try:
+            selected_cluster = clusters.filter(id=int(cluster_id)).first()
+        except (TypeError, ValueError):
+            return HttpResponseBadRequest('集群参数无效。')
+    if selected_cluster is None:
+        selected_cluster = clusters.first()
+    revisions = []
+    if selected_cluster:
+        for revision in PrometheusRuleRevision.objects.filter(cluster=selected_cluster).select_related('created_by'):
+            item = serialize_revision(revision)
+            item['api_urls'] = {
+                'submit': reverse('devops:prometheus_rule_revision_submit', args=[revision.id]),
+                'review': reverse('devops:prometheus_rule_revision_review', args=[revision.id]),
+                'publish': reverse('devops:prometheus_rule_revision_publish', args=[revision.id]),
+                'restore': reverse('devops:prometheus_rule_revision_restore', args=[revision.id]),
+            }
+            revisions.append(item)
+    return render(request, 'devops/prometheus_rule_revisions.html', {
+        'clusters': clusters,
+        'selected_cluster': selected_cluster,
+        'revisions': revisions,
+        'api_revisions_url': reverse('devops:api_prometheus_rule_revisions', args=[selected_cluster.id]) if selected_cluster else '',
+        'can_manage': True,
+    })
+
+
+@session_login_required
 def prometheus_rule_detail(request, cluster_id, namespace, name):
     denied = require_devops_role(request, DevOpsRole.ROLE_VIEWER, MODULE_CLUSTER)
     if denied:
@@ -2048,17 +2333,23 @@ def prometheus_rule_update(request, cluster_id, namespace, name):
             status=400,
         )
     yaml_text = form.cleaned_data['yaml']
-    result = replace_prometheus_rule(cluster, namespace, name, yaml_text)
-    code = result.get('code', 'offline')
+    result = create_prometheus_rule_draft(
+        request, cluster, yaml_text, action=PrometheusRuleRevision.ACTION_UPDATE,
+        namespace=namespace, name=name,
+    )
     if result.get('ok'):
-        resource_version = normalize_prometheus_rule_resource_version(
-            ((result.get('rule') or {}).get('metadata') or {}).get('resourceVersion', ''),
+        revision = result['revision']
+        audit(request, '创建PrometheusRule修订草稿', 'PrometheusRuleRevision', revision['id'],
+              _prometheus_rule_audit_detail(cluster, namespace, name, 'draft', 'ok',
+                                            revision['baseline_resource_version']))
+        return render(
+            request, 'devops/prometheus_rules.html',
+            _prometheus_rule_detail_context(
+                request, cluster, namespace, name, yaml_text=yaml_text, yaml_form=form,
+                error='已创建修订草稿，等待另一名管理员复核并显式发布。',
+            ), status=202,
         )
-        audit(request, '更新PrometheusRule', 'K8sCluster', cluster.id,
-              _prometheus_rule_audit_detail(cluster, namespace, name, 'update', 'ok', resource_version))
-        return redirect('devops:prometheus_rule_detail', cluster_id=cluster.id, namespace=namespace, name=name)
-    audit(request, '更新PrometheusRule', 'K8sCluster', cluster.id,
-          _prometheus_rule_audit_detail(cluster, namespace, name, 'update', _prometheus_rule_audit_outcome(code)))
+    code = result.get('code', 'invalid_yaml')
     status = _prometheus_rule_failure_status(code)
     return render(
         request, 'devops/prometheus_rules.html',
@@ -2091,14 +2382,22 @@ def prometheus_rule_delete(request, cluster_id, namespace, name):
             status=400,
         )
     resource_version = form.cleaned_data['resource_version']
-    result = delete_prometheus_rule(cluster, namespace, name, resource_version)
-    code = result.get('code', 'offline')
-    audit(request, '删除PrometheusRule', 'K8sCluster', cluster.id,
-          _prometheus_rule_audit_detail(cluster, namespace, name, 'delete',
-                                        'ok' if result.get('ok') else _prometheus_rule_audit_outcome(code),
-                                        resource_version))
+    result = create_prometheus_rule_draft(
+        request, cluster, '', action=PrometheusRuleRevision.ACTION_DELETE,
+        namespace=namespace, name=name, resource_version=resource_version,
+    )
     if result.get('ok'):
-        return redirect('%s?cluster=%s' % (reverse('devops:prometheus_rules'), cluster.id))
+        revision = result['revision']
+        audit(request, '创建PrometheusRule删除修订草稿', 'PrometheusRuleRevision', revision['id'],
+              _prometheus_rule_audit_detail(cluster, namespace, name, 'draft_delete', 'ok', resource_version))
+        return render(
+            request, 'devops/prometheus_rules.html',
+            _prometheus_rule_detail_context(
+                request, cluster, namespace, name, delete_form=form,
+                error='已创建删除修订草稿，等待另一名管理员复核并显式发布。', resource_version=resource_version,
+            ), status=202,
+        )
+    code = result.get('code', 'offline')
     status = _prometheus_rule_failure_status(code)
     return render(
         request, 'devops/prometheus_rules.html',
@@ -2129,6 +2428,106 @@ def cluster_list_context(request, form=None, editing_cluster=None):
         'editing_cluster': editing_cluster,
     })
     return context
+
+
+def k8s_workload_service_association_form(request, *args, **kwargs):
+    form = K8sWorkloadServiceAssociationForm(*args, **kwargs)
+    form.fields['service'].queryset = topology_service_choices(request)
+    return form
+
+
+def k8s_service_discovery_context(request, discovery_form, candidates=None, error_message='', association_form=None):
+    return {
+        'discovery_form': discovery_form,
+        'candidates': candidates or [],
+        'association_form': association_form or k8s_workload_service_association_form(request),
+        'error_message': error_message,
+    }
+
+
+@session_login_required
+def k8s_service_discovery(request):
+    denied = require_k8s_service_discovery_admin(request)
+    if denied:
+        return denied
+    if request.method != 'GET':
+        return HttpResponseNotAllowed(['GET'])
+
+    has_selection = bool(request.GET.get('cluster') or request.GET.get('namespace'))
+    form = K8sServiceDiscoveryForm(request.GET if has_selection else None)
+    candidates = []
+    error_message = ''
+    if has_selection and form.is_valid():
+        cluster = form.cleaned_data['cluster']
+        namespace = form.cleaned_data['namespace']
+        if cluster.status == K8sCluster.STATUS_OFFLINE:
+            error_message = '集群当前离线，暂时无法发现工作负载。'
+            audit(request, '发现K8s服务候选', 'K8sCluster', cluster.id,
+                  '命名空间=%s, 结果=offline' % namespace)
+        else:
+            result = discover_k8s_service_candidates(cluster, namespace)
+        if cluster.status != K8sCluster.STATUS_OFFLINE and result.get('ok'):
+            candidates = safe_k8s_discovery_candidates(cluster, namespace, result.get('candidates'))
+            audit(request, '发现K8s服务候选', 'K8sCluster', cluster.id,
+                  '命名空间=%s, 候选数=%s, 结果=success' % (namespace, len(candidates)))
+        elif cluster.status != K8sCluster.STATUS_OFFLINE:
+            error_message = '发现工作负载失败，请确认集群连接后重试。'
+            audit(request, '发现K8s服务候选', 'K8sCluster', cluster.id,
+                  '命名空间=%s, 结果=failed' % namespace)
+    return render(request, 'devops/k8s_service_discovery.html',
+                  k8s_service_discovery_context(request, form, candidates, error_message))
+
+
+@session_login_required
+def k8s_service_discovery_associate(request):
+    denied = require_k8s_service_discovery_admin(request)
+    if denied:
+        return denied
+    if request.method != 'POST':
+        return HttpResponseNotAllowed(['POST'])
+    form = k8s_workload_service_association_form(request, request.POST)
+    if not form.is_valid():
+        return render(request, 'devops/k8s_service_discovery.html',
+                      k8s_service_discovery_context(
+                          request, K8sServiceDiscoveryForm(), association_form=form,
+                          error_message='关联参数无效，请重新发现后再试。'), status=400)
+
+    cluster = form.cleaned_data['cluster']
+    namespace = form.cleaned_data['namespace']
+    service = form.cleaned_data['service']
+    workload_kind = form.cleaned_data['workload_kind']
+    workload_name = form.cleaned_data['workload_name']
+    detail = '命名空间=%s, 类型=%s, 名称=%s, 服务=%s(%s)' % (
+        namespace, workload_kind, workload_name, service.name, service.id,
+    )
+    if cluster.status == K8sCluster.STATUS_OFFLINE:
+        audit(request, '关联K8s工作负载服务', 'K8sCluster', cluster.id,
+              '%s, 结果=offline' % detail)
+        return render(request, 'devops/k8s_service_discovery.html',
+                      k8s_service_discovery_context(
+                          request, K8sServiceDiscoveryForm(initial={
+                              'cluster': cluster, 'namespace': namespace,
+                          }), association_form=form,
+                          error_message='集群当前离线，暂时无法关联工作负载。'), status=400)
+    result = discover_and_associate_k8s_service_candidate(
+        service, cluster, namespace, workload_kind, workload_name,
+    )
+    if not result.get('ok'):
+        audit(request, '关联K8s工作负载服务', 'K8sCluster', cluster.id,
+              '%s, 结果=failed' % detail)
+        return render(request, 'devops/k8s_service_discovery.html',
+                      k8s_service_discovery_context(
+                          request, K8sServiceDiscoveryForm(initial={
+                              'cluster': cluster, 'namespace': namespace,
+                          }), association_form=form,
+                          error_message='工作负载已关联到其他服务或当前不可关联。'), status=400)
+    outcome = 'created' if result.get('code') == 'created' else 'existing'
+    audit(request, '关联K8s工作负载服务', 'K8sCluster', cluster.id,
+          '%s, 结果=%s' % (detail, outcome))
+    return redirect('%s?%s' % (
+        reverse('devops:k8s_service_discovery'),
+        urlparse.urlencode({'cluster': cluster.id, 'namespace': namespace}),
+    ))
 
 
 def _save_k8s_cluster_connection(request, form):

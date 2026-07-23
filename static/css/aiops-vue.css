@@ -104,6 +104,115 @@
     font-weight: 800;
 }
 
+.aiops-panel-heading {
+    display: flex;
+    align-items: start;
+    justify-content: space-between;
+    gap: 12px;
+    margin-bottom: 12px;
+}
+
+.aiops-panel-heading h2 {
+    margin-bottom: 4px;
+}
+
+.aiops-panel-heading p {
+    margin: 0;
+    font-size: 13px;
+}
+
+.aiops-impact {
+    display: grid;
+    gap: 10px;
+    padding: 12px 0;
+    border-top: 1px solid var(--ops-border, #e2e8f0);
+}
+
+.aiops-impact:first-of-type {
+    border-top: 0;
+    padding-top: 0;
+}
+
+.aiops-impact-main {
+    display: grid;
+    gap: 7px;
+}
+
+.aiops-impact-title {
+    display: flex;
+    align-items: start;
+    justify-content: space-between;
+    gap: 12px;
+}
+
+.aiops-impact-title strong {
+    min-width: 0;
+    overflow-wrap: anywhere;
+}
+
+.aiops-impact-main p {
+    margin: 0;
+}
+
+.aiops-impact-meta {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 5px 12px;
+    color: var(--ops-muted, #64748b);
+    font-size: 12px;
+}
+
+.aiops-impact-timeline {
+    display: grid;
+    gap: 8px;
+    list-style: none;
+    margin: 0;
+    padding: 0 0 0 16px;
+    border-left: 2px solid #dbeafe;
+}
+
+.aiops-impact-timeline li {
+    position: relative;
+    display: grid;
+    grid-template-columns: minmax(0, 1fr) auto;
+    align-items: center;
+    gap: 12px;
+    padding-left: 10px;
+}
+
+.aiops-impact-timeline li::before {
+    position: absolute;
+    left: -22px;
+    width: 8px;
+    height: 8px;
+    border: 2px solid #2563eb;
+    border-radius: 50%;
+    background: #fff;
+    content: '';
+}
+
+.aiops-impact-timeline li > div {
+    display: grid;
+    gap: 3px;
+    min-width: 0;
+}
+
+.aiops-impact-timeline span,
+.aiops-impact-timeline small {
+    color: var(--ops-muted, #64748b);
+    overflow-wrap: anywhere;
+}
+
+.aiops-impact-timeline small {
+    font-size: 12px;
+}
+
+.aiops-evidence-link {
+    font-size: 12px;
+    font-weight: 700;
+    white-space: nowrap;
+}
+
 .aiops-capability,
 .aiops-row,
 .aiops-runbook,
@@ -262,9 +371,15 @@
 @media (max-width: 640px) {
     .aiops-head,
     .aiops-row,
-    .aiops-capacity {
+    .aiops-capacity,
+    .aiops-impact-timeline {
         grid-template-columns: 1fr;
         display: grid;
+    }
+
+    .aiops-panel-heading,
+    .aiops-impact-title {
+        align-items: start;
     }
 
     .aiops-kpis {

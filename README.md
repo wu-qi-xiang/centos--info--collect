@@ -79,6 +79,10 @@ K8s 集群详情查询结果使用本地文件缓存，默认目录为 `<BASE_DI
 
 缓存只保存页面展示所需的安全资源摘要，不应包含 kubeconfig、访问令牌、客户端证书或 Secret 原文。容器内默认目录会随容器销毁而丢失；如需跨进程重启或容器重建保留缓存，应将 `K8S_CACHE_DIR` 指向持久化挂载目录。
 
+## K8s 服务发现
+
+K8s 服务发现仅只读扫描所选集群和命名空间中的 Deployment、StatefulSet、DaemonSet，需同时具备集群模块和服务模块管理员权限。发现结果必须由管理员显式关联到已有 `ServiceCatalog`；功能不会自动创建或覆盖服务目录记录。部署前执行 `python manage.py migrate`，以应用工作负载服务映射迁移 `devops.0030_k8sworkloadservicemapping`。
+
 ## DevOps 后台任务
 
 命令执行、批量任务、文件分发、发布部署和回滚会写入数据库队列，由独立的 `python manage.py devops_worker` Worker 执行；测试环境仍由 `DEVOPS_SYNC_TASKS` 同步执行。Worker 使用持久化任务和原子领取语义，Web 服务重启不会丢失已入队工作；重复触发已领取或已有结果的任务不会再次产生远程执行记录。
@@ -116,6 +120,12 @@ python manage.py crontab add
 python manage.py crontab show
 python manage.py crontab remove
 ```
+
+值班升级扫描也随 `django-crontab` 每分钟运行：命中服务级值班策略的告警先通知主值班人，15 分钟仍未确认时仅向备值班人升级一次。告警确认、关闭、静默或恢复后不会继续升级；未配置服务策略的告警保持原有全局通知路由。部署或升级后重新执行 `python manage.py crontab add` 使新增任务生效，并通过 `python manage.py crontab show` 确认注册；扫描摘要写入 `/tmp/oncall_escalation.log`，单次扫描异常会记录失败摘要且不会阻塞其它定时任务。通知渠道配置和密钥不会写入 cron 输出。
+
+服务值班策略可选配置每周主值班轮换成员，按顺序在 `Asia/Shanghai` 时区每周一 `00:00` 选择当前主值班人；固定备值班人保持不变。轮换名单为空时继续使用静态主值班人。部署前执行 `python manage.py migrate`，以应用轮换成员迁移 `devops.0031_serviceoncallrotationmember`。
+
+“服务值班”中的覆盖巡检仅向安全管理员展示当前服务配置风险，例如缺少或停用的值班策略、停用的主备通知渠道、无可用成员的轮换名单和轮换顺序断档。巡检实时只读计算，不创建定时任务、不发送通知、不修改值班策略；它检查数据库配置，不能证明外部通知渠道当前可达。
 
 DevOps“安全策略”页面支持服务运行状态和文件 SHA-256 合规基线。管理员可手动扫描、编辑或删除基线；系统每天 `03:30` 扫描已绑定主机，仅记录漂移或扫描失败，不自动修复。漂移会生成告警，恢复后自动关闭对应告警。
 

@@ -1,5 +1,5 @@
 import base64
-from datetime import timedelta
+from datetime import datetime, timedelta
 from decimal import Decimal, InvalidOperation
 import hashlib
 import hmac
@@ -12,10 +12,7 @@ import tempfile
 import time
 import posixpath
 import shlex
-try:
-    import yaml
-except ImportError:
-    yaml = None
+from zoneinfo import ZoneInfo
 try:
     from urllib import parse as urlparse
 except ImportError:
@@ -27,7 +24,7 @@ except ImportError:
 
 from django.conf import settings
 from django.core.cache import cache
-from django.db import models, transaction
+from django.db import IntegrityError, models, transaction
 from django.utils import timezone
 try:
     import requests
@@ -76,10 +73,12 @@ from .models import (
     FileDistributionResult,
     MetricSample,
     K8sCluster,
+    K8sWorkloadServiceMapping,
     NotificationChannel,
     NotificationLog,
     NotificationTemplate,
     AlertNotificationEscalation,
+    AlertOnCallEscalation,
     ComplianceBaseline,
     ComplianceResult,
     DevOpsProject,
@@ -89,11 +88,14 @@ from .models import (
     IntegrationHealthEvent,
     MaintenanceWindow,
     ServiceCatalog,
+    ServiceOnCallPolicy,
+    ServiceOnCallRotationMember,
     ServiceSlo,
     ServiceSloEvaluation,
     RunbookTemplate,
 )
-from RemoteLinux.models import NewLinux
+from RemoteLinux.models import NewLinux, User
+from . import prometheus_rules as _prometheus_rules
 
 
 DANGEROUS_COMMANDS = (
@@ -127,23 +129,16 @@ K8S_SAFE_RESOURCE_FIELDS = (
     'labels', 'annotations', 'ip_address',
 )
 K8S_NAMESPACE_PATTERN = re.compile(r'^[a-z0-9]([-a-z0-9]*[a-z0-9])?$')
+K8S_WORKLOAD_NAME_PATTERN = re.compile(r'^[a-z0-9]([a-z0-9.-]*[a-z0-9])?$')
 K8S_DETAIL_CACHE_TIMEOUT_DEFAULT = 86400
 K8S_DETAIL_CACHE_SCHEMA_VERSION = 'v4'
-PROMETHEUS_RULE_GROUP = 'monitoring.coreos.com'
-PROMETHEUS_RULE_VERSION = 'v1'
-PROMETHEUS_RULE_PLURAL = 'prometheusrules'
-PROMETHEUS_RULE_KIND = 'PrometheusRule'
-PROMETHEUS_RULE_API_VERSION = '%s/%s' % (
-    PROMETHEUS_RULE_GROUP,
-    PROMETHEUS_RULE_VERSION,
+K8S_DISCOVERABLE_WORKLOAD_KINDS = (
+    ('Deployment', 'list_namespaced_deployment'),
+    ('StatefulSet', 'list_namespaced_stateful_set'),
+    ('DaemonSet', 'list_namespaced_daemon_set'),
 )
-PROMETHEUS_RULE_LIST_MAX_PAGES = 1000
-K8S_RESOURCE_NAME_PATTERN = re.compile(
-    r'^[a-z0-9]([a-z0-9.-]*[a-z0-9])?$'
-)
-# Kubernetes resourceVersion is opaque. Keep it bounded, while permitting the
-# printable Unicode and symbol values returned by Kubernetes implementations.
-PROMETHEUS_RULE_RESOURCE_VERSION_MAX_LENGTH = 253
+ONCALL_ROTATION_TIMEZONE = ZoneInfo('Asia/Shanghai')
+ONCALL_ROTATION_EPOCH = datetime(2024, 1, 1, tzinfo=ONCALL_ROTATION_TIMEZONE)
 
 
 def _k8s_detail_cache_timeout():
@@ -201,303 +196,249 @@ def _k8s_temp_config(kubeconfig_text):
     return path
 
 
-def _prometheus_rule_result(ok=False, code='', message='', **values):
-    result = {'ok': ok, 'code': code, 'message': message}
-    result.update(values)
+def _safe_k8s_workload_name(value):
+    if not isinstance(value, str):
+        return ''
+    name = (value or '').strip()
+    if name and len(name) <= 253 and K8S_WORKLOAD_NAME_PATTERN.match(name):
+        return name
+    return ''
+
+
+def _workload_replica_summary(item, kind):
+    spec = getattr(item, 'spec', None)
+    status = getattr(item, 'status', None)
+    if kind == K8sWorkloadServiceMapping.KIND_DAEMON_SET:
+        desired = getattr(status, 'desired_number_scheduled', 0) or 0
+        ready = getattr(status, 'number_ready', 0) or 0
+    else:
+        desired = getattr(spec, 'replicas', 0) or 0
+        ready = getattr(status, 'ready_replicas', 0) or 0
+    try:
+        desired = max(0, int(desired))
+    except (TypeError, ValueError):
+        desired = 0
+    try:
+        ready = max(0, int(ready))
+    except (TypeError, ValueError):
+        ready = 0
+    return ready, desired
+
+
+def discover_k8s_service_candidates(cluster, namespace, timeout=8):
+    """Read only the minimum workload identity needed for service association."""
+    selected_namespace = safe_k8s_namespace(namespace) if isinstance(namespace, str) else ''
+    result = {'ok': False, 'message': '', 'candidates': []}
+    if not isinstance(cluster, K8sCluster):
+        result['message'] = '集群参数无效'
+        return result
+    if not selected_namespace or selected_namespace != namespace:
+        result['message'] = '命名空间无效'
+        return result
+    kubeconfig = cluster.decrypted_kubeconfig or ''
+    if not kubeconfig:
+        result['message'] = 'kubeconfig 无法解密或为空'
+        return result
+    try:
+        from kubernetes import client, config
+    except ImportError:
+        result['message'] = '缺少 kubernetes Python 依赖，无法发现工作负载'
+        return result
+
+    path = ''
+    api_client = None
+    try:
+        path = _k8s_temp_config(kubeconfig)
+        api_client = config.new_client_from_config(config_file=path)
+        apps_api = client.AppsV1Api(api_client)
+        candidates = []
+        for kind, method_name in K8S_DISCOVERABLE_WORKLOAD_KINDS:
+            response = getattr(apps_api, method_name)(
+                namespace=selected_namespace,
+                _request_timeout=timeout,
+            )
+            for item in getattr(response, 'items', []) or []:
+                name = _safe_k8s_workload_name(_k8s_name(item))
+                if not name:
+                    continue
+                ready, desired = _workload_replica_summary(item, kind)
+                candidates.append({
+                    'cluster_id': cluster.id,
+                    'cluster_name': cluster.name,
+                    'namespace': selected_namespace,
+                    'workload_kind': kind,
+                    'workload_name': name,
+                    'status': '运行中' if desired > 0 and ready == desired else '异常',
+                    'replicas': '%s / %s' % (ready, desired),
+                    'mapped_service_id': None,
+                    'mapped_service_name': '',
+                })
+        mappings = K8sWorkloadServiceMapping.objects.filter(
+            cluster=cluster,
+            namespace=selected_namespace,
+        ).select_related('service')
+        mappings_by_identity = {
+            (mapping.workload_kind, mapping.workload_name): mapping
+            for mapping in mappings
+        }
+        for candidate in candidates:
+            mapping = mappings_by_identity.get((
+                candidate['workload_kind'], candidate['workload_name'],
+            ))
+            if mapping:
+                candidate['mapped_service_id'] = mapping.service_id
+                candidate['mapped_service_name'] = mapping.service.name
+        candidates.sort(key=lambda item: (
+            item['workload_kind'], item['workload_name'],
+        ))
+        result['ok'] = True
+        result['message'] = '工作负载发现成功'
+        result['candidates'] = candidates
+    except Exception as exc:
+        result['message'] = _safe_k8s_error(exc, '工作负载发现失败')
+    finally:
+        close = getattr(api_client, 'close', None)
+        if callable(close):
+            try:
+                close()
+            except Exception:
+                pass
+        if path:
+            try:
+                os.unlink(path)
+            except OSError:
+                pass
     return result
 
 
-def _safe_prometheus_rule_identity(namespace, name):
-    namespace = safe_k8s_namespace(namespace)
-    name = (name or '').strip()
-    if not namespace or not name or len(name) > 253 or not K8S_RESOURCE_NAME_PATTERN.match(name):
-        return None, None
-    return namespace, name
-
-
-def normalize_prometheus_rule_resource_version(value):
-    value = value.strip() if isinstance(value, str) else ''
-    if (not value or len(value) > PROMETHEUS_RULE_RESOURCE_VERSION_MAX_LENGTH
-            or not value.isprintable()):
-        return ''
-    return value
-
-
-def _prometheus_rule_custom_objects_api(cluster):
-    kubeconfig = getattr(cluster, 'decrypted_kubeconfig', '') or ''
-    if not kubeconfig:
-        raise ValueError('kubeconfig_unavailable')
-    from kubernetes import client, config
-    path = _k8s_temp_config(kubeconfig)
-    api_client = None
-    try:
-        api_client = config.new_client_from_config(config_file=path)
-        return client.CustomObjectsApi(api_client), api_client, path
-    except Exception:
-        _close_prometheus_rule_api_client(api_client)
-        try:
-            os.unlink(path)
-        except OSError:
-            pass
-        raise
-
-
-def _close_prometheus_rule_api_client(api_client):
-    close = getattr(api_client, 'close', None)
-    if callable(close):
-        try:
-            close()
-        except Exception:
-            pass
-
-
-def _prometheus_rule_error(exc):
-    status = getattr(exc, 'status', None)
-    name = exc.__class__.__name__.lower()
-    if status == 409:
-        return _prometheus_rule_result(False, 'conflict', '规则已被其他操作更新，请刷新后重试。')
-    if status == 403:
-        return _prometheus_rule_result(False, 'forbidden', '当前集群权限不足，无法操作 PrometheusRule。')
-    if status == 404:
-        return _prometheus_rule_result(False, 'crd_not_found', '集群未安装 PrometheusRule CRD，或规则不存在。')
-    if status in (401,):
-        return _prometheus_rule_result(False, 'forbidden', '当前集群认证无效，无法操作 PrometheusRule。')
-    if isinstance(exc, (TimeoutError,)) or 'timeout' in name or 'timeouterror' in name:
-        return _prometheus_rule_result(False, 'timeout', '连接 Kubernetes 集群超时，请稍后重试。')
-    if isinstance(exc, ValueError) and str(exc) == 'kubeconfig_unavailable':
-        return _prometheus_rule_result(False, 'offline', '集群 kubeconfig 无法解密或为空。')
-    if isinstance(exc, ImportError):
-        return _prometheus_rule_result(False, 'dependency_missing', '缺少 kubernetes Python 依赖，无法操作 PrometheusRule。')
-    return _prometheus_rule_result(False, 'offline', '无法连接 Kubernetes 集群，请确认集群状态后重试。')
-
-
-def _validate_prometheus_rule_yaml(yaml_text, namespace, name):
-    namespace, name = _safe_prometheus_rule_identity(namespace, name)
-    if not namespace or not name:
-        return None, _prometheus_rule_result(False, 'invalid_yaml', '规则命名空间或名称无效。')
-    if not yaml:
-        return None, _prometheus_rule_result(False, 'dependency_missing', '缺少 YAML 解析依赖，无法更新 PrometheusRule。')
-    try:
-        documents = list(yaml.safe_load_all(yaml_text))
-    except Exception:
-        return None, _prometheus_rule_result(False, 'invalid_yaml', '规则 YAML 格式无效。')
-    if len(documents) != 1 or not isinstance(documents[0], dict):
-        return None, _prometheus_rule_result(False, 'invalid_yaml', '规则 YAML 必须且只能包含一个对象。')
-    document = documents[0]
-    metadata = document.get('metadata')
-    if document.get('apiVersion') != PROMETHEUS_RULE_API_VERSION or document.get('kind') != PROMETHEUS_RULE_KIND:
-        return None, _prometheus_rule_result(False, 'invalid_yaml', '规则 YAML 必须是 monitoring.coreos.com/v1 PrometheusRule。')
-    if not isinstance(metadata, dict):
-        return None, _prometheus_rule_result(False, 'invalid_yaml', '规则 YAML 缺少 metadata。')
-    document_name = metadata.get('name')
-    document_namespace = metadata.get('namespace')
-    resource_version = normalize_prometheus_rule_resource_version(metadata.get('resourceVersion'))
-    if not all(isinstance(value, str) and value.strip() for value in (document_name, document_namespace)) or not resource_version:
-        return None, _prometheus_rule_result(False, 'invalid_yaml', '规则 YAML 必须包含 metadata.name、metadata.namespace 和 metadata.resourceVersion。')
-    if document_name.strip() != name or document_namespace.strip() != namespace:
-        return None, _prometheus_rule_result(False, 'invalid_yaml', '规则 YAML 的名称或命名空间与当前选择不一致。')
-    metadata['name'] = name
-    metadata['namespace'] = namespace
-    metadata['resourceVersion'] = resource_version
-    return document, None
-
-
-def _validate_prometheus_rule_create_yaml(yaml_text):
-    if not yaml:
-        return None, _prometheus_rule_result(False, 'dependency_missing', '缺少 YAML 解析依赖，无法创建 PrometheusRule。')
-    try:
-        documents = list(yaml.safe_load_all(yaml_text))
-    except Exception:
-        return None, _prometheus_rule_result(False, 'invalid_yaml', '规则 YAML 格式无效。')
-    if len(documents) != 1 or not isinstance(documents[0], dict):
-        return None, _prometheus_rule_result(False, 'invalid_yaml', '规则 YAML 必须且只能包含一个对象。')
-    document = documents[0]
-    if document.get('apiVersion') != PROMETHEUS_RULE_API_VERSION or document.get('kind') != PROMETHEUS_RULE_KIND:
-        return None, _prometheus_rule_result(False, 'invalid_yaml', '规则 YAML 必须是 monitoring.coreos.com/v1 PrometheusRule。')
-    metadata = document.get('metadata')
-    if not isinstance(metadata, dict):
-        return None, _prometheus_rule_result(False, 'invalid_yaml', '规则 YAML 缺少 metadata。')
-    if 'resourceVersion' in metadata:
-        return None, _prometheus_rule_result(False, 'invalid_yaml', '创建规则 YAML 不允许包含 metadata.resourceVersion。')
-    if not all(isinstance(value, str) for value in (
-            metadata.get('namespace'), metadata.get('name'))):
-        return None, _prometheus_rule_result(False, 'invalid_yaml', '规则 YAML 的命名空间或名称无效。')
-    namespace, name = _safe_prometheus_rule_identity(
-        metadata.get('namespace'), metadata.get('name'),
-    )
-    if not namespace or not name:
-        return None, _prometheus_rule_result(False, 'invalid_yaml', '规则 YAML 的命名空间或名称无效。')
-    metadata['namespace'] = namespace
-    metadata['name'] = name
-    return document, None
-
-
-def _prometheus_rule_summary(item):
-    metadata = item.get('metadata') if isinstance(item, dict) else {}
-    metadata = metadata if isinstance(metadata, dict) else {}
-    namespace, name = _safe_prometheus_rule_identity(metadata.get('namespace'), metadata.get('name'))
-    if not namespace or not name:
-        return None
-    return {
-        'namespace': namespace,
-        'name': name,
-        'resource_version': str(metadata.get('resourceVersion') or ''),
-        'created_at': str(metadata.get('creationTimestamp') or ''),
+def associate_k8s_workload_service(service, cluster, namespace, workload_kind, workload_name):
+    """Create one deliberate mapping without changing service hosts or policy."""
+    if not isinstance(service, ServiceCatalog) or not isinstance(cluster, K8sCluster):
+        return {'ok': False, 'code': 'invalid_target', 'message': '服务或集群参数无效'}
+    selected_namespace = safe_k8s_namespace(namespace) if isinstance(namespace, str) else ''
+    name = _safe_k8s_workload_name(workload_name)
+    kinds = dict(K8S_DISCOVERABLE_WORKLOAD_KINDS)
+    if not selected_namespace or selected_namespace != namespace:
+        return {'ok': False, 'code': 'invalid_namespace', 'message': '命名空间无效'}
+    if not isinstance(workload_kind, str) or workload_kind not in kinds or not name:
+        return {'ok': False, 'code': 'invalid_workload', 'message': '工作负载类型或名称无效'}
+    lookup = {
+        'cluster': cluster,
+        'namespace': selected_namespace,
+        'workload_kind': workload_kind,
+        'workload_name': name,
     }
+    try:
+        with transaction.atomic():
+            mapping = K8sWorkloadServiceMapping.objects.select_for_update().filter(**lookup).first()
+            if mapping:
+                if mapping.service_id == service.id:
+                    return {
+                        'ok': True, 'code': 'already_associated',
+                        'message': '工作负载已关联到该服务', 'mapping': mapping,
+                    }
+                return {
+                    'ok': False, 'code': 'mapping_conflict',
+                    'message': '工作负载已关联到其他服务',
+                }
+            mapping = K8sWorkloadServiceMapping.objects.create(service=service, **lookup)
+    except IntegrityError:
+        # A concurrent association may have won the unique mapping key.
+        mapping = K8sWorkloadServiceMapping.objects.filter(**lookup).first()
+        if mapping and mapping.service_id == service.id:
+            return {
+                'ok': True, 'code': 'already_associated',
+                'message': '工作负载已关联到该服务', 'mapping': mapping,
+            }
+        return {'ok': False, 'code': 'mapping_conflict', 'message': '工作负载已关联到其他服务'}
+    return {'ok': True, 'code': 'created', 'message': '工作负载已关联到服务', 'mapping': mapping}
+
+
+def associate_k8s_service_candidate(service, candidate):
+    """Map a candidate after the caller has verified it via fresh discovery.
+
+    This low-level guard intentionally does not issue a Kubernetes request. UI
+    callers should use ``discover_and_associate_k8s_service_candidate`` so a
+    stale or fabricated candidate cannot be associated.
+    """
+    candidate = candidate if isinstance(candidate, dict) else {}
+    try:
+        cluster_id = int(candidate.get('cluster_id'))
+    except (TypeError, ValueError):
+        return {'ok': False, 'code': 'invalid_target', 'message': '服务或集群参数无效'}
+    cluster = K8sCluster.objects.filter(id=cluster_id).first()
+    return associate_k8s_workload_service(
+        service,
+        cluster,
+        candidate.get('namespace'),
+        candidate.get('workload_kind'),
+        candidate.get('workload_name'),
+    )
+
+
+def discover_and_associate_k8s_service_candidate(
+        service, cluster, namespace, workload_kind, workload_name, timeout=8):
+    """Verify a selected workload still exists, then associate it to a service."""
+    discovered = discover_k8s_service_candidates(cluster, namespace, timeout=timeout)
+    if not discovered.get('ok'):
+        return {
+            'ok': False, 'code': 'discovery_failed',
+            'message': discovered.get('message') or '工作负载发现失败',
+        }
+    candidate = next((item for item in discovered['candidates'] if (
+        item.get('workload_kind') == workload_kind
+        and item.get('workload_name') == workload_name
+        and item.get('namespace') == namespace
+        and item.get('cluster_id') == cluster.id
+    )), None)
+    if not candidate:
+        return {
+            'ok': False, 'code': 'candidate_not_found',
+            'message': '所选工作负载不在当前发现结果中',
+        }
+    return associate_k8s_service_candidate(service, candidate)
+
+
+
+# Keep the historical service import surface, including the patchable factory
+# used by callers and regression tests, while the rule implementation lives in
+# its focused module.
+_prometheus_rule_custom_objects_api = _prometheus_rules._prometheus_rule_custom_objects_api
+normalize_prometheus_rule_resource_version = _prometheus_rules.normalize_prometheus_rule_resource_version
 
 
 def list_prometheus_rules(cluster, timeout=8):
-    path = ''
-    api_client = None
-    try:
-        api, api_client, path = _prometheus_rule_custom_objects_api(cluster)
-        rules = []
-        continuation_token = ''
-        seen_continuation_tokens = set()
-        for _ in range(PROMETHEUS_RULE_LIST_MAX_PAGES):
-            request_kwargs = {
-                'group': PROMETHEUS_RULE_GROUP,
-                'version': PROMETHEUS_RULE_VERSION,
-                'plural': PROMETHEUS_RULE_PLURAL,
-                '_request_timeout': timeout,
-            }
-            if continuation_token:
-                request_kwargs['_continue'] = continuation_token
-            response = api.list_cluster_custom_object(**request_kwargs)
-            items = response.get('items', []) if isinstance(response, dict) else []
-            rules.extend(summary for summary in (
-                _prometheus_rule_summary(item) for item in items
-            ) if summary)
-            metadata = response.get('metadata', {}) if isinstance(response, dict) else {}
-            next_token = metadata.get('continue') or metadata.get('_continue') if isinstance(metadata, dict) else ''
-            if not isinstance(next_token, str) or not next_token.strip():
-                rules.sort(key=lambda item: (item['namespace'], item['name']))
-                return _prometheus_rule_result(True, 'ok', 'PrometheusRule 读取成功。', rules=rules)
-            continuation_token = next_token.strip()
-            if continuation_token in seen_continuation_tokens:
-                return _prometheus_rule_result(False, 'pagination_error', 'PrometheusRule 列表分页令牌异常，请稍后重试。')
-            seen_continuation_tokens.add(continuation_token)
-        return _prometheus_rule_result(False, 'pagination_error', 'PrometheusRule 列表分页次数超过安全上限，请稍后重试。')
-    except Exception as exc:
-        return _prometheus_rule_error(exc)
-    finally:
-        _close_prometheus_rule_api_client(api_client)
-        if path:
-            try:
-                os.unlink(path)
-            except OSError:
-                pass
+    return _prometheus_rules.list_prometheus_rules(
+        cluster, timeout=timeout, api_factory=_prometheus_rule_custom_objects_api,
+    )
 
 
 def get_prometheus_rule(cluster, namespace, name, timeout=8):
-    namespace, name = _safe_prometheus_rule_identity(namespace, name)
-    if not namespace or not name:
-        return _prometheus_rule_result(False, 'invalid_identity', '规则命名空间或名称无效。')
-    path = ''
-    api_client = None
-    try:
-        api, api_client, path = _prometheus_rule_custom_objects_api(cluster)
-        rule = api.get_namespaced_custom_object(
-            group=PROMETHEUS_RULE_GROUP, version=PROMETHEUS_RULE_VERSION,
-            namespace=namespace, plural=PROMETHEUS_RULE_PLURAL, name=name,
-            _request_timeout=timeout,
-        )
-        if not yaml:
-            return _prometheus_rule_result(False, 'dependency_missing', '缺少 YAML 解析依赖，无法查看 PrometheusRule。')
-        yaml_text = yaml.safe_dump(rule, allow_unicode=True, sort_keys=False)
-        return _prometheus_rule_result(True, 'ok', 'PrometheusRule 读取成功。', rule=rule, yaml=yaml_text)
-    except Exception as exc:
-        return _prometheus_rule_error(exc)
-    finally:
-        _close_prometheus_rule_api_client(api_client)
-        if path:
-            try:
-                os.unlink(path)
-            except OSError:
-                pass
+    return _prometheus_rules.get_prometheus_rule(
+        cluster, namespace, name, timeout=timeout,
+        api_factory=_prometheus_rule_custom_objects_api,
+    )
 
 
 def replace_prometheus_rule(cluster, namespace, name, yaml_text, timeout=8):
-    rule, error = _validate_prometheus_rule_yaml(yaml_text, namespace, name)
-    if error:
-        return error
-    namespace = rule['metadata']['namespace']
-    name = rule['metadata']['name']
-    path = ''
-    api_client = None
-    try:
-        api, api_client, path = _prometheus_rule_custom_objects_api(cluster)
-        updated = api.replace_namespaced_custom_object(
-            group=PROMETHEUS_RULE_GROUP, version=PROMETHEUS_RULE_VERSION,
-            namespace=namespace, plural=PROMETHEUS_RULE_PLURAL, name=name,
-            body=rule, _request_timeout=timeout,
-        )
-        return _prometheus_rule_result(True, 'ok', 'PrometheusRule 已同步到集群。', rule=updated)
-    except Exception as exc:
-        return _prometheus_rule_error(exc)
-    finally:
-        _close_prometheus_rule_api_client(api_client)
-        if path:
-            try:
-                os.unlink(path)
-            except OSError:
-                pass
+    return _prometheus_rules.replace_prometheus_rule(
+        cluster, namespace, name, yaml_text, timeout=timeout,
+        api_factory=_prometheus_rule_custom_objects_api,
+    )
 
 
 def create_prometheus_rule(cluster, yaml_text, timeout=8):
-    rule, error = _validate_prometheus_rule_create_yaml(yaml_text)
-    if error:
-        return error
-    namespace = rule['metadata']['namespace']
-    path = ''
-    api_client = None
-    try:
-        api, api_client, path = _prometheus_rule_custom_objects_api(cluster)
-        api.create_namespaced_custom_object(
-            group=PROMETHEUS_RULE_GROUP, version=PROMETHEUS_RULE_VERSION,
-            namespace=namespace, plural=PROMETHEUS_RULE_PLURAL,
-            body=rule, _request_timeout=timeout,
-        )
-        return _prometheus_rule_result(
-            True, 'ok', 'PrometheusRule 已创建。',
-            rule={'namespace': namespace, 'name': rule['metadata']['name']},
-        )
-    except Exception as exc:
-        return _prometheus_rule_error(exc)
-    finally:
-        _close_prometheus_rule_api_client(api_client)
-        if path:
-            try:
-                os.unlink(path)
-            except OSError:
-                pass
+    return _prometheus_rules.create_prometheus_rule(
+        cluster, yaml_text, timeout=timeout,
+        api_factory=_prometheus_rule_custom_objects_api,
+    )
 
 
 def delete_prometheus_rule(cluster, namespace, name, resource_version, timeout=8):
-    namespace, name = _safe_prometheus_rule_identity(namespace, name)
-    resource_version = normalize_prometheus_rule_resource_version(resource_version)
-    if not namespace or not name or not resource_version:
-        return _prometheus_rule_result(False, 'invalid_identity', '规则命名空间、名称或资源版本无效。')
-    path = ''
-    api_client = None
-    try:
-        api, api_client, path = _prometheus_rule_custom_objects_api(cluster)
-        api.delete_namespaced_custom_object(
-            group=PROMETHEUS_RULE_GROUP, version=PROMETHEUS_RULE_VERSION,
-            namespace=namespace, plural=PROMETHEUS_RULE_PLURAL, name=name,
-            body={'preconditions': {'resourceVersion': resource_version}},
-            _request_timeout=timeout,
-        )
-        return _prometheus_rule_result(True, 'ok', 'PrometheusRule 已从集群删除。')
-    except Exception as exc:
-        return _prometheus_rule_error(exc)
-    finally:
-        _close_prometheus_rule_api_client(api_client)
-        if path:
-            try:
-                os.unlink(path)
-            except OSError:
-                pass
+    return _prometheus_rules.delete_prometheus_rule(
+        cluster, namespace, name, resource_version, timeout=timeout,
+        api_factory=_prometheus_rule_custom_objects_api,
+    )
 
 
 def _k8s_created_at(item):
@@ -2247,6 +2188,8 @@ def record_alert(host, metric, message, level=AlertEvent.LEVEL_WARNING):
             alert.status = AlertEvent.STATUS_SILENCED
             alert.remark = '命中静默规则'
         alert.save(update_fields=['repeat_count', 'last_seen_at', 'message', 'status', 'remark', 'updated_at'])
+        if alert.status == AlertEvent.STATUS_SILENCED:
+            _cancel_oncall_escalations(alert, AlertOnCallEscalation.STATUS_CANCELLED, now=now)
         return alert, False
 
     status = AlertEvent.STATUS_SILENCED if is_alert_silenced(host, metric) else AlertEvent.STATUS_OPEN
@@ -2509,7 +2452,10 @@ def send_notifications(event_type, title, content, template_values=None, escalat
     return logs
 
 
-def notify_alert(alert):
+ONCALL_ESCALATION_DELAY = timedelta(minutes=15)
+
+
+def _alert_notification_details(alert):
     host_name = alert.host.linux_name if alert.host else '-'
     title = '告警通知：%s %s' % (host_name, alert.metric or 'general')
     content = '级别：%s\n状态：%s\n内容：%s' % (
@@ -2517,18 +2463,268 @@ def notify_alert(alert):
         alert.get_status_display() if hasattr(alert, 'get_status_display') else alert.status,
         alert.message,
     )
-    logs = send_notifications(
+    values = {
+        'host': host_name,
+        'metric': alert.metric or 'general',
+        'level': alert.level,
+        'status': alert.status,
+        'message': alert.message,
+    }
+    return title, content, values
+
+
+def _alert_notification_message(alert):
+    title, content, values = _alert_notification_details(alert)
+    return render_notification_template(
         NotificationLog.EVENT_ALERT,
         title,
         content,
-        template_values={
-            'host': host_name,
-            'metric': alert.metric or 'general',
-            'level': alert.level,
-            'status': alert.status,
-            'message': alert.message,
-        },
-        escalation_alert=alert,
+        values=values,
+    )
+
+
+def _matching_oncall_policies(alert):
+    if not alert.host_id:
+        return ServiceOnCallPolicy.objects.none()
+    return ServiceOnCallPolicy.objects.filter(
+        enabled=True,
+        service__hosts=alert.host_id,
+    ).select_related('service', 'primary_channel', 'backup_channel').order_by('service__name', 'id')
+
+
+def resolve_oncall_primary_route(policy, at=None):
+    """Resolve a weekly Shanghai-time rotation without changing policy state."""
+    if type(policy) is not ServiceOnCallPolicy:
+        return None
+    fallback = {
+        'user': policy.primary_user,
+        'channel': policy.primary_channel,
+        'member': None,
+    }
+    if at is None:
+        at = timezone.now()
+    if not isinstance(at, datetime) or timezone.is_naive(at):
+        return fallback
+    try:
+        members = [
+            member for member in policy.rotation_members.filter(enabled=True).select_related(
+                'user', 'channel'
+            ).order_by('position', 'id')
+            if type(member.user) is User
+            and type(member.channel) is NotificationChannel
+            and member.channel.enabled
+        ]
+    except Exception:
+        return fallback
+    if not members:
+        return fallback
+    try:
+        local_time = at.astimezone(ONCALL_ROTATION_TIMEZONE)
+        week_index = (local_time.date() - ONCALL_ROTATION_EPOCH.date()).days // 7
+        member = members[week_index % len(members)]
+    except Exception:
+        return fallback
+    return {'user': member.user, 'channel': member.channel, 'member': member}
+
+
+def inspect_oncall_coverage():
+    """Return a read-only, secret-free coverage assessment for every service."""
+    services = ServiceCatalog.objects.select_related(
+        'oncall_policy__primary_channel',
+        'oncall_policy__backup_channel',
+    ).prefetch_related(
+        models.Prefetch(
+            'oncall_policy__rotation_members',
+            queryset=ServiceOnCallRotationMember.objects.select_related('channel').order_by(
+                'position', 'id'
+            ),
+        )
+    ).order_by('name', 'id')
+    results = []
+    for service in services:
+        issues = []
+        try:
+            policy = service.oncall_policy
+        except ServiceOnCallPolicy.DoesNotExist:
+            policy = None
+        if not policy:
+            issues.append({
+                'code': 'missing_policy',
+                'message': '未配置服务值班策略',
+            })
+        else:
+            if not policy.enabled:
+                issues.append({
+                    'code': 'policy_disabled',
+                    'message': '服务值班策略已停用',
+                })
+            if not policy.primary_channel.enabled:
+                issues.append({
+                    'code': 'primary_channel_disabled',
+                    'message': '主值班通知渠道已停用',
+                })
+            if not policy.backup_channel.enabled:
+                issues.append({
+                    'code': 'backup_channel_disabled',
+                    'message': '备值班通知渠道已停用',
+                })
+            members = list(policy.rotation_members.all())
+            if members:
+                enabled_members = [member for member in members if member.enabled]
+                usable_members = [
+                    member for member in enabled_members if member.channel.enabled
+                ]
+                if not usable_members:
+                    issues.append({
+                        'code': 'rotation_unavailable',
+                        'message': '轮值名单存在但没有可用的启用成员',
+                    })
+                positions = [member.position for member in enabled_members]
+                if positions and positions != list(range(1, len(positions) + 1)):
+                    issues.append({
+                        'code': 'rotation_positions_non_contiguous',
+                        'message': '启用轮值成员的位置不连续',
+                    })
+        results.append({
+            'service_id': service.id,
+            'service_name': service.name,
+            'status': 'risk' if issues else 'healthy',
+            'issues': issues,
+        })
+    return results
+
+
+def _notify_alert_oncall(alert, now=None):
+    """Deliver a newly opened service alert to its primary on-call routes only."""
+    policies = list(_matching_oncall_policies(alert))
+    if not policies:
+        return [], False
+
+    now = now or timezone.now()
+    title, content = _alert_notification_message(alert)
+    logs = []
+    for policy in policies:
+        escalation, created = AlertOnCallEscalation.objects.get_or_create(
+            alert=alert,
+            service=policy.service,
+            defaults={
+                'policy': policy,
+                'primary_notified_at': now,
+            },
+        )
+        if not created:
+            continue
+        route = resolve_oncall_primary_route(policy, at=now)
+        channel = route['channel'] if route else policy.primary_channel
+        if not channel.enabled:
+            escalation.failure_category = 'primary_channel_unavailable'
+            escalation.save(update_fields=['failure_category', 'updated_at'])
+            continue
+        log = send_notification_channel(channel, NotificationLog.EVENT_ALERT, title, content)
+        logs.append(log)
+        if log.status == NotificationLog.STATUS_FAILED:
+            escalation.failure_category = 'primary_%s' % (log.failure_category or 'send_failed')
+            escalation.save(update_fields=['failure_category', 'updated_at'])
+    return logs, True
+
+
+def _cancel_oncall_escalations(alert, status, now=None):
+    now = now or timezone.now()
+    updates = {'status': status, 'updated_at': now}
+    if status == AlertOnCallEscalation.STATUS_ACKNOWLEDGED:
+        updates['acknowledged_at'] = now
+    else:
+        updates['cancelled_at'] = now
+    return AlertOnCallEscalation.objects.filter(
+        alert=alert,
+        status=AlertOnCallEscalation.STATUS_ACTIVE,
+    ).update(**updates)
+
+
+def process_due_oncall_escalations(now=None):
+    """Send a single backup notification after 15 minutes of an open alert.
+
+    This scheduler is intentionally limited to database state and the existing
+    notification sender. It never changes the alert lifecycle itself.
+    """
+    now = now or timezone.now()
+    due_at = now - ONCALL_ESCALATION_DELAY
+    result = {'scanned': 0, 'escalated': 0, 'cancelled': 0, 'errors': 0}
+    escalations = AlertOnCallEscalation.objects.filter(
+        status=AlertOnCallEscalation.STATUS_ACTIVE,
+        primary_notified_at__lte=due_at,
+        backup_claimed_at__isnull=True,
+    ).select_related(
+        'alert', 'service', 'policy', 'policy__backup_channel'
+    ).order_by('id')
+    for escalation in escalations:
+        result['scanned'] += 1
+        if escalation.alert.status != AlertEvent.STATUS_OPEN:
+            _cancel_oncall_escalations(
+                escalation.alert,
+                AlertOnCallEscalation.STATUS_ACKNOWLEDGED
+                if escalation.alert.status == AlertEvent.STATUS_PROCESSING
+                else AlertOnCallEscalation.STATUS_CANCELLED,
+                now=now,
+            )
+            result['cancelled'] += 1
+            continue
+        policy = escalation.policy
+        if not policy or not policy.enabled:
+            updated = AlertOnCallEscalation.objects.filter(
+                id=escalation.id, status=AlertOnCallEscalation.STATUS_ACTIVE,
+                backup_claimed_at__isnull=True,
+            ).update(
+                status=AlertOnCallEscalation.STATUS_CANCELLED,
+                cancelled_at=now,
+                updated_at=now,
+            )
+            result['cancelled'] += updated
+            continue
+        channel = policy.backup_channel
+        if not channel.enabled:
+            updated = AlertOnCallEscalation.objects.filter(
+                id=escalation.id, status=AlertOnCallEscalation.STATUS_ACTIVE,
+                backup_claimed_at__isnull=True,
+            ).update(
+                status=AlertOnCallEscalation.STATUS_FAILED,
+                failure_category='backup_channel_unavailable',
+                updated_at=now,
+            )
+            result['errors'] += updated
+            continue
+        claimed = AlertOnCallEscalation.objects.filter(
+            id=escalation.id,
+            status=AlertOnCallEscalation.STATUS_ACTIVE,
+            backup_claimed_at__isnull=True,
+        ).update(backup_claimed_at=now, updated_at=now)
+        if not claimed:
+            continue
+        title, content = _alert_notification_message(escalation.alert)
+        log = send_notification_channel(channel, NotificationLog.EVENT_ALERT, title, content)
+        fields = {
+            'backup_notified_at': now,
+            'status': AlertOnCallEscalation.STATUS_ESCALATED,
+            'updated_at': now,
+        }
+        if log.status == NotificationLog.STATUS_FAILED:
+            fields['failure_category'] = 'backup_%s' % (log.failure_category or 'send_failed')
+            fields['status'] = AlertOnCallEscalation.STATUS_FAILED
+            result['errors'] += 1
+        else:
+            result['escalated'] += 1
+        AlertOnCallEscalation.objects.filter(id=escalation.id).update(**fields)
+    return result
+
+
+def notify_alert(alert):
+    logs, oncall_matched = _notify_alert_oncall(alert)
+    if oncall_matched:
+        return logs
+    title, content, values = _alert_notification_details(alert)
+    logs = send_notifications(
+        NotificationLog.EVENT_ALERT, title, content,
+        template_values=values, escalation_alert=alert,
     )
     try:
         from monitor.services import send_alert_event_notifications
@@ -2584,6 +2780,14 @@ def update_alert_status(alert, to_status, handler='', remark='', from_status=Non
         handler=handler,
         remark=remark,
     )
+    if to_status == AlertEvent.STATUS_PROCESSING:
+        _cancel_oncall_escalations(alert, AlertOnCallEscalation.STATUS_ACKNOWLEDGED)
+    elif to_status in (
+            AlertEvent.STATUS_SILENCED,
+            AlertEvent.STATUS_RESOLVED,
+            AlertEvent.STATUS_CLOSED,
+    ):
+        _cancel_oncall_escalations(alert, AlertOnCallEscalation.STATUS_CANCELLED)
     return alert
 
 

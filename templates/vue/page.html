@@ -7,7 +7,7 @@
 {% if vue_page_kind == 'monitor-dashboard' %}
 <link rel="stylesheet" href="{% static 'css/ops-vue-pages.css' %}?v=20260717-fcc-node-resources-01">
 {% else %}
-<link rel="stylesheet" href="{% static 'css/ops-vue-pages.css' %}?v=20260716-alerts">
+<link rel="stylesheet" href="{% static 'css/ops-vue-pages.css' %}?v=20260723-prometheus-rule-governance-01">
 {% endif %}
 {# PromQL native-scroll cache baseline: 20260714-promql-scroll-width-sync #}
 {% if vue_page_kind == "monitor-dashboard" %}
@@ -44,6 +44,6 @@ body { background: #02060b !important; }
 {% if vue_page_kind == 'monitor-dashboard' %}
 <script src="{% static 'js/ops-vue-pages.js' %}?v=20260717-fcc-node-resources-01"></script>
 {% else %}
-<script src="{% static 'js/ops-vue-pages.js' %}?v=20260716-alerts"></script>
+<script src="{% static 'js/ops-vue-pages.js' %}?v=20260723-prometheus-rule-governance-01"></script>
 {% endif %}
 {% endblock %}

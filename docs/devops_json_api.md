@@ -36,13 +36,23 @@
   - 集群、命名空间和规则名称只由路由确定；调用方不能提交 group、version、plural 或 Kubernetes API 路径。
 - `POST /devops/api/prometheus-rules/<cluster_id>/<namespace>/<name>/update/`
   - JSON：`{"yaml": "..."}`。需 K8s 集群模块管理员权限。
-  - YAML 必须且只能包含一个 `monitoring.coreos.com/v1` `PrometheusRule`，并且 `metadata.name`、`metadata.namespace` 和非空 `metadata.resourceVersion` 必须与路由完全一致。服务端使用该 `resourceVersion` 写回 Kubernetes；冲突返回 `409` 和 `code: "conflict"`，调用方应重新读取 YAML 后重试。
-  - 成功返回安全的 `rule.namespace`、`rule.name`、`rule.resource_version`，不回显 YAML 或 Kubernetes 原始对象。
+  - YAML 必须且只能包含一个 `monitoring.coreos.com/v1` `PrometheusRule`，并且 `metadata.name`、`metadata.namespace` 和非空 `metadata.resourceVersion` 必须与路由完全一致。
+  - 成功返回 `202` 和修订安全摘要；该操作只创建数据库草稿，不会连接 Kubernetes。修订摘要不回显 YAML、kubeconfig 或 Kubernetes 原始对象。
 - `POST /devops/api/prometheus-rules/<cluster_id>/<namespace>/<name>/delete/`
   - JSON：`{"confirmation": "DELETE", "resource_version": "..."}`。需 K8s 集群模块管理员权限；确认词必须精确为 `DELETE`，缺少或错误的确认词/资源版本返回 `400` 和 `code: "validation_error"`。
-  - 删除使用 `resource_version` Kubernetes 预条件，冲突返回 `409` 和 `code: "conflict"`。成功返回 `{"ok": true}`。
-  - 更新和删除审计仅记录集群 ID/名称、命名空间、规则名称、动作、结果和资源版本；不记录 YAML、kubeconfig、令牌或 Kubernetes 原始错误。
-  - Kubernetes CRD 缺失或规则不存在返回 `404`/`crd_not_found`；Kubernetes RBAC 拒绝返回 `403`/`forbidden`；连接超时、离线或依赖缺失返回 `503` 及对应安全分类。
+  - 成功返回 `202` 和删除修订草稿；不会连接 Kubernetes。
+- `GET /devops/api/prometheus-rules/<cluster_id>/revisions/`
+  - 返回该集群的 PrometheusRule 修订安全摘要。需要 K8s 集群模块管理员权限；普通只读用户不能读取治理数据。
+  - `results[]` 仅包含 ID、集群 ID、命名空间、规则名、操作、状态、SHA-256 摘要、资源版本、创建/提交/批准/发布时间、创建人和安全失败分类；不返回 YAML、复核意见、kubeconfig、令牌或 Kubernetes 原始错误。
+- `POST /devops/api/prometheus-rule-revisions/<id>/submit/`
+  - 仅草稿创建人可以提交待复核。需要 K8s 集群模块管理员权限。
+- `POST /devops/api/prometheus-rule-revisions/<id>/review/`
+  - JSON：`{"decision":"approve|reject","comment":"可选"}`。创建人不能复核自己的修订；复核仅更新数据库状态，不会连接 Kubernetes。复核记录为追加式，不能被 API 修改。
+- `POST /devops/api/prometheus-rule-revisions/<id>/publish/`
+  - 仅已批准修订可发布，且创建人不能发布自己的修订。发布前重新读取目标资源并比较基准 `resourceVersion`；发现漂移或 Kubernetes 409 时将修订标记为 `failed`，返回 `409/conflict`，不会自动重试或覆盖。
+  - 成功后状态为 `published`。审计仅记录安全身份、动作、结果和资源版本，不记录 YAML、kubeconfig、令牌或 Kubernetes 原始错误。
+- `POST /devops/api/prometheus-rule-revisions/<id>/restore/`
+  - 仅已发布且带期望 YAML 的历史修订可恢复。恢复会以当前集群资源版本生成新的更新草稿（`202`），绝不修改旧修订，并再次经过提交、双人复核和独立发布流程。
 - `GET /devops/api/service-topology/`
   - 返回服务、负责人、环境、描述、当前用户可见的关联主机及上游依赖。
   - 认证：需要 session 登录和服务管理模块只读权限；未登录返回 `401`，权限不足返回 `403`。

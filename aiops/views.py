@@ -39,6 +39,7 @@ from django.utils import timezone
 from devops.models import AlertEvent, AuditLog, CommandExecution, DevOpsModulePermission, DevOpsRole, MetricSample, NotificationLog, RunbookTemplate
 from devops.services import has_role, visible_hosts_for_request
 from userprofile.decorators import session_login_required
+from .change_impact import build_change_impacts
 from .models import AiopsAlertAnalysis, AiopsIntegration
 
 
@@ -440,6 +441,7 @@ def dashboard(request):
 	correlations = _build_correlations(open_alerts, failed_commands)
 	root_causes = _build_root_causes(correlations, anomalies)
 	capacity = _build_capacity(hosts)
+	change_impacts = build_change_impacts(request, open_alerts, failed_commands, hosts)
 	config = AiopsIntegration.current()
 	alert_analyses = _analysis_queryset_for_hosts(hosts)[:20]
 	payload = {
@@ -451,6 +453,7 @@ def dashboard(request):
 			'correlations': len(correlations),
 			'failed_commands': len(failed_commands),
 			'notification_failures': NotificationLog.objects.filter(status=NotificationLog.STATUS_FAILED).count(),
+			'change_impacts': len(change_impacts),
 		},
 		'capabilities': [
 			{'name': '异常检测', 'detail': '基于指标阈值、告警密度识别异常主机'},
@@ -464,6 +467,7 @@ def dashboard(request):
 		'correlations': correlations,
 		'root_causes': root_causes,
 		'capacity': capacity,
+		'change_impacts': change_impacts,
 		'runbooks': _runbooks(request, hosts),
 		'integration': {
 			'alertmanager_configured': bool(config.alertmanager_url),

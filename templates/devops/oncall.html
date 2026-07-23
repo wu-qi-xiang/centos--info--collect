@@ -1,0 +1,72 @@
+{% extends "base.html" %}
+
+{% block title %}服务值班 - DevOps平台{% endblock %}
+
+{% block content %}
+<div class="container-fluid px-4">
+    <div class="d-flex justify-content-between align-items-center mb-3"><h1 class="h3 mb-0">{% if coverage_mode %}服务值班覆盖巡检{% else %}服务值班{% endif %}</h1>{% if coverage_mode %}<a class="btn btn-outline-secondary btn-sm" href="{% url 'devops:oncall_policies' %}">返回值班策略</a>{% else %}<a class="btn btn-outline-primary btn-sm" href="{% url 'devops:oncall_coverage' %}">覆盖巡检</a>{% endif %}</div>
+    {% include "devops/_nav.html" %}
+    {% if coverage_mode %}
+    <div class="card"><div class="card-header">服务覆盖状态</div><div class="card-body table-responsive">
+        <table class="table table-sm align-middle mb-0">
+            <tr><th>服务</th><th>状态</th><th>风险说明</th></tr>
+            {% for row in coverage_rows %}
+            <tr><td>{{ row.service_name }}</td><td>{% if row.status == 'healthy' %}<span class="badge text-bg-success">正常</span>{% else %}<span class="badge text-bg-warning">需关注</span>{% endif %}</td><td>{% for issue in row.issues %}<code>{{ issue.code }}</code> {{ issue.message }}{% if not forloop.last %}<br>{% endif %}{% empty %}-{% endfor %}</td></tr>
+            {% empty %}<tr><td colspan="3" class="text-muted">暂无服务目录记录</td></tr>{% endfor %}
+        </table>
+    </div></div>
+    {% else %}
+    <div class="card mb-3"><div class="card-header">{% if editing_policy %}编辑服务值班策略{% else %}新增服务值班策略{% endif %}</div><div class="card-body">
+        <form method="post" action="{% if editing_policy %}{% url 'devops:oncall_policy_update' editing_policy.id %}{% else %}{% url 'devops:oncall_policy_create' %}{% endif %}">
+            {% csrf_token %}
+            <div class="row">
+                <div class="col-lg-4 mb-3"><label class="form-label">服务</label>{{ edit_form.service|default:create_form.service }}{{ edit_form.service.errors|default:create_form.service.errors }}</div>
+                <div class="col-lg-4 mb-3"><label class="form-label">主值班人</label>{{ edit_form.primary_user|default:create_form.primary_user }}{{ edit_form.primary_user.errors|default:create_form.primary_user.errors }}</div>
+                <div class="col-lg-4 mb-3"><label class="form-label">主通知渠道</label>{{ edit_form.primary_channel|default:create_form.primary_channel }}{{ edit_form.primary_channel.errors|default:create_form.primary_channel.errors }}</div>
+                <div class="col-lg-4 mb-3"><label class="form-label">备值班人</label>{{ edit_form.backup_user|default:create_form.backup_user }}{{ edit_form.backup_user.errors|default:create_form.backup_user.errors }}</div>
+                <div class="col-lg-4 mb-3"><label class="form-label">备通知渠道</label>{{ edit_form.backup_channel|default:create_form.backup_channel }}{{ edit_form.backup_channel.errors|default:create_form.backup_channel.errors }}</div>
+                <div class="col-lg-4 mb-3"><div class="form-check mt-4">{{ edit_form.enabled|default:create_form.enabled }} <label class="form-check-label" for="{{ edit_form.enabled.id_for_label|default:create_form.enabled.id_for_label }}">启用服务级接管</label></div>{{ edit_form.enabled.errors|default:create_form.enabled.errors }}</div>
+            </div>
+            {{ edit_form.non_field_errors|default:create_form.non_field_errors }}
+            <button class="btn btn-primary" type="submit">{% if editing_policy %}保存策略{% else %}创建策略{% endif %}</button>
+            {% if editing_policy %}<a class="btn btn-outline-secondary" href="{% url 'devops:oncall_policies' %}">取消</a>{% endif %}
+        </form>
+    </div></div>
+    <div class="card"><div class="card-header">已配置服务值班</div><div class="card-body table-responsive">
+        <table class="table table-sm align-middle">
+            <tr><th>服务</th><th>主值班人</th><th>主通知渠道</th><th>备值班人</th><th>备通知渠道</th><th>状态</th><th>操作</th></tr>
+            {% for policy in policies %}
+            <tr>
+                <td>{{ policy.service.name }}</td>
+                <td>{{ policy.primary_user.user }}</td>
+                <td>{{ policy.primary_channel.name }}</td>
+                <td>{{ policy.backup_user.user }}</td>
+                <td>{{ policy.backup_channel.name }}</td>
+                <td>{% if policy.enabled %}<span class="badge text-bg-success">已启用</span>{% else %}<span class="badge text-bg-secondary">已停用</span>{% endif %}</td>
+                <td class="text-nowrap"><a class="btn btn-outline-primary btn-sm" href="{% url 'devops:oncall_policy_update' policy.id %}">编辑</a> <a class="btn btn-outline-secondary btn-sm" href="{% url 'devops:oncall_rotation_members' policy.id %}">轮换成员</a> <form method="post" action="{% url 'devops:oncall_policy_delete' policy.id %}" class="d-inline">{% csrf_token %}<button class="btn btn-outline-danger btn-sm" type="submit">删除</button></form></td>
+            </tr>
+            {% empty %}<tr><td colspan="7" class="text-muted">暂无服务值班策略</td></tr>{% endfor %}
+        </table>
+    </div></div>
+    {% if rotation_policy %}
+    <div class="card mt-3"><div class="card-header">{{ rotation_policy.service.name }} 的每周轮换成员</div><div class="card-body">
+        <form method="post" action="{% if editing_rotation_member %}{% url 'devops:oncall_rotation_member_update' editing_rotation_member.id %}{% else %}{% url 'devops:oncall_rotation_member_create' rotation_policy.id %}{% endif %}" class="row g-3 align-items-end mb-3">
+            {% csrf_token %}
+            <div class="col-md-3"><label class="form-label">用户</label>{{ rotation_form.user }}{{ rotation_form.user.errors }}</div>
+            <div class="col-md-3"><label class="form-label">通知渠道</label>{{ rotation_form.channel }}{{ rotation_form.channel.errors }}</div>
+            <div class="col-md-2"><label class="form-label">轮换顺序</label>{{ rotation_form.position }}{{ rotation_form.position.errors }}</div>
+            <div class="col-md-2"><div class="form-check mb-2">{{ rotation_form.enabled }} <label class="form-check-label" for="{{ rotation_form.enabled.id_for_label }}">启用成员</label></div></div>
+            <div class="col-md-2"><button class="btn btn-primary" type="submit">{% if editing_rotation_member %}保存成员{% else %}添加成员{% endif %}</button>{% if editing_rotation_member %} <a class="btn btn-outline-secondary" href="{% url 'devops:oncall_rotation_members' rotation_policy.id %}">取消</a>{% endif %}</div>
+            <div class="col-12">{{ rotation_form.non_field_errors }}</div>
+        </form>
+        <div class="table-responsive"><table class="table table-sm align-middle mb-0">
+            <tr><th>顺序</th><th>用户</th><th>通知渠道</th><th>状态</th><th>操作</th></tr>
+            {% for member in rotation_members %}
+            <tr><td>{{ member.position }}</td><td>{{ member.user.user }}</td><td>{{ member.channel.name }}</td><td>{% if member.enabled %}<span class="badge text-bg-success">已启用</span>{% else %}<span class="badge text-bg-secondary">已停用</span>{% endif %}</td><td class="text-nowrap"><a class="btn btn-outline-primary btn-sm" href="{% url 'devops:oncall_rotation_member_update' member.id %}">编辑</a> <form method="post" action="{% url 'devops:oncall_rotation_member_delete' member.id %}" class="d-inline">{% csrf_token %}<button class="btn btn-outline-danger btn-sm" type="submit">删除</button></form></td></tr>
+            {% empty %}<tr><td colspan="5" class="text-muted">暂无轮换成员</td></tr>{% endfor %}
+        </table></div>
+    </div></div>
+    {% endif %}
+    {% endif %}
+</div>
+{% endblock %}

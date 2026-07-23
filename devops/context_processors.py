@@ -25,5 +25,14 @@ def devops_navigation(request):
                 DevOpsRole.ROLE_ADMIN,
                 DevOpsModulePermission.MODULE_CLUSTER,
             ),
+            'can_manage_k8s_service_discovery': is_logged_in and has_role(
+                request,
+                DevOpsRole.ROLE_ADMIN,
+                DevOpsModulePermission.MODULE_CLUSTER,
+            ) and has_role(
+                request,
+                DevOpsRole.ROLE_ADMIN,
+                DevOpsModulePermission.MODULE_SERVICE,
+            ),
         },
     }

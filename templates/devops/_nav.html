@@ -38,12 +38,14 @@
     {% endif %}
     {% if devops_navigation.can_view_security %}
     <a class="btn btn-outline-primary btn-sm" href="{% url 'devops:notification_channels' %}">通知渠道</a>
+    <a class="btn btn-outline-primary btn-sm" href="{% url 'devops:oncall_policies' %}">服务值班</a>
     <a class="btn btn-outline-primary btn-sm" href="{% url 'devops:integration_health' %}">集成健康</a>
     <a class="btn btn-outline-primary btn-sm" href="{% url 'devops:worker_observability' %}">Worker观测</a>
     {% endif %}
     {% if devops_navigation.can_view_cluster %}
     <a class="btn btn-outline-primary btn-sm" href="{% url 'devops:clusters' %}">K8s集群管理</a>
     <a class="btn btn-outline-primary btn-sm" href="{% url 'devops:prometheus_rules' %}">PrometheusRule 管理</a>
+    {% if devops_navigation.can_manage_k8s_service_discovery %}<a class="btn btn-outline-primary btn-sm" href="{% url 'devops:k8s_service_discovery' %}">K8s服务发现</a>{% endif %}
     {% endif %}
     {% if devops_navigation.can_view_security %}
     <a class="btn btn-outline-primary btn-sm" href="{% url 'devops:security_settings' %}">安全策略</a>

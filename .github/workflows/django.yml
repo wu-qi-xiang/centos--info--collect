@@ -24,6 +24,8 @@ jobs:
       - name: Verify runtime baseline
         run: |
           python -c "import sys, django; assert sys.version_info[:2] == (3, 11), sys.version; assert django.VERSION[:3] == (4, 2, 16), django.get_version()"
+      - name: Critical operations HTTP quality gate
+        run: python manage.py test aiops.test_critical_operations_flow
       - name: Validate Django project
         run: |
           python manage.py check

@@ -42,13 +42,13 @@ from devops.forms import PrometheusRuleYamlForm, normalize_prometheus_rule_ident
 from devops.models import AlertEvent, DevOpsModulePermission, DevOpsRole, IntegrationHealthEvent, K8sCluster
 from devops.services import (
 	audit,
-	create_prometheus_rule,
 	integration_health_summary,
 	has_role,
 	list_prometheus_rules,
 	record_integration_health_event,
 	summarize_integration_health,
 )
+from devops.config_governance import create_prometheus_rule_draft
 from PyLinux.security import require_monitor_operator, security_context
 from PyLinux.vue import form_errors, model_dict, render_vue_page
 from userprofile.decorators import session_login_required
@@ -64,6 +64,7 @@ PROMETHEUS_RULE_SAFE_MESSAGES = {
 	'offline': '无法连接 Kubernetes 集群，请确认集群状态后重试。',
 	'invalid_yaml': '规则 YAML 格式或资源身份无效。',
 	'invalid_identity': '规则 YAML 格式或资源身份无效。',
+	'validation_error': '规则 YAML 格式或资源身份无效。',
 	'dependency_missing': '缺少必要依赖，无法操作 PrometheusRule。',
 }
 
@@ -598,7 +599,7 @@ def _prometheus_rule_message(result):
 
 
 def _prometheus_rule_failure_status(code):
-	if code in ('invalid_yaml', 'invalid_identity'):
+	if code in ('invalid_yaml', 'invalid_identity', 'validation_error'):
 		return 400
 	if code == 'conflict':
 		return 409
@@ -634,7 +635,7 @@ def _safe_prometheus_rule_summary(cluster, rule):
 
 def _prometheus_rules_payload(request, yaml_form=None, error='', selected_cluster=None):
 	if not _can_view_prometheus_rules(request):
-		return None
+		return {'permission_denied': True}
 	clusters = list(K8sCluster.objects.order_by('name', 'id'))
 	can_create = _can_create_prometheus_rules(request)
 	yaml_text = ''
@@ -643,18 +644,25 @@ def _prometheus_rules_payload(request, yaml_form=None, error='', selected_cluste
 			else yaml_form.data.get('yaml', '')) or ''
 	payload = {
 		'clusters': [{'id': cluster.id, 'name': cluster.name} for cluster in clusters],
+		'list_url': reverse('monitor:monitor_index'),
 		'selected_cluster_id': None,
+		'selected_cluster_name': '',
 		'configured': False,
 		'rules': [],
 		'error': error,
+		'notice': ('PrometheusRule 草稿已创建，正等待另一名集群管理员复核后发布。'
+			if request.GET.get('draft') == 'created' else ''),
 		'can_create': can_create,
 		'create_url': reverse('monitor:prometheus_rule_create'),
+		'revision_list_url': reverse('devops:prometheus_rule_revisions'),
 		'form': {'yaml': yaml_text},
 	}
 	if selected_cluster is not None:
-		if selected_cluster.id not in [cluster.id for cluster in clusters]:
+		cluster = next((item for item in clusters if item.id == selected_cluster.id), None)
+		if not cluster:
 			return payload
-		payload['selected_cluster_id'] = selected_cluster.id
+		payload['selected_cluster_id'] = cluster.id
+		payload['selected_cluster_name'] = cluster.name
 		payload['configured'] = True
 		return payload
 	try:
@@ -667,6 +675,7 @@ def _prometheus_rules_payload(request, yaml_form=None, error='', selected_cluste
 	if not cluster:
 		return payload
 	payload['selected_cluster_id'] = cluster.id
+	payload['selected_cluster_name'] = cluster.name
 	payload['configured'] = True
 	result = list_prometheus_rules(cluster)
 	if not result.get('ok'):
@@ -681,20 +690,13 @@ def _prometheus_rules_payload(request, yaml_form=None, error='', selected_cluste
 def _monitor_payload(request, monitor_obj=None, form=None, action='', prometheus_rule_form=None,
 					 prometheus_rule_error='', prometheus_rule_cluster=None):
 	payload = {
-		'subtitle': '配置 CPU、内存、磁盘阈值和告警邮箱',
+		'subtitle': '管理 Kubernetes 集群中的 PrometheusRule 规则摘要与双人复核草稿',
 		'csrf': get_token(request),
-		'action': action or reverse('monitor:monitor_index'),
-		'monitor': model_dict(monitor_obj) or {},
-		'errors': form_errors(form),
-		'open_alert_count': AlertEvent.objects.filter(status=AlertEvent.STATUS_OPEN).count(),
-		'latest_alert_message': (AlertEvent.objects.order_by('-created_at').first().message if AlertEvent.objects.exists() else ''),
 		'actions': _monitor_actions(),
 	}
-	prometheus_rules = _prometheus_rules_payload(
+	payload['prometheus_rules'] = _prometheus_rules_payload(
 		request, prometheus_rule_form, prometheus_rule_error, prometheus_rule_cluster,
 	)
-	if prometheus_rules is not None:
-		payload['prometheus_rules'] = prometheus_rules
 	return payload
 
 
@@ -1362,10 +1364,10 @@ def prometheus_rule_create(request):
 				prometheus_rule_error='规则 YAML 格式或资源身份无效。', prometheus_rule_cluster=cluster),
 			_monitor_context(request, Monitor.objects.all(), form), status=400,
 		)
-	result = create_prometheus_rule(cluster, yaml_text)
+	result = create_prometheus_rule_draft(request, cluster, yaml_text, action='create')
 	if not result.get('ok'):
 		audit(
-			request, '创建PrometheusRule', 'K8sCluster', cluster.id,
+			request, '创建PrometheusRule草稿', 'K8sCluster', cluster.id,
 			'cluster=%s, namespace=%s, name=%s, action=create, outcome=%s' % (
 				cluster.id, namespace, name,
 				_prometheus_rule_audit_outcome(result.get('code', 'offline')),
@@ -1378,10 +1380,10 @@ def prometheus_rule_create(request):
 			_monitor_context(request, Monitor.objects.all(), form),
 			status=_prometheus_rule_failure_status(result.get('code', 'offline')),
 		)
-	created_rule = result.get('rule') if isinstance(result.get('rule'), dict) else {}
+	revision = result.get('revision') if isinstance(result.get('revision'), dict) else {}
 	created_namespace, created_name = normalize_prometheus_rule_identity(
-		created_rule.get('namespace'),
-		created_rule.get('name'),
+		revision.get('namespace'),
+		revision.get('name'),
 	)
 	if not created_namespace or not created_name:
 		return render_vue_page(
@@ -1391,12 +1393,12 @@ def prometheus_rule_create(request):
 			_monitor_context(request, Monitor.objects.all(), form), status=503,
 		)
 	audit(
-		request, '创建PrometheusRule', 'K8sCluster', cluster.id,
-		'cluster=%s, namespace=%s, name=%s, action=create, outcome=ok' % (
+		request, '创建PrometheusRule草稿', 'K8sCluster', cluster.id,
+		'cluster=%s, namespace=%s, name=%s, action=create, outcome=draft' % (
 			cluster.id, created_namespace, created_name,
 		),
 	)
-	return redirect('%s?cluster=%s' % (reverse('monitor:monitor_index'), cluster.id))
+	return redirect('%s?cluster=%s&draft=created' % (reverse('monitor:monitor_index'), cluster.id))
 
 
 @session_login_required

@@ -394,6 +394,7 @@ DEFAULT_AUTO_FIELD = 'django.db.models.AutoField'
 CRONJOBS = [
 	('*/1 * * * *', 'monitor.crontab.monitor_send_email', '>>/tmp/test.log'),
 	('*/1 * * * *', 'monitor.crontab.poll_alertmanager_notifications', '>>/tmp/alertmanager_poll.log'),
+	('*/1 * * * *', 'monitor.crontab.process_due_oncall_escalations_periodically', '>>/tmp/oncall_escalation.log'),
 	('*/5 * * * *', 'monitor.crontab.evaluate_service_slos_periodically', '>>/tmp/service_slo_evaluation.log'),
 	('30 3 * * *', 'monitor.crontab.scan_compliance_baselines_daily', '>>/tmp/compliance_scan.log'),
 ]

@@ -1,0 +1,113 @@
+{% extends "base.html" %}
+
+{% block title %}PrometheusRule 修订管理 - DevOps平台{% endblock %}
+
+{% block content %}
+<div class="container-fluid px-4">
+    <form class="d-none" aria-hidden="true">{% csrf_token %}</form>
+    <div class="d-flex flex-wrap align-items-start justify-content-between gap-3 mb-3">
+        <div>
+            <h1 class="h3 mb-1">PrometheusRule 修订管理</h1>
+            <p class="text-muted mb-0">草稿需由另一名集群管理员复核；发布前会校验集群资源版本。此页面不展示规则 YAML。</p>
+        </div>
+        <a class="btn btn-outline-secondary" href="{% url 'monitor:monitor_index' %}"><i class="fas fa-arrow-left me-1" aria-hidden="true"></i>返回规则工作台</a>
+    </div>
+
+    <section class="card mb-3">
+        <div class="card-body">
+            <form method="get" action="{% url 'devops:prometheus_rule_revisions' %}" class="row g-2 align-items-end">
+                <div class="col-md-6">
+                    <label class="form-label" for="prometheus-rule-revision-cluster">目标集群</label>
+                    <select id="prometheus-rule-revision-cluster" name="cluster" class="form-select" onchange="this.form.submit()">
+                        {% for cluster in clusters %}
+                        <option value="{{ cluster.id }}" {% if selected_cluster and cluster.id == selected_cluster.id %}selected{% endif %}>{{ cluster.name }}</option>
+                        {% empty %}
+                        <option value="">暂无可用集群</option>
+                        {% endfor %}
+                    </select>
+                </div>
+                <div class="col-md-auto"><button type="submit" class="btn btn-outline-primary"><i class="fas fa-sync-alt me-1" aria-hidden="true"></i>加载修订</button></div>
+            </form>
+        </div>
+    </section>
+
+    <div id="prometheus-rule-revision-feedback" class="alert d-none" role="status"></div>
+    {% if selected_cluster %}
+    <section class="card">
+        <div class="card-header d-flex justify-content-between align-items-center"><span>{{ selected_cluster.name }} 的修订记录</span><span class="text-muted small">{{ revisions|length }} 条</span></div>
+        <div class="card-body p-0 table-responsive">
+            <table class="table table-hover align-middle mb-0">
+                <thead><tr><th>规则</th><th>操作</th><th>状态</th><th>摘要</th><th>基准版本</th><th>创建人</th><th>创建时间</th><th>操作</th></tr></thead>
+                <tbody>
+                    {% for revision in revisions %}
+                    <tr>
+                        <td><code>{{ revision.namespace }}/{{ revision.name }}</code></td>
+                        <td>{{ revision.action }}</td>
+                        <td><span class="badge text-bg-secondary">{{ revision.status }}</span>{% if revision.failure_code %}<div class="small text-danger mt-1">{{ revision.failure_code }}</div>{% endif %}</td>
+                        <td><code title="SHA-256">{{ revision.digest|default:"-"|truncatechars:16 }}</code></td>
+                        <td><code>{{ revision.baseline_resource_version|default:"-" }}</code></td>
+                        <td>{{ revision.created_by }}</td>
+                        <td class="text-nowrap">{{ revision.created_at }}</td>
+                        <td class="text-nowrap">
+                            {% if revision.status == 'draft' and revision.created_by == request.session.user_name %}
+                            <button type="button" class="btn btn-sm btn-outline-primary revision-action" data-action="submit" data-url="{{ revision.api_urls.submit }}">提交复核</button>
+                            {% elif revision.status == 'submitted' and revision.created_by != request.session.user_name %}
+                            <button type="button" class="btn btn-sm btn-outline-success revision-action" data-action="approve" data-url="{{ revision.api_urls.review }}">批准</button>
+                            <button type="button" class="btn btn-sm btn-outline-danger revision-action" data-action="reject" data-url="{{ revision.api_urls.review }}">拒绝</button>
+                            {% elif revision.status == 'approved' and revision.created_by != request.session.user_name %}
+                            <button type="button" class="btn btn-sm btn-primary revision-action" data-action="publish" data-url="{{ revision.api_urls.publish }}">发布</button>
+                            {% elif revision.status == 'published' %}
+                            <button type="button" class="btn btn-sm btn-outline-secondary revision-action" data-action="restore" data-url="{{ revision.api_urls.restore }}">创建恢复草稿</button>
+                            {% else %}<span class="text-muted small">无可用操作</span>{% endif %}
+                        </td>
+                    </tr>
+                    {% empty %}<tr><td colspan="8" class="text-center text-muted py-4">当前集群暂无修订记录。</td></tr>{% endfor %}
+                </tbody>
+            </table>
+        </div>
+    </section>
+    {% else %}<div class="alert alert-info">请先配置 Kubernetes 集群。</div>{% endif %}
+</div>
+{% endblock %}
+
+{% block script %}
+<script>
+(function () {
+    var feedback = document.getElementById('prometheus-rule-revision-feedback');
+    function csrf() {
+        var match = document.cookie.match(/(?:^|; )csrftoken=([^;]+)/);
+        return match ? decodeURIComponent(match[1]) : '';
+    }
+    function showFeedback(message, success) {
+        feedback.textContent = message;
+        feedback.className = 'alert ' + (success ? 'alert-success' : 'alert-danger');
+    }
+    document.querySelectorAll('.revision-action').forEach(function (button) {
+        button.addEventListener('click', function () {
+            var action = button.dataset.action;
+            var payload = {};
+            if (action === 'approve' || action === 'reject') {
+                var comment = window.prompt('复核意见（可留空）：', '');
+                if (comment === null) return;
+                payload.decision = action === 'approve' ? 'approve' : 'reject';
+                payload.comment = comment;
+            }
+            if ((action === 'publish' || action === 'restore') && !window.confirm(action === 'publish' ? '确认发布该已批准修订？' : '确认根据此历史修订创建恢复草稿？')) return;
+            button.disabled = true;
+            fetch(button.dataset.url, {
+                method: 'POST', credentials: 'same-origin',
+                headers: {'Content-Type': 'application/json', 'X-CSRFToken': csrf()},
+                body: JSON.stringify(payload)
+            }).then(function (response) { return response.json().then(function (body) { return {ok: response.ok, body: body}; });
+            }).then(function (result) {
+                if (!result.ok || !result.body.ok) throw new Error(result.body.message || '修订操作失败。');
+                showFeedback(result.body.message || '修订操作已完成。', true);
+                window.setTimeout(function () { window.location.reload(); }, 500);
+            }).catch(function (error) {
+                showFeedback(error.message || '修订操作失败。', false);
+            }).finally(function () { button.disabled = false; });
+        });
+    });
+}());
+</script>
+{% endblock %}

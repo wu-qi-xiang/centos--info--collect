@@ -17,7 +17,7 @@ from RemoteLinux.models import User
 from RemoteLinux.models import NewLinux
 from devops.services import record_alert, resolve_alert
 from . import services
-from .crontab import evaluate_service_slos_periodically, monitor_send_email, parse_percent, poll_alertmanager_notifications, record_collection_failure, send_threshold_alert, scan_compliance_baselines_daily
+from .crontab import evaluate_service_slos_periodically, monitor_send_email, parse_percent, poll_alertmanager_notifications, process_due_oncall_escalations_periodically, record_collection_failure, send_threshold_alert, scan_compliance_baselines_daily
 from .models import AlertmanagerConfig, AlertNotificationConfig, Monitor, PrometheusConfig
 
 
@@ -52,6 +52,33 @@ class SloScheduleTests(TestCase):
 		self.assertEqual(audit_log.target_type, 'ServiceSlo')
 		self.assertEqual(audit_log.detail, '评估=12, 耗尽=2, 不可用=1, 错误=1, 清理=3')
 		self.assertLessEqual(len(audit_log.detail), 200)
+
+
+class OnCallEscalationScheduleTests(TestCase):
+	def test_oncall_escalation_is_registered_every_minute(self):
+		self.assertIn(
+			('*/1 * * * *', 'monitor.crontab.process_due_oncall_escalations_periodically', '>>/tmp/oncall_escalation.log'),
+			settings.CRONJOBS,
+		)
+
+	@mock.patch('monitor.crontab.print')
+	@mock.patch('devops.services.process_due_oncall_escalations')
+	def test_due_oncall_escalation_reports_safe_counts(self, process, print_mock):
+		process.return_value = {'scanned': 3, 'escalated': 1, 'cancelled': 1, 'errors': 0}
+
+		result = process_due_oncall_escalations_periodically()
+
+		self.assertEqual(result, process.return_value)
+		process.assert_called_once_with()
+		print_mock.assert_called_once_with('值班升级扫描完成：扫描3条，升级1条，取消1条，错误0条')
+
+	@mock.patch('monitor.crontab.print')
+	@mock.patch('devops.services.process_due_oncall_escalations', side_effect=RuntimeError('notification unavailable'))
+	def test_due_oncall_escalation_isolates_core_exception(self, process, print_mock):
+		self.assertEqual(process_due_oncall_escalations_periodically(), {'scanned': 0, 'escalated': 0, 'cancelled': 0, 'errors': 1})
+
+		process.assert_called_once_with()
+		print_mock.assert_called_once_with('值班升级扫描失败')
 
 
 class MonitorSecurityTests(TestCase):
@@ -108,7 +135,7 @@ class MonitorSecurityTests(TestCase):
 		monitor = Monitor.objects.get()
 		self.assertTrue(AuditLog.objects.filter(action='创建监控阈值', target_id=str(monitor.id)).exists())
 
-	def test_monitor_index_uses_real_alert_state_not_placeholder_values(self):
+	def test_monitor_index_keeps_real_alert_context_outside_rule_page_payload(self):
 		host = NewLinux.objects.create(
 			linux_name='alert-host',
 			linux_ip='127.0.0.1',
@@ -126,10 +153,12 @@ class MonitorSecurityTests(TestCase):
 		)
 
 		response = self.client.get(reverse('monitor:monitor_index'))
+		data = self.vue_data(response)
 
 		self.assertEqual(response.status_code, 200)
 		self.assertEqual(response.context['open_alert_count'], 1)
-		self.assertContains(response, 'CPU usage high')
+		self.assertNotIn('open_alert_count', data)
+		self.assertNotContains(response, 'CPU usage high')
 		self.assertNotContains(response, '服务器-01 CPU使用率达到85%')
 		self.assertNotContains(response, '2分钟前')
 
@@ -150,7 +179,8 @@ class MonitorSecurityTests(TestCase):
 		})
 
 		self.assertEqual(response.status_code, 400)
-		self.assertContains(response, '已存有告警数据', status_code=400)
+		self.assertNotIn('monitor', self.vue_data(response))
+		self.assertNotIn('errors', self.vue_data(response))
 		self.assertEqual(Monitor.objects.count(), 1)
 
 	def test_operator_cannot_create_monitor_config_with_invalid_threshold(self):
@@ -164,8 +194,8 @@ class MonitorSecurityTests(TestCase):
 		})
 
 		self.assertEqual(response.status_code, 400)
-		self.assertContains(response, '提交失败，请检查以下内容', status_code=400)
-		self.assertContains(response, '请输入 0 到 100 之间的百分比', status_code=400)
+		self.assertNotIn('monitor', self.vue_data(response))
+		self.assertNotIn('errors', self.vue_data(response))
 		self.assertEqual(Monitor.objects.count(), 0)
 
 	def test_viewer_cannot_update_monitor_config_when_roles_are_configured(self):
@@ -226,7 +256,8 @@ class MonitorSecurityTests(TestCase):
 
 		monitor.refresh_from_db()
 		self.assertEqual(response.status_code, 400)
-		self.assertContains(response, '提交失败，请检查以下内容', status_code=400)
+		self.assertNotIn('monitor', self.vue_data(response))
+		self.assertNotIn('errors', self.vue_data(response))
 		self.assertEqual(monitor.monitor_email, 'old@example.com')
 		self.assertEqual(monitor.monitor_cpu, '80')
 
@@ -1449,7 +1480,7 @@ class MonitorSecurityTests(TestCase):
 		self.assertIn('this.expandedRuleCells.query = [];', vue_source)
 		self.assertIn('this.expandedRuleCells.labels = [];', vue_source)
 
-		static_version = '20260716-alerts'
+		static_version = '20260723-prometheus-rule-governance-01'
 		self.assertEqual(page_template.count('?v=%s' % static_version), 2)
 		self.assertIn("static 'css/ops-vue-pages.css'", page_template)
 		self.assertIn("static 'js/ops-vue-pages.js'", page_template)
@@ -3734,6 +3765,7 @@ spec:
 
 		self.assertEqual(response.status_code, 200)
 		self.assertTrue(data['prometheus_rules']['configured'])
+		self.assertEqual(data['prometheus_rules']['selected_cluster_name'], self.cluster.name)
 		self.assertFalse(data['prometheus_rules']['can_create'])
 		self.assertEqual(data['prometheus_rules']['rules'][0], {
 			'namespace': 'monitoring', 'name': 'api-errors', 'resource_version': '42',
@@ -3742,14 +3774,49 @@ spec:
 		})
 		list_rules.assert_called_once_with(self.cluster)
 
+	def test_rule_management_page_payload_omits_legacy_threshold_fields(self):
+		self.set_cluster_permission(DevOpsRole.ROLE_VIEWER)
+
+		response = self.client.get(reverse('monitor:monitor_index'))
+		data = self.vue_data(response)
+
+		self.assertEqual(response.status_code, 200)
+		self.assertEqual(data['subtitle'], '管理 Kubernetes 集群中的 PrometheusRule 规则摘要与双人复核草稿')
+		self.assertNotIn('monitor', data)
+		self.assertNotIn('errors', data)
+		with open('static/js/ops-vue-pages.js', 'r') as handle:
+			page_template = handle.read()
+		for legacy_field in ('monitor_email', 'monitor_cpu', 'monitor_men', 'monitor_disk'):
+			self.assertNotIn(legacy_field, page_template)
+
+	def test_rule_management_static_template_uses_workbench_and_new_cache_marker(self):
+		with open('static/js/ops-vue-pages.js', 'r') as handle:
+			page_template = handle.read()
+		with open('static/css/ops-vue-pages.css', 'r') as handle:
+			page_styles = handle.read()
+		with open('templates/vue/page.html', 'r') as handle:
+			page_shell = handle.read()
+
+		self.assertIn('ops-rule-workbench', page_template)
+		self.assertIn('<section v-else-if="kind === \'monitor\'" class="ops-rule-workbench">', page_template)
+		self.assertNotIn('class="ops-panel ops-rule-workbench"', page_template)
+		self.assertIn('ops-rule-workbench__creator', page_template)
+		self.assertIn("v-if=\"data.prometheus_rules.can_create && data.prometheus_rules.configured\"", page_template)
+		self.assertIn('ops-rule-workbench__state is-denied', page_template)
+		self.assertIn('.ops-rule-workbench', page_styles)
+		self.assertIn('20260723-prometheus-rule-governance-01', page_shell)
+		self.assertIn('修订管理', page_template)
+		self.assertIn('创建待复核草稿', page_template)
+
 	@mock.patch('monitor.views.list_prometheus_rules')
-	def test_admin_sees_create_form_and_user_without_cluster_permission_sees_nothing(self, list_rules):
+	def test_admin_sees_create_form_and_user_without_cluster_permission_sees_no_rule_data(self, list_rules):
 		self.set_cluster_permission(DevOpsRole.ROLE_ADMIN)
 
 		admin_data = self.vue_data(self.client.get(reverse('monitor:monitor_index'), {'cluster': self.cluster.id}))
 
 		self.assertTrue(admin_data['prometheus_rules']['can_create'])
 		self.assertEqual(admin_data['prometheus_rules']['create_url'], '/monitor/prometheus-rules/create/')
+		self.assertEqual(admin_data['prometheus_rules']['revision_list_url'], reverse('devops:prometheus_rule_revisions'))
 		self.assertIn('yaml', admin_data['prometheus_rules']['form'])
 		self.assertEqual(list_rules.call_count, 1)
 		DevOpsRole.objects.filter(user=self.user).update(role=DevOpsRole.ROLE_VIEWER)
@@ -3761,7 +3828,12 @@ spec:
 
 		no_permission_data = self.vue_data(self.client.get(reverse('monitor:monitor_index'), {'cluster': self.cluster.id}))
 
-		self.assertNotIn('prometheus_rules', no_permission_data)
+		no_permission_rules = no_permission_data['prometheus_rules']
+		self.assertTrue(no_permission_rules['permission_denied'])
+		self.assertNotIn('selected_cluster_name', no_permission_rules)
+		self.assertNotIn('clusters', no_permission_rules)
+		self.assertNotIn('rules', no_permission_rules)
+		self.assertNotIn('form', no_permission_rules)
 		self.assertEqual(list_rules.call_count, 1)
 
 	def test_create_requires_cluster_admin_and_post(self):
@@ -3773,14 +3845,15 @@ spec:
 
 		self.assertEqual(response.status_code, 403)
 		self.assertNotContains(response, self.valid_yaml(), status_code=403)
-		self.assertFalse(AuditLog.objects.filter(action='创建PrometheusRule').exists())
+		self.assertFalse(AuditLog.objects.filter(action='创建PrometheusRule草稿').exists())
 		self.set_cluster_permission(DevOpsRole.ROLE_ADMIN)
 		self.assertEqual(self.client.get('/monitor/prometheus-rules/create/').status_code, 405)
 
-	@mock.patch('monitor.views.create_prometheus_rule')
-	def test_successful_create_audits_safe_identity_and_redirects(self, create_rule):
+	@mock.patch('monitor.views.create_prometheus_rule_draft')
+	def test_successful_create_creates_draft_audits_safe_identity_and_redirects(self, create_draft):
 		self.set_cluster_permission(DevOpsRole.ROLE_ADMIN)
-		create_rule.return_value = {'ok': True, 'code': 'ok', 'rule': {
+		create_draft.return_value = {'ok': True, 'code': 'ok', 'revision': {
+			'id': 17, 'status': 'draft', 'cluster_id': self.cluster.id,
 			'name': 'api-errors', 'namespace': 'monitoring',
 		}}
 
@@ -3789,16 +3862,20 @@ spec:
 		})
 
 		self.assertEqual(response.status_code, 302)
-		self.assertEqual(response.url, '%s?cluster=%s' % (reverse('monitor:monitor_index'), self.cluster.id))
-		create_rule.assert_called_once_with(self.cluster, self.valid_yaml().strip())
-		audit_log = AuditLog.objects.get(action='创建PrometheusRule')
+		self.assertEqual(response.url, '%s?cluster=%s&draft=created' % (reverse('monitor:monitor_index'), self.cluster.id))
+		create_draft.assert_called_once()
+		call_args, call_kwargs = create_draft.call_args
+		self.assertEqual(call_args[1], self.cluster)
+		self.assertEqual(call_args[2], self.valid_yaml().strip())
+		self.assertEqual(call_kwargs, {'action': 'create'})
+		audit_log = AuditLog.objects.get(action='创建PrometheusRule草稿')
 		self.assertEqual(audit_log.target_type, 'K8sCluster')
 		self.assertEqual(audit_log.target_id, str(self.cluster.id))
-		self.assertEqual(audit_log.detail, 'cluster=%s, namespace=monitoring, name=api-errors, action=create, outcome=ok' % self.cluster.id)
+		self.assertEqual(audit_log.detail, 'cluster=%s, namespace=monitoring, name=api-errors, action=create, outcome=draft' % self.cluster.id)
 		self.assertNotIn('spec:', audit_log.detail)
 
-	@mock.patch('monitor.views.create_prometheus_rule')
-	def test_service_failures_keep_admin_yaml_and_write_safe_audits(self, create_rule):
+	@mock.patch('monitor.views.create_prometheus_rule_draft')
+	def test_draft_creation_failures_keep_admin_yaml_and_write_safe_audits(self, create_draft):
 		self.set_cluster_permission(DevOpsRole.ROLE_ADMIN)
 		yaml_text = self.valid_yaml().strip()
 		with open('static/js/ops-vue-pages.js', 'r') as handle:
@@ -3806,12 +3883,14 @@ spec:
 		for result, status, message, outcome in (
 			({'ok': False, 'code': 'invalid_yaml', 'message': 'raw yaml parser detail'}, 400,
 				'规则 YAML 格式或资源身份无效。', 'invalid_yaml'),
+			({'ok': False, 'code': 'validation_error', 'message': 'raw revision validation detail'}, 400,
+				'规则 YAML 格式或资源身份无效。', 'validation_error'),
 			({'ok': False, 'code': 'offline', 'message': 'raw token=secret'}, 503,
 				'无法连接 Kubernetes 集群，请确认集群状态后重试。', 'offline'),
 			({'ok': False, 'code': 'untrusted_code', 'message': 'raw kubeconfig marker'}, 503,
 				'无法操作 PrometheusRule，请稍后重试。', 'offline'),
 		):
-			create_rule.return_value = result
+			create_draft.return_value = result
 			response = self.client.post('/monitor/prometheus-rules/create/', {
 				'cluster': self.cluster.id, 'yaml': yaml_text,
 			})
@@ -3826,7 +3905,7 @@ spec:
 			self.assertEqual(rules_data['error'], message)
 			self.assertNotContains(response, result['message'], status_code=status)
 			audit_log = AuditLog.objects.filter(
-				action='创建PrometheusRule', target_id=str(self.cluster.id),
+				action='创建PrometheusRule草稿', target_id=str(self.cluster.id),
 			).order_by('id').last()
 			self.assertEqual(
 				audit_log.detail,
@@ -3836,4 +3915,20 @@ spec:
 			)
 			self.assertNotIn(yaml_text, audit_log.detail)
 			self.assertNotIn(result['message'], audit_log.detail)
-		self.assertEqual(AuditLog.objects.filter(action='创建PrometheusRule').count(), 3)
+		self.assertEqual(AuditLog.objects.filter(action='创建PrometheusRule草稿').count(), 4)
+
+	@mock.patch('monitor.views.list_prometheus_rules')
+	def test_created_draft_notice_never_claims_rule_was_published(self, list_rules):
+		self.set_cluster_permission(DevOpsRole.ROLE_ADMIN)
+		list_rules.return_value = {'ok': True, 'code': 'ok', 'rules': []}
+
+		response = self.client.get(reverse('monitor:monitor_index'), {
+			'cluster': self.cluster.id, 'draft': 'created',
+		})
+
+		data = self.vue_data(response)
+		self.assertEqual(
+			data['prometheus_rules']['notice'],
+			'PrometheusRule 草稿已创建，正等待另一名集群管理员复核后发布。',
+		)
+		self.assertNotIn('已发布', data['prometheus_rules']['notice'])
