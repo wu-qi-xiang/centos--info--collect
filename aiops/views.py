@@ -37,9 +37,18 @@ from django.views.decorators.csrf import csrf_exempt
 from django.utils import timezone
 
 from devops.models import AlertEvent, AuditLog, CommandExecution, DevOpsModulePermission, DevOpsRole, MetricSample, NotificationLog, RunbookTemplate
+from devops.api import visible_catalog_services
 from devops.services import has_role, visible_hosts_for_request
 from userprofile.decorators import session_login_required
 from .change_impact import build_change_impacts
+from .alert_groups import build_alert_groups
+from .evidence_pack import build_evidence_pack
+from .alert_quality import build_alert_quality_suggestions
+from .investigation_timeline import build_investigation_timelines
+from .runbook_effectiveness import build_runbook_effectiveness_suggestions
+from .signal_freshness import build_signal_freshness
+from .service_impact import build_service_impacts
+from .service_workbench import build_service_workbench
 from .models import AiopsAlertAnalysis, AiopsIntegration
 
 
@@ -73,6 +82,159 @@ SAFE_ANNOTATION_SUBJECTS = frozenset((
 SAFE_ANNOTATION_STATES = frozenset((
 	'critical', 'degraded', 'down', 'failed', 'high', 'healthy', 'low', 'unavailable', 'up', 'warning',
 ))
+
+DIAGNOSTIC_EVIDENCE_MODULES = {
+	'alert': DevOpsModulePermission.MODULE_ALERT,
+	'incident': DevOpsModulePermission.MODULE_ALERT,
+	'metric_state': DevOpsModulePermission.MODULE_METRIC,
+	'failed_command': DevOpsModulePermission.MODULE_COMMAND,
+	'deployment_health': DevOpsModulePermission.MODULE_DEPLOYMENT,
+	'ci_delivery': DevOpsModulePermission.MODULE_DEPLOYMENT,
+}
+DIAGNOSTIC_WINDOWS = {
+	'6h': timezone.timedelta(hours=6),
+	'24h': timezone.timedelta(hours=24),
+}
+
+
+def _diagnostic_api_error(message, status, code):
+	return JsonResponse({'ok': False, 'code': code, 'message': message}, status=status)
+
+
+def diagnostic_evidence(request):
+	"""Return scoped, permission-filtered diagnostic evidence without side effects."""
+	if request.method != 'GET':
+		return _diagnostic_api_error('仅支持 GET 请求', 405, 'method_not_allowed')
+	if not request.session.get('is_login') or not request.session.get('user_id'):
+		return _diagnostic_api_error('未登录', 401, 'unauthorized')
+	window_key = request.GET.get('window', '24h')
+	window_delta = DIAGNOSTIC_WINDOWS.get(window_key)
+	host_id = request.GET.get('host_id', '')
+	if not window_delta or not str(host_id).isdigit():
+		return _diagnostic_api_error('主机或时间窗口无效', 400, 'validation_error')
+	visible_hosts = visible_hosts_for_request(request)
+	selected_host = visible_hosts.filter(pk=int(host_id)).first()
+	if not selected_host:
+		return _diagnostic_api_error('主机不存在或无权访问', 404, 'not_found')
+	allowed_modules = set(
+		module for module in set(DIAGNOSTIC_EVIDENCE_MODULES.values())
+		if has_role(request, DevOpsRole.ROLE_VIEWER, module)
+	)
+	if not allowed_modules:
+		return _diagnostic_api_error('没有诊断证据查看权限', 403, 'forbidden')
+	window_end = timezone.now()
+	pack = build_evidence_pack(
+		selected_host, visible_hosts, window_end - window_delta, window_end,
+	)
+	evidence = [
+		item for item in pack['evidence']
+		if DIAGNOSTIC_EVIDENCE_MODULES.get(item.get('kind')) in allowed_modules
+	]
+	return JsonResponse({
+		'ok': True,
+		'host_id': selected_host.id,
+		'window': window_key,
+		'window_start': pack['window_start'],
+		'window_end': pack['window_end'],
+		'evidence': evidence,
+	})
+
+
+def alert_groups(request):
+	"""Return visible alert-group analysis without changing alert lifecycle."""
+	if request.method != 'GET':
+		return _diagnostic_api_error('仅支持 GET 请求', 405, 'method_not_allowed')
+	if not request.session.get('is_login') or not request.session.get('user_id'):
+		return _diagnostic_api_error('未登录', 401, 'unauthorized')
+	if not has_role(request, DevOpsRole.ROLE_VIEWER, DevOpsModulePermission.MODULE_ALERT):
+		return _diagnostic_api_error('没有告警分组查看权限', 403, 'forbidden')
+	window_key = request.GET.get('window', '24h')
+	window_delta = DIAGNOSTIC_WINDOWS.get(window_key)
+	if not window_delta:
+		return _diagnostic_api_error('时间窗口无效', 400, 'validation_error')
+	return JsonResponse({
+		'ok': True,
+		'window': window_key,
+		'results': build_alert_groups(
+			list(visible_hosts_for_request(request)), timezone.now() - window_delta, timezone.now(),
+		),
+	})
+
+
+def signal_freshness(request):
+	"""Return scoped metric-signal freshness without collecting new samples."""
+	if request.method != 'GET':
+		return _diagnostic_api_error('仅支持 GET 请求', 405, 'method_not_allowed')
+	if not request.session.get('is_login') or not request.session.get('user_id'):
+		return _diagnostic_api_error('未登录', 401, 'unauthorized')
+	if not has_role(request, DevOpsRole.ROLE_VIEWER, DevOpsModulePermission.MODULE_METRIC):
+		return _diagnostic_api_error('没有监控信号查看权限', 403, 'forbidden')
+	window_key = request.GET.get('window', '24h')
+	if window_key not in DIAGNOSTIC_WINDOWS:
+		return _diagnostic_api_error('时间窗口无效', 400, 'validation_error')
+	return JsonResponse({
+		'ok': True,
+		'window': window_key,
+		'results': build_signal_freshness(
+			list(visible_hosts_for_request(request)), now=timezone.now(),
+		),
+	})
+
+
+def service_impacts(request):
+	"""Return host-scoped service impact summaries without changing DevOps state."""
+	if request.method != 'GET':
+		return _diagnostic_api_error('仅支持 GET 请求', 405, 'method_not_allowed')
+	if not request.session.get('is_login') or not request.session.get('user_id'):
+		return _diagnostic_api_error('未登录', 401, 'unauthorized')
+	if not has_role(request, DevOpsRole.ROLE_VIEWER, DevOpsModulePermission.MODULE_SERVICE):
+		return _diagnostic_api_error('没有服务影响查看权限', 403, 'forbidden')
+	window_key = request.GET.get('window', '24h')
+	if window_key not in DIAGNOSTIC_WINDOWS:
+		return _diagnostic_api_error('时间窗口无效', 400, 'validation_error')
+	visible_hosts = visible_hosts_for_request(request)
+	window_end = timezone.now()
+	return JsonResponse({
+		'ok': True,
+		'window': window_key,
+		'results': build_service_impacts(
+			visible_catalog_services(request).prefetch_related('hosts', 'upstream_links'),
+			list(visible_hosts), now=window_end,
+			window_start=window_end - DIAGNOSTIC_WINDOWS[window_key], window_end=window_end,
+		),
+	})
+
+
+def service_workbench(request, service_id):
+	"""Return one bounded, host-scoped service investigation payload."""
+	if request.method != 'GET':
+		return _diagnostic_api_error('仅支持 GET 请求', 405, 'method_not_allowed')
+	if not request.session.get('is_login') or not request.session.get('user_id'):
+		return _diagnostic_api_error('未登录', 401, 'unauthorized')
+	if not has_role(request, DevOpsRole.ROLE_VIEWER, DevOpsModulePermission.MODULE_SERVICE):
+		return _diagnostic_api_error('没有服务事件工作区查看权限', 403, 'forbidden')
+	window_key = request.GET.get('window', '24h')
+	window_delta = DIAGNOSTIC_WINDOWS.get(window_key)
+	if not window_delta:
+		return _diagnostic_api_error('时间窗口无效', 400, 'validation_error')
+	service = visible_catalog_services(request).filter(pk=service_id).first()
+	if not service:
+		return _diagnostic_api_error('服务不存在或无权访问', 404, 'not_found')
+	window_end = timezone.now()
+	try:
+		result = build_service_workbench(
+			service, list(visible_hosts_for_request(request)),
+			window_end - window_delta, window_end,
+		)
+	except ValueError:
+		return _diagnostic_api_error('服务不存在或无权访问', 404, 'not_found')
+	return JsonResponse({
+		'ok': True,
+		'window': window_key,
+		'window_start': timezone.localtime(window_end - window_delta).strftime('%Y-%m-%d %H:%M:%S'),
+		'window_end': timezone.localtime(window_end).strftime('%Y-%m-%d %H:%M:%S'),
+		**result,
+	})
 
 
 def _normalize_identifier(value, limit):
@@ -442,6 +604,13 @@ def dashboard(request):
 	root_causes = _build_root_causes(correlations, anomalies)
 	capacity = _build_capacity(hosts)
 	change_impacts = build_change_impacts(request, open_alerts, failed_commands, hosts)
+	alert_quality_suggestions = build_alert_quality_suggestions(hosts)
+	investigation_timelines = build_investigation_timelines(hosts)
+	runbook_effectiveness_suggestions = (
+		build_runbook_effectiveness_suggestions(hosts)
+		if has_role(request, DevOpsRole.ROLE_VIEWER, DevOpsModulePermission.MODULE_COMMAND)
+		else []
+	)
 	config = AiopsIntegration.current()
 	alert_analyses = _analysis_queryset_for_hosts(hosts)[:20]
 	payload = {
@@ -454,6 +623,9 @@ def dashboard(request):
 			'failed_commands': len(failed_commands),
 			'notification_failures': NotificationLog.objects.filter(status=NotificationLog.STATUS_FAILED).count(),
 			'change_impacts': len(change_impacts),
+			'alert_quality_suggestions': len(alert_quality_suggestions),
+			'investigation_timelines': len(investigation_timelines),
+			'runbook_effectiveness_suggestions': len(runbook_effectiveness_suggestions),
 		},
 		'capabilities': [
 			{'name': '异常检测', 'detail': '基于指标阈值、告警密度识别异常主机'},
@@ -468,7 +640,37 @@ def dashboard(request):
 		'root_causes': root_causes,
 		'capacity': capacity,
 		'change_impacts': change_impacts,
+		'alert_quality_suggestions': alert_quality_suggestions,
+		'investigation_timelines': investigation_timelines,
+		'runbook_effectiveness_suggestions': runbook_effectiveness_suggestions,
 		'runbooks': _runbooks(request, hosts),
+		'diagnostic_evidence': {
+			'endpoint': reverse('aiops:api_diagnostic_evidence'),
+			'hosts': [
+				{'id': host.id, 'name': _host_name(host)}
+				for host in hosts
+			],
+		},
+		'alert_groups_endpoint': (
+			reverse('aiops:api_alert_groups')
+			if has_role(request, DevOpsRole.ROLE_VIEWER, DevOpsModulePermission.MODULE_ALERT)
+			else None
+		),
+		'signal_freshness_endpoint': (
+			reverse('aiops:api_signal_freshness')
+			if has_role(request, DevOpsRole.ROLE_VIEWER, DevOpsModulePermission.MODULE_METRIC)
+			else None
+		),
+		'service_impacts_endpoint': (
+			reverse('aiops:api_service_impacts')
+			if has_role(request, DevOpsRole.ROLE_VIEWER, DevOpsModulePermission.MODULE_SERVICE)
+			else None
+		),
+		'service_workbench_endpoint_template': (
+			reverse('aiops:api_service_workbench', args=[999999]).replace('999999', '{service_id}')
+			if has_role(request, DevOpsRole.ROLE_VIEWER, DevOpsModulePermission.MODULE_SERVICE)
+			else None
+		),
 		'integration': {
 			'alertmanager_configured': bool(config.alertmanager_url),
 			'llm_configured': bool(config.llm_url),

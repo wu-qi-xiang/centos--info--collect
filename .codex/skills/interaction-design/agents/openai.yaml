@@ -1,0 +1,4 @@
+interface:
+  display_name: "Interaction Design"
+  short_description: "Design purposeful transitions, feedback, and microinteractions."
+  default_prompt: "Use for state feedback or reduced-motion-aware interactions in operations UI."

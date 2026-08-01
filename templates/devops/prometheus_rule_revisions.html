@@ -54,7 +54,7 @@
                             {% elif revision.status == 'submitted' and revision.created_by != request.session.user_name %}
                             <button type="button" class="btn btn-sm btn-outline-success revision-action" data-action="approve" data-url="{{ revision.api_urls.review }}">批准</button>
                             <button type="button" class="btn btn-sm btn-outline-danger revision-action" data-action="reject" data-url="{{ revision.api_urls.review }}">拒绝</button>
-                            {% elif revision.status == 'approved' and revision.created_by != request.session.user_name %}
+                            {% elif revision.status == 'approved' and revision.created_by != request.session.user_name and revision.id not in actor_reviewed_revision_ids %}
                             <button type="button" class="btn btn-sm btn-primary revision-action" data-action="publish" data-url="{{ revision.api_urls.publish }}">发布</button>
                             {% elif revision.status == 'published' %}
                             <button type="button" class="btn btn-sm btn-outline-secondary revision-action" data-action="restore" data-url="{{ revision.api_urls.restore }}">创建恢复草稿</button>

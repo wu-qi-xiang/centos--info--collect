@@ -4,6 +4,37 @@
     color: var(--ops-text, #0f172a);
 }
 
+body.ops-console .aiops-shell:not(.ops-geist-console) {
+    color: var(--ops-console-text);
+}
+
+body.ops-console .aiops-shell:not(.ops-geist-console) .aiops-head,
+body.ops-console .aiops-shell:not(.ops-geist-console) .aiops-panel,
+body.ops-console .aiops-shell:not(.ops-geist-console) .aiops-card,
+body.ops-console .aiops-shell:not(.ops-geist-console) .aiops-capability,
+body.ops-console .aiops-shell:not(.ops-geist-console) .aiops-row,
+body.ops-console .aiops-shell:not(.ops-geist-console) .aiops-runbook,
+body.ops-console .aiops-shell:not(.ops-geist-console) .aiops-capacity {
+    background: var(--ops-console-surface);
+    border-color: var(--ops-console-line);
+    box-shadow: none;
+}
+
+body.ops-console .aiops-shell:not(.ops-geist-console) .aiops-head { border-inline-start: 3px solid var(--ops-console-signal); }
+body.ops-console .aiops-shell:not(.ops-geist-console) .aiops-tabs { flex-wrap: nowrap; overflow-x: auto; padding-bottom: 2px; scrollbar-width: thin; }
+body.ops-console .aiops-shell:not(.ops-geist-console) .aiops-tabs button { flex: 0 0 auto; background: var(--ops-console-surface); border-color: var(--ops-console-line); color: var(--ops-console-muted); }
+body.ops-console .aiops-shell:not(.ops-geist-console) .aiops-tabs button.active,
+body.ops-console .aiops-shell:not(.ops-geist-console) .aiops-tabs button:hover { background: var(--ops-console-raised); color: var(--ops-console-signal); }
+body.ops-console .aiops-shell:not(.ops-geist-console) .aiops-impact { border-color: var(--ops-console-line); border-inline-start: 3px solid var(--ops-console-attention); padding-inline-start: 10px; }
+body.ops-console .aiops-shell:not(.ops-geist-console) .aiops-impact:has(.badge-danger),
+body.ops-console .aiops-shell:not(.ops-geist-console) .aiops-impact:has(.text-danger) { border-inline-start-color: var(--ops-console-critical); }
+
+@media (max-width: 768px) {
+    .aiops-kpis { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+    .aiops-grid.two { grid-template-columns: minmax(0, 1fr); }
+    .aiops-head { align-items: flex-start; flex-direction: column; }
+}
+
 .aiops-head,
 .aiops-panel,
 .aiops-card {
@@ -222,6 +253,54 @@
     padding: 10px 12px;
     background: #fff;
 }
+
+/* Geist control plane overrides are limited to the Vue root. */
+.ops-geist-console.aiops-shell {
+    --ops-geist-canvas: #fafafa;
+    --ops-geist-surface: #ffffff;
+    --ops-geist-raised: #f5f5f5;
+    --ops-geist-line: #eaeaea;
+    --ops-geist-line-strong: #d4d4d4;
+    --ops-geist-text: #171717;
+    --ops-geist-muted: #737373;
+    --ops-geist-blue: #0070f3;
+    min-width: 0;
+    gap: 10px;
+    padding: 2px;
+    color: var(--ops-geist-text);
+    background: var(--ops-geist-canvas);
+}
+.ops-geist-console .aiops-head,
+.ops-geist-console .aiops-panel,
+.ops-geist-console .aiops-card,
+.ops-geist-console .aiops-capability,
+.ops-geist-console .aiops-row,
+.ops-geist-console .aiops-runbook,
+.ops-geist-console .aiops-capacity { border-color: var(--ops-geist-line); border-radius: 6px; background: var(--ops-geist-surface); box-shadow: none; }
+.ops-geist-console .aiops-head { padding: 13px 14px; border-inline-start: 3px solid var(--ops-geist-blue); }
+.ops-geist-console .aiops-head h1 { font-size: 18px; font-weight: 700; }
+.ops-geist-console :is(.aiops-head p, .aiops-updated, .aiops-row span, .aiops-row small, .aiops-capability span, .aiops-runbook span, .aiops-capacity span, .aiops-muted) { color: var(--ops-geist-muted); }
+.ops-geist-console .aiops-tabs { flex-wrap: nowrap; gap: 2px; overflow-x: auto; padding-bottom: 2px; }
+.ops-geist-console .aiops-tabs button { min-height: 32px; flex: 0 0 auto; border-color: var(--ops-geist-line); border-radius: 5px; padding: 6px 9px; background: #fff; color: #525252; font-size: 13px; font-weight: 600; }
+.ops-geist-console .aiops-tabs button.active,
+.ops-geist-console .aiops-tabs button:hover { color: var(--ops-geist-blue); background: #eef6ff; }
+.ops-geist-console .aiops-kpis,
+.ops-geist-console .aiops-grid { gap: 10px; }
+.ops-geist-console .aiops-card,
+.ops-geist-console .aiops-panel { padding: 12px; }
+.ops-geist-console .aiops-card strong { margin-top: 4px; font-size: 24px; font-weight: 700; }
+.ops-geist-console .aiops-panel h2 { margin-bottom: 10px; font-size: 14px; font-weight: 700; }
+.ops-geist-console .aiops-impact { border-color: var(--ops-geist-line); border-inline-start: 3px solid #eab308; padding: 10px 0 10px 10px; }
+.ops-geist-console .aiops-impact:has(.badge-danger),
+.ops-geist-console .aiops-impact:has(.text-danger) { border-inline-start-color: #dc2626; }
+.ops-geist-console .aiops-impact-timeline { border-color: #bfdbfe; }
+.ops-geist-console .aiops-impact-timeline li::before { border-color: var(--ops-geist-blue); background: #fff; }
+.ops-geist-console .aiops-row:hover,
+.ops-geist-console .aiops-capability:hover,
+.ops-geist-console .aiops-runbook:hover { border-color: var(--ops-geist-line-strong); background: #fafafa; }
+.ops-geist-console .btn { min-height: 32px; border-radius: 5px; font-weight: 600; }
+.ops-geist-console .btn-primary { border-color: #171717; background: #171717; color: #fff; }
+.ops-geist-console .btn-primary:hover { border-color: #000; background: #000; }
 
 .aiops-capability,
 .aiops-runbook {

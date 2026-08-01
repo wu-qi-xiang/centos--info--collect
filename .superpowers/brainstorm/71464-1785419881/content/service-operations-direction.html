@@ -1,0 +1,50 @@
+<h2>服务运行页面的下一阶段方向</h2>
+<p class="subtitle">范围固定为服务管理、运行手册、文件分发和监控历史。请选择更适合日常运维的改造方式。</p>
+
+<div class="cards">
+  <div class="card" data-choice="a" onclick="toggleSelect(this)">
+    <div class="card-image">
+      <div class="mockup">
+        <div class="mockup-header">A · 局部样式修补</div>
+        <div class="mockup-body">
+          <div class="placeholder">原有表单与表格</div>
+          <div class="placeholder">只调整颜色和按钮</div>
+        </div>
+      </div>
+    </div>
+    <div class="card-body"><h3>最小视觉修补</h3><p>改动最少，但状态、风险操作和窄屏规则仍会分散在页面里。</p></div>
+  </div>
+  <div class="card" data-choice="b" onclick="toggleSelect(this)">
+    <div class="card-image">
+      <div class="mockup">
+        <div class="mockup-header">B · 风险分层操作页</div>
+        <div class="mockup-body">
+          <div class="mock-sidebar">服务 / 手册 / 文件 / 指标</div>
+          <div class="mock-content">
+            <div class="label">SERVICE ACTION</div>
+            <div class="placeholder">目标、动作、执行边界</div>
+            <div class="placeholder">状态记录与窄屏表格</div>
+          </div>
+        </div>
+      </div>
+    </div>
+    <div class="card-body"><h3>推荐：风险分层操作页</h3><p>保留 Django 表单和后端流程，通过局部语义钩子统一行动区、结果区和表格扫描。</p></div>
+  </div>
+  <div class="card" data-choice="c" onclick="toggleSelect(this)">
+    <div class="card-image">
+      <div class="mockup">
+        <div class="mockup-header">C · Vue 控制台重写</div>
+        <div class="mockup-body">
+          <div class="placeholder">新数据载入层</div>
+          <div class="placeholder">新交互与状态管理</div>
+        </div>
+      </div>
+    </div>
+    <div class="card-body"><h3>全面控制台化</h3><p>交互一致性最高，但需要改造表单和权限数据桥接，当前阶段风险与测试成本最高。</p></div>
+  </div>
+</div>
+
+<div class="section">
+  <span class="label">推荐理由</span>
+  <p>选择 B：危险服务操作、需要审批的运行手册、文件分发结果和指标趋势能共享同一套可读性规则，同时不改变表单、权限、CSRF、远端执行和监控数据流程。</p>
+</div>

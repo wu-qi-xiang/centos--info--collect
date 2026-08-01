@@ -633,7 +633,7 @@ def _safe_prometheus_rule_summary(cluster, rule):
 	}
 
 
-def _prometheus_rules_payload(request, yaml_form=None, error='', selected_cluster=None):
+def _prometheus_rules_payload(request, yaml_form=None, create_error='', selected_cluster=None):
 	if not _can_view_prometheus_rules(request):
 		return {'permission_denied': True}
 	clusters = list(K8sCluster.objects.order_by('name', 'id'))
@@ -649,7 +649,8 @@ def _prometheus_rules_payload(request, yaml_form=None, error='', selected_cluste
 		'selected_cluster_name': '',
 		'configured': False,
 		'rules': [],
-		'error': error,
+		'error': '',
+		'create_error': create_error,
 		'notice': ('PrometheusRule 草稿已创建，正等待另一名集群管理员复核后发布。'
 			if request.GET.get('draft') == 'created' else ''),
 		'can_create': can_create,
@@ -688,14 +689,14 @@ def _prometheus_rules_payload(request, yaml_form=None, error='', selected_cluste
 
 
 def _monitor_payload(request, monitor_obj=None, form=None, action='', prometheus_rule_form=None,
-					 prometheus_rule_error='', prometheus_rule_cluster=None):
+					 prometheus_rule_create_error='', prometheus_rule_cluster=None):
 	payload = {
 		'subtitle': '管理 Kubernetes 集群中的 PrometheusRule 规则摘要与双人复核草稿',
 		'csrf': get_token(request),
 		'actions': _monitor_actions(),
 	}
 	payload['prometheus_rules'] = _prometheus_rules_payload(
-		request, prometheus_rule_form, prometheus_rule_error, prometheus_rule_cluster,
+		request, prometheus_rule_form, prometheus_rule_create_error, prometheus_rule_cluster,
 	)
 	return payload
 
@@ -1334,7 +1335,7 @@ def prometheus_rule_create(request):
 		return render_vue_page(
 			request, 'monitor', '告警设置',
 			_monitor_payload(request, Monitor.objects.order_by('id').first(), prometheus_rule_form=form,
-				prometheus_rule_error='规则 YAML 格式或资源身份无效。', prometheus_rule_cluster=cluster),
+				prometheus_rule_create_error='规则 YAML 格式或资源身份无效。', prometheus_rule_cluster=cluster),
 			content, status=400,
 		)
 	yaml_text = form.cleaned_data['yaml']
@@ -1342,7 +1343,7 @@ def prometheus_rule_create(request):
 		return render_vue_page(
 			request, 'monitor', '告警设置',
 			_monitor_payload(request, Monitor.objects.order_by('id').first(), prometheus_rule_form=form,
-				prometheus_rule_error='规则 YAML 格式或资源身份无效。', prometheus_rule_cluster=cluster),
+				prometheus_rule_create_error='规则 YAML 格式或资源身份无效。', prometheus_rule_cluster=cluster),
 			_monitor_context(request, Monitor.objects.all(), form), status=400,
 		)
 	try:
@@ -1361,7 +1362,7 @@ def prometheus_rule_create(request):
 		return render_vue_page(
 			request, 'monitor', '告警设置',
 			_monitor_payload(request, Monitor.objects.order_by('id').first(), prometheus_rule_form=form,
-				prometheus_rule_error='规则 YAML 格式或资源身份无效。', prometheus_rule_cluster=cluster),
+				prometheus_rule_create_error='规则 YAML 格式或资源身份无效。', prometheus_rule_cluster=cluster),
 			_monitor_context(request, Monitor.objects.all(), form), status=400,
 		)
 	result = create_prometheus_rule_draft(request, cluster, yaml_text, action='create')
@@ -1376,7 +1377,7 @@ def prometheus_rule_create(request):
 		return render_vue_page(
 			request, 'monitor', '告警设置',
 			_monitor_payload(request, Monitor.objects.order_by('id').first(), prometheus_rule_form=form,
-				prometheus_rule_error=_prometheus_rule_message(result), prometheus_rule_cluster=cluster),
+				prometheus_rule_create_error=_prometheus_rule_message(result), prometheus_rule_cluster=cluster),
 			_monitor_context(request, Monitor.objects.all(), form),
 			status=_prometheus_rule_failure_status(result.get('code', 'offline')),
 		)
@@ -1389,7 +1390,7 @@ def prometheus_rule_create(request):
 		return render_vue_page(
 			request, 'monitor', '告警设置',
 			_monitor_payload(request, Monitor.objects.order_by('id').first(), prometheus_rule_form=form,
-				prometheus_rule_error='无法操作 PrometheusRule，请稍后重试。', prometheus_rule_cluster=cluster),
+				prometheus_rule_create_error='无法操作 PrometheusRule，请稍后重试。', prometheus_rule_cluster=cluster),
 			_monitor_context(request, Monitor.objects.all(), form), status=503,
 		)
 	audit(

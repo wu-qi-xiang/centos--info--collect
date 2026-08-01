@@ -1,0 +1,4 @@
+interface:
+  display_name: "Design System Patterns"
+  short_description: "Build reusable tokens, themes, and component conventions."
+  default_prompt: "Use for shared UI tokens, themes, or component-system changes."

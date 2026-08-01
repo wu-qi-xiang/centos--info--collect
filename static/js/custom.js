@@ -254,30 +254,26 @@ class App {
         const currentPath = normalizePath(window.location.pathname);
 
         groups.forEach(group => {
-            const parentLink = group.querySelector(':scope > .sidebar-parent-link');
+            const parentLink = group.querySelector(':scope > .sidebar-parent-row > .sidebar-parent-link');
+            const disclosure = group.querySelector(':scope > .sidebar-parent-row > .sidebar-disclosure');
             const subnav = group.querySelector(':scope > .sidebar-subnav');
-            if (!parentLink || !subnav) return;
+            if (!parentLink || !disclosure || !subnav) return;
 
             const links = Array.from(subnav.querySelectorAll('a[href]'));
             const parentPath = normalizePath(parentLink.getAttribute('href'));
             const isCurrentGroup = links.some(link => normalizePath(link.getAttribute('href')) === currentPath) || parentPath === currentPath;
 
-            parentLink.setAttribute('aria-expanded', isCurrentGroup ? 'true' : 'false');
+            disclosure.setAttribute('aria-expanded', isCurrentGroup ? 'true' : 'false');
             if (isCurrentGroup) {
                 group.classList.add('is-open');
             }
 
-            parentLink.addEventListener('click', event => {
-                event.preventDefault();
-                const nextOpen = group.classList.toggle('is-open');
-                parentLink.setAttribute('aria-expanded', nextOpen ? 'true' : 'false');
-            });
+            disclosure.addEventListener('click', event => {
+                const sidebarGroup = event.currentTarget.closest('.sidebar-nav-group');
+                if (!sidebarGroup) return;
 
-            parentLink.addEventListener('keydown', event => {
-                if (event.key === ' ' || event.key === 'Spacebar') {
-                    event.preventDefault();
-                    parentLink.click();
-                }
+                const nextOpen = sidebarGroup.classList.toggle('is-open');
+                event.currentTarget.setAttribute('aria-expanded', nextOpen ? 'true' : 'false');
             });
         });
     }

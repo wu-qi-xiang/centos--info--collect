@@ -3,10 +3,10 @@
 {% block title %}服务管理 - DevOps平台{% endblock %}
 
 {% block content %}
-<div class="container-fluid px-4">
+<div class="container-fluid px-4 ops-legacy-operation ops-service-page">
     <h1 class="h3 mb-3">服务管理</h1>
     {% include "devops/_nav.html" %}
-    <div class="card mb-3"><div class="card-body">
+    <div class="card mb-3 ops-legacy-card ops-service-action"><div class="card-body">
         <form method="post">
             {% csrf_token %}
             <div class="mb-3"><label class="form-label">主机</label>{{ form.host }}</div>
@@ -16,9 +16,9 @@
         </form>
     </div></div>
     {% if result %}
-    <div class="card mb-3"><div class="card-header">本次操作：{{ result.status }}</div><div class="card-body"><pre class="bg-light p-3">{{ result.output }}</pre></div></div>
+    <div class="card mb-3 ops-legacy-card ops-service-result"><div class="card-header">本次操作：{{ result.status }}</div><div class="card-body"><pre class="bg-light p-3">{{ result.output }}</pre></div></div>
     {% endif %}
-    <div class="card"><div class="card-header">服务操作记录</div><div class="card-body table-responsive">
+    <div class="card ops-legacy-card ops-legacy-records"><div class="card-header">服务操作记录</div><div class="card-body table-responsive ops-legacy-table-wrap">
         <table class="table table-sm">
             <tr><th>时间</th><th>主机</th><th>服务</th><th>操作</th><th>状态</th><th>输出</th></tr>
             {% for item in records %}

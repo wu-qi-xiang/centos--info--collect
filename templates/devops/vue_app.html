@@ -4,11 +4,11 @@
 {% block title %}DevOps控制台{% endblock %}
 
 {% block extra_css %}
-<link rel="stylesheet" href="{% static 'css/devops-vue.css' %}?v=20260708">
+<link rel="stylesheet" href="{% static 'css/devops-vue.css' %}?v=20260801-geist-control-plane-01">
 {% endblock %}
 
 {% block content %}
-<div id="devops-vue-root" class="devops-vue-shell">
+<div id="devops-vue-root" class="devops-vue-shell ops-console-page ops-console-devops ops-geist-console">
     <div class="vue-loading">
         <div class="spinner-border text-primary" role="status"></div>
         <span>加载 DevOps 控制台...</span>
@@ -19,5 +19,5 @@
 
 {% block script %}
 <script src="{% static 'vendor/vue.global.prod.js' %}?v=3"></script>
-<script src="{% static 'js/devops-vue.js' %}?v=20260708"></script>
+<script src="{% static 'js/devops-vue.js' %}?v=20260801-geist-control-plane-01"></script>
 {% endblock %}

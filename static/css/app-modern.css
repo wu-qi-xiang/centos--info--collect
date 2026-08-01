@@ -1,24 +1,24 @@
 /* Modern operations console skin. Loaded after legacy custom.css. */
 :root {
-    --ops-bg: #f5f7fb;
+    --ops-bg: #fafafa;
     --ops-surface: #ffffff;
-    --ops-surface-soft: #f8fafc;
-    --ops-border: #e2e8f0;
-    --ops-border-strong: #cbd5e1;
-    --ops-text: #0f172a;
-    --ops-muted: #64748b;
-    --ops-subtle: #94a3b8;
-    --ops-primary: #2563eb;
-    --ops-primary-hover: #1d4ed8;
-    --ops-success: #16a34a;
-    --ops-warning: #d97706;
-    --ops-danger: #dc2626;
-    --ops-info: #0891b2;
-    --ops-shadow: 0 1px 2px rgba(15, 23, 42, 0.06);
-    --ops-shadow-lg: 0 16px 36px rgba(15, 23, 42, 0.10);
-    --ops-radius: 8px;
-    --ops-radius-sm: 6px;
-    --ops-sidebar-width: 232px;
+    --ops-surface-soft: #f7f7f7;
+    --ops-border: #eaeaea;
+    --ops-border-strong: #d4d4d4;
+    --ops-text: #111111;
+    --ops-muted: #666666;
+    --ops-subtle: #8a8a8a;
+    --ops-primary: #0070f3;
+    --ops-primary-hover: #0059c9;
+    --ops-success: #0f8a48;
+    --ops-warning: #b45309;
+    --ops-danger: #d9363e;
+    --ops-info: #0070f3;
+    --ops-shadow: 0 1px 2px rgba(0, 0, 0, 0.04);
+    --ops-shadow-lg: 0 14px 32px rgba(0, 0, 0, 0.10);
+    --ops-radius: 6px;
+    --ops-radius-sm: 4px;
+    --ops-sidebar-width: 240px;
 }
 
 html {
@@ -47,7 +47,7 @@ body {
 
 .main-content {
     min-height: 100vh;
-    padding: 24px 0 40px var(--ops-sidebar-width) !important;
+    padding: 72px 0 40px var(--ops-sidebar-width) !important;
 }
 
 .main-content > .container-fluid {
@@ -73,7 +73,7 @@ body {
     flex-direction: column;
     width: 100%;
     min-height: 100vh;
-    padding: 16px 12px;
+    padding: 14px 12px;
 }
 
 .navbar-custom .navbar-brand {
@@ -84,7 +84,7 @@ body {
     font-size: 15px !important;
     font-weight: 700 !important;
     letter-spacing: 0;
-    padding: 8px 10px 18px;
+    padding: 8px 10px 16px;
     margin: 0;
 }
 
@@ -101,7 +101,8 @@ body {
     padding: 0 10px;
     color: var(--ops-subtle);
     font-size: 11px;
-    font-weight: 800;
+    font-weight: 700;
+    letter-spacing: 0.04em;
 }
 
 .sidebar-nav {
@@ -116,7 +117,7 @@ body {
 
 .sidebar-parent-link {
     color: var(--ops-text) !important;
-    font-weight: 700 !important;
+    font-weight: 650 !important;
 }
 
 .sidebar-subnav {
@@ -163,7 +164,7 @@ body {
     color: var(--ops-muted) !important;
     border-radius: var(--ops-radius-sm) !important;
     font-size: 13px;
-    font-weight: 600 !important;
+    font-weight: 500 !important;
     padding: 10px !important;
     transform: none !important;
 }
@@ -175,9 +176,9 @@ body {
 }
 
 .navbar-custom .nav-link:hover,
-.navbar-custom .nav-link:focus {
+.navbar-custom .nav-link:focus-visible {
     color: var(--ops-primary) !important;
-    background: #eff6ff !important;
+    background: #f0f6ff !important;
     transform: none !important;
 }
 
@@ -205,7 +206,7 @@ body {
     padding: 10px;
     color: var(--ops-text);
     font-size: 13px;
-    font-weight: 700;
+    font-weight: 600;
 }
 
 .sidebar-user i {

@@ -1,0 +1,37 @@
+<h2>三种当前主流产品界面方向</h2>
+<p class="subtitle">同一份 DevOps 内容，不同的视觉语言。点击任一方案即可记录偏好。</p>
+
+<div class="cards">
+  <div class="card" data-choice="linear" onclick="toggleSelect(this)">
+    <div class="card-image">
+      <div style="min-height:245px;background:#f8f8fa;color:#1d1d22;font:12px -apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;border:1px solid #dfdfe5">
+        <div style="height:34px;padding:0 11px;display:flex;align-items:center;border-bottom:1px solid #e6e6eb"><b>Operations</b><span style="margin-left:auto;color:#8b8b96">⌘ K</span></div>
+        <div style="display:grid;grid-template-columns:72px 1fr;min-height:211px"><div style="padding:10px 6px;border-right:1px solid #e8e8ed;color:#73737d;line-height:2.3">服务<br><b style="background:#e9e9ef;color:#252530;padding:4px">运行</b><br>文件<br>指标</div><div style="padding:14px"><b style="font-size:15px">服务管理</b><div style="color:#7d7d87;margin-top:4px">受控操作与记录</div><div style="background:#fff;border:1px solid #e1e1e7;border-radius:5px;padding:10px;margin-top:13px">目标主机　 nginx　 <span style="float:right;background:#5e6ad2;color:white;padding:4px 7px;border-radius:3px">执行</span></div><div style="background:#fff;border:1px solid #e1e1e7;border-radius:5px;padding:8px;margin-top:8px;color:#73737d">执行记录　　api-03　　完成</div></div></div>
+      </div>
+    </div>
+    <div class="card-body"><h3>1. Linear 极简工作台</h3><p>细线、紧凑、低饱和；用结构和排版建立高级感。最适合持续操作的企业后台。</p></div>
+  </div>
+
+  <div class="card" data-choice="bento" onclick="toggleSelect(this)">
+    <div class="card-image">
+      <div style="min-height:245px;background:#0d1117;color:#ecf2f8;font:12px -apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;padding:11px;border:1px solid #27313d">
+        <div style="display:flex;align-items:center"><b style="font-size:14px">AIOps Command Center</b><span style="margin-left:auto;background:#173b45;color:#6ce0d1;padding:4px 7px;border-radius:12px">Live</span></div>
+        <div style="display:grid;grid-template-columns:1fr 1fr;gap:7px;margin-top:11px"><div style="background:#151c24;border:1px solid #2a3745;border-radius:7px;padding:9px"><span style="color:#9baab9">Active incidents</span><div style="font-size:23px;margin-top:6px">03</div></div><div style="background:#151c24;border:1px solid #2a3745;border-radius:7px;padding:9px"><span style="color:#9baab9">Healthy services</span><div style="font-size:23px;margin-top:6px;color:#66d9a5">24</div></div><div style="grid-column:1/3;background:#151c24;border:1px solid #2a3745;border-radius:7px;padding:9px"><b>服务操作</b><div style="margin-top:8px;border-top:1px solid #263340;padding-top:8px;color:#aab8c6">api-03　nginx　<span style="color:#66d9a5">完成</span></div></div></div>
+      </div>
+    </div>
+    <div class="card-body"><h3>2. AI 原生 Bento 控制台</h3><p>指标、洞察和操作组合成模块网格。科技感最强，但高频表格页容易显得碎。</p></div>
+  </div>
+
+  <div class="card" data-choice="glass" onclick="toggleSelect(this)">
+    <div class="card-image">
+      <div style="min-height:245px;background:linear-gradient(135deg,#d8eaff,#eae5ff 52%,#dff5ed);color:#1d2a3a;font:12px -apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;padding:11px;box-sizing:border-box">
+        <div style="background:rgba(255,255,255,.55);backdrop-filter:blur(12px);border:1px solid rgba(255,255,255,.8);border-radius:10px;padding:9px;display:flex"><b>服务管理</b><span style="margin-left:auto">◉ api-prod-03</span></div>
+        <div style="background:rgba(255,255,255,.54);border:1px solid rgba(255,255,255,.8);border-radius:10px;padding:12px;margin-top:11px"><div style="color:#62708a">准备执行</div><div style="font-size:16px;margin-top:4px">重启 nginx</div><div style="display:flex;gap:7px;margin-top:13px"><span style="background:rgba(255,255,255,.72);padding:7px;border-radius:6px;flex:1">目标</span><span style="background:#2c6ee8;color:white;padding:7px 9px;border-radius:6px">执行</span></div></div>
+        <div style="background:rgba(255,255,255,.45);border:1px solid rgba(255,255,255,.7);border-radius:10px;padding:9px;margin-top:8px">最近记录　　已恢复</div>
+      </div>
+    </div>
+    <div class="card-body"><h3>3. Liquid Glass</h3><p>半透明、柔和、视觉吸引力强。适合展示型或轻量管理端，不建议作为重运维页面主基线。</p></div>
+  </div>
+</div>
+
+<div class="section"><span class="label">我的判断</span><p>你的项目应以 1 为主，因为它最能承载 DevOps 的表格、权限与重复操作；可以从 2 借一点“状态总览”的表达，但不建议把 3 用在执行、审批、告警和监控记录页面。</p></div>

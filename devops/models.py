@@ -151,9 +151,31 @@ class ServiceCatalog(models.Model):
         (ENV_PRODUCTION, '生产'),
     )
 
+    LIFECYCLE_ACTIVE = 'active'
+    LIFECYCLE_MAINTENANCE = 'maintenance'
+    LIFECYCLE_RETIRED = 'retired'
+    LIFECYCLE_CHOICES = (
+        (LIFECYCLE_ACTIVE, '运行中'),
+        (LIFECYCLE_MAINTENANCE, '维护中'),
+        (LIFECYCLE_RETIRED, '已退役'),
+    )
+
+    CRITICALITY_LOW = 'low'
+    CRITICALITY_MEDIUM = 'medium'
+    CRITICALITY_HIGH = 'high'
+    CRITICALITY_CRITICAL = 'critical'
+    CRITICALITY_CHOICES = (
+        (CRITICALITY_LOW, '低'),
+        (CRITICALITY_MEDIUM, '中'),
+        (CRITICALITY_HIGH, '高'),
+        (CRITICALITY_CRITICAL, '关键'),
+    )
+
     name = models.CharField(max_length=100, unique=True)
     owner = models.CharField(max_length=100, blank=True)
     environment = models.CharField(max_length=20, choices=ENVIRONMENT_CHOICES, default=ENV_PRODUCTION)
+    lifecycle = models.CharField(max_length=20, choices=LIFECYCLE_CHOICES, default=LIFECYCLE_ACTIVE)
+    criticality = models.CharField(max_length=20, choices=CRITICALITY_CHOICES, default=CRITICALITY_MEDIUM)
     description = models.CharField(max_length=300, blank=True)
     created_by = models.CharField(max_length=100, blank=True)
     created_at = models.DateTimeField(auto_now_add=True)
@@ -166,6 +188,51 @@ class ServiceCatalog(models.Model):
 
     def __str__(self):
         return self.name
+
+
+class CloudResourceSummary(models.Model):
+    """Safe cloud inventory summary; it deliberately contains no provider credentials."""
+    PROVIDER_AWS = 'aws'
+    PROVIDER_AZURE = 'azure'
+    PROVIDER_GCP = 'gcp'
+    PROVIDER_ALIYUN = 'aliyun'
+    PROVIDER_CHOICES = (
+        (PROVIDER_AWS, 'AWS'),
+        (PROVIDER_AZURE, 'Azure'),
+        (PROVIDER_GCP, 'GCP'),
+        (PROVIDER_ALIYUN, '阿里云'),
+    )
+
+    service = models.ForeignKey(ServiceCatalog, on_delete=models.CASCADE, related_name='cloud_resources')
+    provider = models.CharField(max_length=20, choices=PROVIDER_CHOICES)
+    resource_type = models.CharField(max_length=64)
+    resource_identifier = models.CharField(max_length=160)
+    region = models.CharField(max_length=64)
+    tag_digest = models.CharField(max_length=64)
+    last_seen_at = models.DateTimeField(auto_now=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        db_table = 'devops_cloud_resource_summary'
+        ordering = ['provider', 'region', 'resource_type', 'resource_identifier']
+        unique_together = ('provider', 'resource_type', 'resource_identifier', 'region')
+
+    def __str__(self):
+        return '%s:%s' % (self.provider, self.resource_identifier)
+
+
+class CloudDailyCostSummary(models.Model):
+    resource = models.ForeignKey(CloudResourceSummary, on_delete=models.CASCADE, related_name='daily_costs')
+    cost_date = models.DateField()
+    amount = models.DecimalField(max_digits=14, decimal_places=4)
+    currency = models.CharField(max_length=3, default='USD')
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        db_table = 'devops_cloud_daily_cost_summary'
+        ordering = ['-cost_date', 'resource__provider', 'resource__resource_identifier']
+        unique_together = ('resource', 'cost_date', 'currency')
 
 
 class K8sWorkloadServiceMapping(models.Model):
@@ -262,6 +329,9 @@ class ServiceSloEvaluation(models.Model):
     slo = models.ForeignKey(ServiceSlo, on_delete=models.CASCADE, related_name='evaluations')
     state = models.CharField(max_length=20, choices=ServiceSlo.STATE_CHOICES)
     summary = models.CharField(max_length=200)
+    observed_value = models.DecimalField(max_digits=12, decimal_places=4, null=True, blank=True)
+    budget_remaining_percent = models.DecimalField(max_digits=7, decimal_places=4, null=True, blank=True)
+    burn_rate = models.DecimalField(max_digits=9, decimal_places=4, null=True, blank=True)
     evaluated_at = models.DateTimeField()
 
     class Meta:
@@ -536,6 +606,33 @@ class CommandExecution(models.Model):
         ordering = ['-created_at']
 
 
+class RunbookEffectivenessFeedback(models.Model):
+    """Append-only, safe operator feedback for an approved runbook execution."""
+    CLASSIFICATION_EFFECTIVE = 'effective'
+    CLASSIFICATION_PARTIAL = 'partial'
+    CLASSIFICATION_INEFFECTIVE = 'ineffective'
+    CLASSIFICATION_CHOICES = (
+        (CLASSIFICATION_EFFECTIVE, '有效'),
+        (CLASSIFICATION_PARTIAL, '部分有效'),
+        (CLASSIFICATION_INEFFECTIVE, '无效'),
+    )
+
+    command_execution = models.ForeignKey(
+        CommandExecution, on_delete=models.CASCADE, related_name='effectiveness_feedbacks',
+    )
+    classification = models.CharField(max_length=20, choices=CLASSIFICATION_CHOICES)
+    note = models.CharField(max_length=300, blank=True)
+    created_by = models.CharField(max_length=100, blank=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        db_table = 'devops_runbook_effectiveness_feedback'
+        ordering = ['-created_at', '-id']
+        indexes = [
+            models.Index(fields=['command_execution', '-created_at'], name='devops_runbook_effect_idx'),
+        ]
+
+
 class CommandPolicy(models.Model):
     ACTION_BLOCK = 'block'
     ACTION_REQUIRE_ADMIN = 'require_admin'
@@ -695,6 +792,30 @@ class AlertHistory(models.Model):
         ordering = ['-created_at']
 
 
+class AlertQualityFeedback(models.Model):
+    CLASSIFICATION_VALID = 'valid'
+    CLASSIFICATION_NOISE = 'noise'
+    CLASSIFICATION_DUPLICATE = 'duplicate'
+    CLASSIFICATION_THRESHOLD = 'threshold'
+    CLASSIFICATION_CHOICES = (
+        (CLASSIFICATION_VALID, '有效告警'),
+        (CLASSIFICATION_NOISE, '噪声告警'),
+        (CLASSIFICATION_DUPLICATE, '重复告警'),
+        (CLASSIFICATION_THRESHOLD, '阈值待优化'),
+    )
+
+    alert = models.ForeignKey(AlertEvent, on_delete=models.CASCADE, related_name='quality_feedbacks')
+    classification = models.CharField(max_length=20, choices=CLASSIFICATION_CHOICES)
+    note = models.CharField(max_length=300, blank=True)
+    created_by = models.CharField(max_length=100, blank=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        db_table = 'devops_alert_quality_feedback'
+        ordering = ['-created_at', '-id']
+        indexes = [models.Index(fields=['alert', '-created_at'], name='devops_alert_quality_idx')]
+
+
 class Incident(models.Model):
     SEVERITY_LOW = 'low'
     SEVERITY_MEDIUM = 'medium'
@@ -730,6 +851,9 @@ class Incident(models.Model):
     root_cause = models.TextField(blank=True)
     resolution = models.TextField(blank=True)
     follow_up = models.TextField(blank=True)
+    owner = models.CharField(max_length=100, blank=True)
+    assigned_at = models.DateTimeField(null=True, blank=True)
+    sla_due_at = models.DateTimeField(null=True, blank=True)
     created_by = models.CharField(max_length=100, blank=True)
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
@@ -752,6 +876,30 @@ class IncidentTimeline(models.Model):
     class Meta:
         db_table = 'devops_incident_timeline'
         ordering = ['created_at', 'id']
+
+
+class InspectionRecommendation(models.Model):
+    STATUS_RECOMMENDED = 'recommended'
+    STATUS_INITIATED = 'initiated'
+    STATUS_CHOICES = (
+        (STATUS_RECOMMENDED, '已建议'),
+        (STATUS_INITIATED, '已提交审批'),
+    )
+
+    compliance_result = models.ForeignKey('ComplianceResult', on_delete=models.CASCADE, related_name='recommendations')
+    host = models.ForeignKey(NewLinux, on_delete=models.CASCADE, related_name='inspection_recommendations')
+    runbook = models.ForeignKey('RunbookTemplate', on_delete=models.PROTECT, related_name='inspection_recommendations')
+    summary = models.CharField(max_length=300, blank=True)
+    status = models.CharField(max_length=20, choices=STATUS_CHOICES, default=STATUS_RECOMMENDED)
+    initiated_approval = models.ForeignKey('ApprovalRequest', null=True, blank=True, on_delete=models.SET_NULL)
+    created_by = models.CharField(max_length=100, blank=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        db_table = 'devops_inspection_recommendation'
+        unique_together = ('compliance_result', 'runbook')
+        ordering = ['-created_at']
 
 
 class MetricSample(models.Model):
@@ -1159,6 +1307,7 @@ class DeploymentRelease(models.Model):
     deploy_script = models.TextField()
     rollback_script = models.TextField(blank=True)
     hosts = models.ManyToManyField(NewLinux, blank=True)
+    rollout_batch_size = models.PositiveSmallIntegerField(default=0)
     status = models.CharField(max_length=20, choices=STATUS_CHOICES, default=STATUS_PENDING)
     summary = models.CharField(max_length=300, blank=True)
     created_by = models.CharField(max_length=100, blank=True)
@@ -1171,6 +1320,63 @@ class DeploymentRelease(models.Model):
 
     def __str__(self):
         return '%s:%s' % (self.app.name, self.version)
+
+
+class CIDelivery(models.Model):
+    """Sanitized CI status delivery used for idempotency and quality gates."""
+    PROVIDER_JENKINS = 'jenkins'
+    PROVIDER_GITLAB = 'gitlab'
+    PROVIDER_CHOICES = (
+        (PROVIDER_JENKINS, 'Jenkins'),
+        (PROVIDER_GITLAB, 'GitLab'),
+    )
+
+    provider = models.CharField(max_length=20, choices=PROVIDER_CHOICES)
+    repository = models.CharField(max_length=200)
+    delivery_id = models.CharField(max_length=128)
+    fingerprint = models.CharField(max_length=64, unique=True)
+    status = models.CharField(max_length=20)
+    revision = models.CharField(max_length=64, blank=True)
+    summary = models.CharField(max_length=200)
+    release = models.ForeignKey(
+        DeploymentRelease, null=True, blank=True, on_delete=models.SET_NULL,
+        related_name='ci_deliveries',
+    )
+    received_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        db_table = 'devops_ci_delivery'
+        ordering = ['-received_at', '-id']
+        indexes = [
+            models.Index(fields=['repository', 'revision'], name='devops_ci_repo_rev_idx'),
+            models.Index(fields=['status', '-received_at'], name='devops_ci_status_time_idx'),
+        ]
+
+
+class DeploymentHealthEvaluation(models.Model):
+    """A bounded post-release health summary with no raw operational data."""
+    STATUS_HEALTHY = 'healthy'
+    STATUS_UNHEALTHY = 'unhealthy'
+    STATUS_CHOICES = (
+        (STATUS_HEALTHY, '健康'),
+        (STATUS_UNHEALTHY, '不健康'),
+    )
+
+    release = models.ForeignKey(
+        DeploymentRelease, on_delete=models.CASCADE, related_name='health_evaluations',
+    )
+    batch_identity = models.CharField(max_length=200)
+    status = models.CharField(max_length=20, choices=STATUS_CHOICES)
+    score = models.PositiveSmallIntegerField(default=100)
+    summary = models.CharField(max_length=300)
+    evaluated_at = models.DateTimeField()
+
+    class Meta:
+        db_table = 'devops_deployment_health_evaluation'
+        ordering = ['-evaluated_at', '-id']
+        indexes = [
+            models.Index(fields=['release', '-evaluated_at'], name='devops_release_health_idx'),
+        ]
 
 
 class DeploymentResult(models.Model):
@@ -1248,6 +1454,38 @@ class BackgroundJob(models.Model):
         ]
 
 
+class ScheduledTaskRun(models.Model):
+    """The safe, durable state and lease for one built-in scheduler task."""
+    STATUS_PENDING = 'pending'
+    STATUS_RUNNING = 'running'
+    STATUS_SUCCESS = 'success'
+    STATUS_FAILED = 'failed'
+
+    STATUS_CHOICES = (
+        (STATUS_PENDING, '等待执行'),
+        (STATUS_RUNNING, '执行中'),
+        (STATUS_SUCCESS, '执行成功'),
+        (STATUS_FAILED, '执行失败'),
+    )
+
+    task_name = models.CharField(max_length=80, unique=True)
+    status = models.CharField(max_length=20, choices=STATUS_CHOICES, default=STATUS_PENDING)
+    last_summary = models.CharField(max_length=200, blank=True)
+    last_started_at = models.DateTimeField(null=True, blank=True)
+    last_finished_at = models.DateTimeField(null=True, blank=True)
+    next_run_at = models.DateTimeField(null=True, blank=True)
+    lease_expires_at = models.DateTimeField(null=True, blank=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        db_table = 'devops_scheduled_task_run'
+        ordering = ['task_name']
+        indexes = [
+            models.Index(fields=['status', 'lease_expires_at'], name='devops_sched_lease_idx'),
+            models.Index(fields=['next_run_at'], name='devops_sched_next_idx'),
+        ]
+
+
 class IntegrationHealthEvent(models.Model):
     """Append-only, non-sensitive outcomes for external integration health."""
     TYPE_PROMETHEUS = 'prometheus'
@@ -1310,6 +1548,45 @@ class IntegrationHealthEvent(models.Model):
         indexes = [
             models.Index(fields=['integration_type', 'source_id', '-occurred_at'], name='devops_ihe_type_ref_5b36b3_idx'),
         ]
+
+
+class VulnerabilityFinding(models.Model):
+    SEVERITY_CHOICES = (('low', '低'), ('medium', '中'), ('high', '高'), ('critical', '严重'))
+    STATUS_OPEN = 'open'
+    STATUS_RESOLVED = 'resolved'
+    STATUS_CHOICES = ((STATUS_OPEN, '待处理'), (STATUS_RESOLVED, '已处理'))
+    host = models.ForeignKey(NewLinux, on_delete=models.CASCADE, related_name='vulnerability_findings')
+    package_name = models.CharField(max_length=128)
+    advisory_id = models.CharField(max_length=80)
+    severity = models.CharField(max_length=20, choices=SEVERITY_CHOICES)
+    status = models.CharField(max_length=20, choices=STATUS_CHOICES, default=STATUS_OPEN)
+    first_seen_at = models.DateTimeField(auto_now_add=True)
+    last_seen_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        db_table = 'devops_vulnerability_finding'
+        unique_together = ('host', 'package_name', 'advisory_id')
+        indexes = [models.Index(fields=['status', 'severity'])]
+
+
+class GitOpsDriftFinding(models.Model):
+    STATUS_DRIFTED = 'drifted'
+    STATUS_IN_SYNC = 'in_sync'
+    STATUS_CHOICES = ((STATUS_DRIFTED, '存在漂移'), (STATUS_IN_SYNC, '已同步'))
+    cluster = models.ForeignKey(K8sCluster, on_delete=models.PROTECT, related_name='gitops_drift_findings')
+    namespace = models.CharField(max_length=63)
+    resource_name = models.CharField(max_length=253)
+    resource_kind = models.CharField(max_length=40)
+    desired_digest = models.CharField(max_length=64)
+    observed_digest = models.CharField(max_length=64)
+    status = models.CharField(max_length=20, choices=STATUS_CHOICES, default=STATUS_DRIFTED)
+    first_seen_at = models.DateTimeField(auto_now_add=True)
+    last_seen_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        db_table = 'devops_gitops_drift_finding'
+        unique_together = ('cluster', 'namespace', 'resource_name', 'resource_kind')
+        indexes = [models.Index(fields=['cluster', 'status'])]
 
 
 class ApprovalRequest(models.Model):

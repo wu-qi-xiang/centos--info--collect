@@ -35,6 +35,7 @@
                 activeTab: 'dashboard',
                 error: '',
                 notice: '',
+                lastLoadedAt: '',
                 bootstrap: {
                     user: { id: '', name: '-', role: '-' },
                     permissions: {},
@@ -51,6 +52,13 @@
                 approvals: [],
                 deployments: [],
                 files: [],
+                incidents: [],
+                inspectionRecommendations: [],
+                serviceCatalog: [],
+                cloudResources: [],
+                cloudCosts: [],
+                ciDeliveries: [],
+                featureAccess: { incidents: false, serviceCost: false, deliveryGates: false },
                 notifications: { channels: [], logs: [] },
                 auditLogs: [],
                 approvalComments: {},
@@ -69,6 +77,9 @@
                     { key: 'metrics', label: '指标', icon: 'fas fa-chart-line', permission: 'metric' },
                     { key: 'approvals', label: '审批', icon: 'fas fa-shield-alt', permission: 'approval' },
                     { key: 'deployments', label: '发布', icon: 'fas fa-rocket', permission: 'deployment' },
+                    { key: 'incidents', label: '事件与巡检', icon: 'fas fa-triangle-exclamation', feature: 'incidents' },
+                    { key: 'service-cost', label: '服务与云成本', icon: 'fas fa-cloud', feature: 'serviceCost' },
+                    { key: 'delivery-gates', label: 'CI 发布门禁', icon: 'fas fa-code-branch', feature: 'deliveryGates' },
                     { key: 'files', label: '文件', icon: 'fas fa-file-arrow-up', permission: 'file' },
                     { key: 'notifications', label: '通知', icon: 'fas fa-bullhorn', permission: 'notification' },
                     { key: 'audit', label: '审计', icon: 'fas fa-clipboard-list', permission: 'audit' },
@@ -81,6 +92,70 @@
             },
             recentCommands() {
                 return (this.dashboard && this.dashboard.recent_commands) || [];
+            },
+            recentAlerts() {
+                const terminalStates = ['resolved', 'closed', 'silenced'];
+                return ((this.dashboard && this.dashboard.recent_alerts) || []).filter((item) => {
+                    return terminalStates.indexOf(item.status) === -1;
+                });
+            },
+            pendingApprovals() {
+                return (this.approvals || []).filter((item) => item.status === 'pending');
+            },
+            priorityItems() {
+                const alerts = this.recentAlerts.map((item) => ({
+                    key: `alert-${item.id}`,
+                    type: '告警',
+                    title: item.message || '未命名告警',
+                    meta: [item.host && item.host.name, item.level_label || item.level, item.created_at].filter(Boolean),
+                    status: item.level === 'critical' ? 'failed' : 'pending',
+                    statusLabel: item.level_label || '待处理',
+                    priority: item.level === 'critical' ? 0 : item.level === 'warning' ? 1 : 2,
+                }));
+                const approvals = this.pendingApprovals.map((item) => ({
+                    key: `approval-${item.id}`,
+                    type: '审批',
+                    title: item.title || `审批 #${item.id}`,
+                    meta: [item.request_type_label, item.requester, item.created_at].filter(Boolean),
+                    status: 'pending',
+                    statusLabel: '待审批',
+                    priority: 3,
+                }));
+                return alerts.concat(approvals).sort((left, right) => left.priority - right.priority).slice(0, 6);
+            },
+            activeWorkItems() {
+                const activeStates = ['pending', 'running'];
+                const commands = (this.commands || []).filter((item) => activeStates.indexOf(item.status) !== -1).map((item) => ({
+                    key: `command-${item.id}`,
+                    type: '命令',
+                    title: `命令 #${item.id}`,
+                    meta: [item.host && item.host.name, item.created_at].filter(Boolean),
+                    status: item.status,
+                    statusLabel: item.status_label || item.status,
+                }));
+                const tasks = (this.tasks || []).filter((item) => activeStates.indexOf(item.status) !== -1).map((item) => ({
+                    key: `task-${item.id}`,
+                    type: '任务',
+                    title: item.name || `任务 #${item.id}`,
+                    meta: [`${item.host_count || 0} 台主机`, item.created_at].filter(Boolean),
+                    status: item.status,
+                    statusLabel: item.status_label || item.status,
+                }));
+                const deployments = (this.deployments || []).filter((item) => activeStates.indexOf(item.status) !== -1).map((item) => ({
+                    key: `deployment-${item.id}`,
+                    type: '发布',
+                    title: `${(item.app && item.app.name) || '应用'} ${item.version || ''}`.trim(),
+                    meta: [`${item.host_count || 0} 台主机`, item.created_at].filter(Boolean),
+                    status: item.status,
+                    statusLabel: item.status_label || item.status,
+                }));
+                return commands.concat(tasks, deployments).slice(0, 6);
+            },
+            activeWorkCount() {
+                const activeStates = ['pending', 'running'];
+                return [this.commands, this.tasks, this.deployments].reduce((total, items) => {
+                    return total + (items || []).filter((item) => activeStates.indexOf(item.status) !== -1).length;
+                }, 0);
             },
             hostMetrics() {
                 return (this.dashboard && this.dashboard.host_metrics) || [];
@@ -96,7 +171,10 @@
             },
             visibleTabs() {
                 const permissions = (this.bootstrap && this.bootstrap.permissions) || {};
-                return this.tabs.filter((tab) => !tab.permission || permissions[tab.permission]);
+                return this.tabs.filter((tab) => {
+                    if (tab.permission && !permissions[tab.permission]) return false;
+                    return !tab.feature || this.featureAccess[tab.feature];
+                });
             },
             hasRunningWork() {
                 const activeStates = ['pending', 'running'];
@@ -163,6 +241,7 @@
                     if (permissions.audit) {
                         await this.loadAuditLogs();
                     }
+                    await this.loadWorkflowSummaries();
                     if (!this.visibleTabs.some((tab) => tab.key === this.activeTab)) this.activeTab = 'dashboard';
                     if (!this.commandForm.host_id && this.hosts.length) this.commandForm.host_id = this.hosts[0].id;
                     if (!this.taskForm.host_ids.length && this.hosts.length) this.taskForm.host_ids = [this.hosts[0].id];
@@ -171,6 +250,9 @@
                     if (permissions.metric) {
                         await this.loadMetrics();
                     }
+                    this.lastLoadedAt = new Date().toLocaleTimeString('zh-CN', {
+                        hour: '2-digit', minute: '2-digit', second: '2-digit', hour12: false,
+                    });
                     this.scheduleStatusRefresh();
                 } catch (error) {
                     this.error = error.message;
@@ -191,6 +273,35 @@
                     range: this.metricFilters.range,
                 });
                 this.metrics = await apiFetch(`/devops/api/metrics/?${query.toString()}`);
+            },
+            async loadOptionalSummary(url) {
+                try {
+                    const payload = await apiFetch(url);
+                    return { available: true, results: payload.results || [] };
+                } catch (error) {
+                    return { available: false, results: [] };
+                }
+            },
+            async loadWorkflowSummaries() {
+                const [incidents, inspections, services, resources, costs, deliveries] = await Promise.all([
+                    this.loadOptionalSummary('/devops/api/incidents/?limit=30'),
+                    this.loadOptionalSummary('/devops/api/inspection-recommendations/'),
+                    this.loadOptionalSummary('/devops/api/service-catalog/'),
+                    this.loadOptionalSummary('/devops/api/cloud-resources/'),
+                    this.loadOptionalSummary('/devops/api/cloud-costs/'),
+                    this.loadOptionalSummary('/devops/api/ci-deliveries/'),
+                ]);
+                this.incidents = incidents.results;
+                this.inspectionRecommendations = inspections.results;
+                this.serviceCatalog = services.results;
+                this.cloudResources = resources.results;
+                this.cloudCosts = costs.results;
+                this.ciDeliveries = deliveries.results;
+                this.featureAccess = {
+                    incidents: incidents.available || inspections.available,
+                    serviceCost: services.available || resources.available || costs.available,
+                    deliveryGates: deliveries.available,
+                };
             },
             scheduleStatusRefresh() {
                 if (this.refreshTimer) {
@@ -311,6 +422,17 @@
                     }
                 });
             },
+            onTabKeydown(event, index) {
+                const tabs = this.visibleTabs;
+                let target = index;
+                if (event.key === 'ArrowRight') target = (index + 1) % tabs.length;
+                else if (event.key === 'ArrowLeft') target = (index - 1 + tabs.length) % tabs.length;
+                else if (event.key === 'Home') target = 0;
+                else if (event.key === 'End') target = tabs.length - 1;
+                else return;
+                event.preventDefault();
+                this.setActiveTab(tabs[target].key, event);
+            },
             statusClass(status) {
                 return status || '';
             },
@@ -336,6 +458,9 @@
                     tasks: this.tasks.length,
                     approvals: this.approvals.length,
                     deployments: this.deployments.length,
+                    incidents: this.incidents.length,
+                    'service-cost': this.serviceCatalog.length,
+                    'delivery-gates': this.ciDeliveries.length,
                     files: this.files.length,
                     notifications: (this.notifications.channels || []).length,
                     audit: this.auditLogs.length,
@@ -355,6 +480,14 @@
                 if (number >= 90) return 'danger';
                 if (number >= 75) return 'warning';
                 return 'success';
+            },
+            hostHealthStatus(item) {
+                const values = [item.cpu, item.memory, item.disk].filter((value) => value !== null && value !== undefined);
+                if (!values.length) return { key: 'muted', label: '未采集' };
+                const highest = Math.max.apply(null, values.map(Number));
+                if (highest >= 90) return { key: 'failed', label: '需处理' };
+                if (highest >= 75) return { key: 'pending', label: '需关注' };
+                return { key: 'success', label: '正常' };
             },
             percent(value) {
                 if (value === null || value === undefined) return '-';
@@ -385,6 +518,8 @@
                         </div>
                     </div>
                     <div class="vue-topbar-actions">
+                        <span v-if="lastLoadedAt" class="vue-workbench-load-time">更新于 [[ lastLoadedAt ]]</span>
+                        <a class="btn btn-outline-primary" href="/devops/audit/"><i class="fas fa-clipboard-list me-1"></i>查看运行记录</a>
                         <a class="btn btn-outline-primary" href="/devops/legacy/"><i class="fas fa-table-columns me-1"></i>旧版入口</a>
                         <button class="btn btn-primary" type="button" :disabled="refreshing" @click="refresh">
                             <i class="fas fa-sync-alt me-1"></i>刷新
@@ -392,55 +527,57 @@
                     </div>
                 </div>
 
-                <div v-if="error" class="vue-error">[[ error ]]</div>
+                <div v-if="error" class="vue-error" role="alert">[[ error ]]</div>
                 <div v-if="notice" class="alert alert-info py-2 mb-0">[[ notice ]]</div>
 
-                <div class="vue-tabs">
-                    <button v-for="tab in visibleTabs" :key="tab.key" class="vue-tab" :class="{active: activeTab === tab.key}" @click="setActiveTab(tab.key, $event)">
-                        <i :class="tab.icon"></i>
+                <div class="vue-tabs" role="tablist" aria-label="DevOps 工作区">
+                    <button v-for="(tab, index) in visibleTabs" :key="tab.key" class="vue-tab" type="button" role="tab" :id="'devops-tab-' + tab.key" :aria-selected="activeTab === tab.key" :tabindex="activeTab === tab.key ? 0 : -1" :class="{active: activeTab === tab.key}" @click="setActiveTab(tab.key, $event)" @keydown="onTabKeydown($event, index)">
+                        <i :class="tab.icon" aria-hidden="true"></i>
                         <span>[[ tab.label ]]</span>
                         <em v-if="tabCount(tab.key)">[[ tabCount(tab.key) ]]</em>
                     </button>
                 </div>
 
-                <section v-if="activeTab === 'dashboard'">
-                    <div class="vue-stat-grid">
-                        <div class="vue-stat-card"><div class="vue-stat-icon"><i class="fas fa-server"></i></div><div><div class="vue-stat-label">主机资产</div><div class="vue-stat-value">[[ counts.hosts || 0 ]]</div><div class="vue-stat-note">可访问范围内服务器</div></div></div>
-                        <div class="vue-stat-card"><div class="vue-stat-icon info"><i class="fas fa-sitemap"></i></div><div><div class="vue-stat-label">主机分组</div><div class="vue-stat-value">[[ counts.groups || 0 ]]</div><div class="vue-stat-note">用于权限和批量操作</div></div></div>
-                        <div class="vue-stat-card"><div class="vue-stat-icon danger"><i class="fas fa-bell"></i></div><div><div class="vue-stat-label">未处理告警</div><div class="vue-stat-value">[[ counts.open_alerts || 0 ]]</div><div class="vue-stat-note">需要关注的异常事件</div></div></div>
-                        <div class="vue-stat-card"><div class="vue-stat-icon success"><i class="fas fa-layer-group"></i></div><div><div class="vue-stat-label">批量任务</div><div class="vue-stat-value">[[ counts.tasks || 0 ]]</div><div class="vue-stat-note">自动化执行记录</div></div></div>
+                <section v-if="activeTab === 'dashboard'" class="ops-workbench-dashboard" aria-label="DevOps 概览">
+                    <div class="vue-stat-grid ops-workbench-stats">
+                        <div class="vue-stat-card"><div class="vue-stat-icon"><i class="fas fa-server"></i></div><div><div class="vue-stat-label">受管主机</div><div class="vue-stat-value">[[ counts.hosts || 0 ]]</div><div class="vue-stat-note">当前授权范围</div></div></div>
+                        <div class="vue-stat-card"><div class="vue-stat-icon danger"><i class="fas fa-bell"></i></div><div><div class="vue-stat-label">未处理告警</div><div class="vue-stat-value">[[ counts.open_alerts || 0 ]]</div><div class="vue-stat-note">优先确认影响</div></div></div>
+                        <div class="vue-stat-card"><div class="vue-stat-icon info"><i class="fas fa-shield-alt"></i></div><div><div class="vue-stat-label">待审批</div><div class="vue-stat-value">[[ pendingApprovals.length ]]</div><div class="vue-stat-note">需要决策</div></div></div>
+                        <div class="vue-stat-card"><div class="vue-stat-icon success"><i class="fas fa-spinner"></i></div><div><div class="vue-stat-label">运行中工作</div><div class="vue-stat-value">[[ activeWorkCount ]]</div><div class="vue-stat-note">命令、任务和发布</div></div></div>
                     </div>
-                    <div class="vue-grid mt-3">
-                        <div class="vue-panel">
-                            <div class="vue-panel-header"><h2 class="vue-panel-title"><i class="fas fa-terminal"></i>最近命令</h2><span class="vue-panel-count">[[ recentCommands.length ]] 条</span></div>
+                    <div class="ops-workbench-queues">
+                        <section class="vue-panel ops-priority-panel" aria-labelledby="ops-priority-title">
+                            <div class="vue-panel-header"><h2 id="ops-priority-title" class="vue-panel-title"><i class="fas fa-triangle-exclamation"></i>需要处理</h2><span class="vue-panel-count">[[ priorityItems.length ]] 项</span></div>
                             <div class="vue-panel-body">
-                                <div class="vue-command-list" v-if="recentCommands.length">
-                                    <div class="vue-command-row" v-for="item in recentCommands" :key="item.id">
-                                        <div class="vue-row-main"><div class="vue-row-title">[[ item.host ? item.host.name : '-' ]]</div><div class="vue-row-meta"><span>[[ item.created_at || '-' ]]</span><span>[[ item.created_by || '-' ]]</span></div><code>[[ shortText(item.command, 70) ]]</code></div>
-                                        <span class="vue-status" :class="statusClass(item.status)"><i :class="statusIcon(item.status)"></i>[[ item.status_label ]]</span>
+                                <div class="ops-work-queue" v-if="priorityItems.length">
+                                    <div class="ops-work-item" :class="'ops-rail-' + item.status" v-for="item in priorityItems" :key="item.key">
+                                        <div class="ops-work-item-main"><div class="ops-work-item-type">[[ item.type ]]</div><div class="vue-row-title">[[ item.title ]]</div><div class="vue-row-meta"><span v-for="(value, index) in item.meta" :key="index">[[ value ]]</span></div></div>
+                                        <span class="vue-status" :class="statusClass(item.status)">[[ item.statusLabel ]]</span>
                                     </div>
                                 </div>
-                                <div class="vue-empty" v-else>暂无命令记录</div>
+                                <div class="vue-empty" v-else>当前没有需要处理的告警或审批。</div>
                             </div>
-                        </div>
-                        <div class="vue-panel">
-                            <div class="vue-panel-header"><h2 class="vue-panel-title"><i class="fas fa-chart-simple"></i>主机指标</h2><span class="vue-panel-count">[[ hostMetrics.length ]] 台</span></div>
+                        </section>
+                        <section class="vue-panel" aria-labelledby="ops-active-work-title">
+                            <div class="vue-panel-header"><h2 id="ops-active-work-title" class="vue-panel-title"><i class="fas fa-spinner"></i>运行中工作</h2><span class="vue-panel-count">[[ activeWorkCount ]] 项</span></div>
                             <div class="vue-panel-body">
-                                <div class="vue-host-list" v-if="hostMetrics.length">
-                                    <div class="vue-host-row" v-for="item in hostMetrics" :key="item.host.id">
-                                        <div class="vue-row-main">
-                                            <div class="vue-row-title">[[ item.host.name ]]</div>
-                                            <div class="vue-metric-mini">
-                                                <span>CPU [[ percent(item.cpu) ]]</span><span>内存 [[ percent(item.memory) ]]</span><span>磁盘 [[ percent(item.disk) ]]</span>
-                                            </div>
-                                            <div class="vue-progress-line"><span :class="metricTone(item.cpu)" :style="{width: metricWidth(item.cpu)}"></span></div>
-                                        </div>
+                                <div class="ops-work-queue" v-if="activeWorkItems.length">
+                                    <div class="ops-work-item" :class="'ops-rail-' + item.status" v-for="item in activeWorkItems" :key="item.key">
+                                        <div class="ops-work-item-main"><div class="ops-work-item-type">[[ item.type ]]</div><div class="vue-row-title">[[ item.title ]]</div><div class="vue-row-meta"><span v-for="(value, index) in item.meta" :key="index">[[ value ]]</span></div></div>
+                                        <span class="vue-status" :class="statusClass(item.status)">[[ item.statusLabel ]]</span>
                                     </div>
                                 </div>
-                                <div class="vue-empty" v-else>暂无指标数据</div>
+                                <div class="vue-empty" v-else>当前没有运行中工作。</div>
                             </div>
-                        </div>
+                        </section>
                     </div>
+                    <section class="vue-panel ops-host-health-panel" aria-labelledby="ops-host-health-title">
+                        <div class="vue-panel-header"><h2 id="ops-host-health-title" class="vue-panel-title"><i class="fas fa-heart-pulse"></i>主机健康概览</h2><span class="vue-panel-count">[[ hostMetrics.length ]] 台</span></div>
+                        <div class="ops-table-scroll" v-if="hostMetrics.length">
+                            <table class="ops-host-health-table"><thead><tr><th>主机</th><th>IP</th><th>CPU</th><th>内存</th><th>磁盘</th><th>状态</th></tr></thead><tbody><tr v-for="item in hostMetrics" :key="item.host.id"><td>[[ item.host.name ]]</td><td>[[ item.host.ip || '-' ]]</td><td>[[ percent(item.cpu) ]]</td><td>[[ percent(item.memory) ]]</td><td>[[ percent(item.disk) ]]</td><td><span class="vue-status" :class="hostHealthStatus(item).key">[[ hostHealthStatus(item).label ]]</span></td></tr></tbody></table>
+                        </div>
+                        <div class="vue-empty" v-else>暂无可显示的主机指标；刷新数据或进入指标页查看采集状态。</div>
+                    </section>
                 </section>
 
                 <section v-if="activeTab === 'hosts'" class="vue-panel">
@@ -588,6 +725,33 @@
                         </div>
                         <div class="vue-empty" v-else>暂无发布记录</div>
                     </div>
+                </section>
+
+                <section v-if="activeTab === 'incidents'" class="vue-grid">
+                    <div class="vue-panel">
+                        <div class="vue-panel-header"><h2 class="vue-panel-title"><i class="fas fa-triangle-exclamation"></i>事件工单</h2><span class="vue-panel-count">[[ incidents.length ]] 条</span></div>
+                        <div class="vue-panel-body"><div class="vue-command-list" v-if="incidents.length"><div class="vue-command-row" v-for="item in incidents" :key="item.id"><div class="vue-row-main"><div class="vue-row-title"># [[ item.id ]] · [[ item.title ]]</div><div class="vue-row-meta"><span>[[ item.severity_label || item.severity ]]</span><span>负责人 [[ item.owner || '-' ]]</span><span>SLA [[ item.sla_due_at || '-' ]]</span></div><div class="vue-row-note">[[ shortText(item.description, 120) ]]</div></div><span class="vue-status" :class="statusClass(item.status)"><i :class="statusIcon(item.status)"></i>[[ item.status_label || item.status ]]</span></div></div><div class="vue-empty" v-else>当前授权范围内暂无事件</div></div>
+                    </div>
+                    <div class="vue-panel">
+                        <div class="vue-panel-header"><h2 class="vue-panel-title"><i class="fas fa-clipboard-check"></i>巡检建议</h2><span class="vue-panel-count">[[ inspectionRecommendations.length ]] 条</span></div>
+                        <div class="vue-panel-body"><div class="vue-command-list" v-if="inspectionRecommendations.length"><div class="vue-command-row" v-for="item in inspectionRecommendations" :key="item.id"><div class="vue-row-main"><div class="vue-row-title">运行手册 # [[ item.runbook_id ]]</div><div class="vue-row-meta"><span>主机 # [[ item.host_id ]]</span><span>检查结果 # [[ item.compliance_result_id ]]</span><span>[[ item.created_at || '-' ]]</span></div><div class="vue-row-note">[[ item.summary || '-' ]]</div></div><span class="vue-status" :class="statusClass(item.status)"><i :class="statusIcon(item.status)"></i>[[ item.status ]]</span></div></div><div class="vue-empty" v-else>暂无可见巡检建议</div></div>
+                    </div>
+                </section>
+
+                <section v-if="activeTab === 'service-cost'" class="vue-grid">
+                    <div class="vue-panel">
+                        <div class="vue-panel-header"><h2 class="vue-panel-title"><i class="fas fa-sitemap"></i>服务目录</h2><span class="vue-panel-count">[[ serviceCatalog.length ]] 项</span></div>
+                        <div class="vue-panel-body"><div class="vue-command-list" v-if="serviceCatalog.length"><div class="vue-command-row" v-for="item in serviceCatalog" :key="item.id"><div class="vue-row-main"><div class="vue-row-title">[[ item.name ]]</div><div class="vue-row-meta"><span>负责人 [[ item.owner || '-' ]]</span><span>[[ item.environment_label || item.environment ]]</span><span>[[ item.lifecycle_label || item.lifecycle ]]</span><span>[[ item.criticality_label || item.criticality ]]</span></div><div class="vue-row-note">[[ item.description || '-' ]]</div></div></div></div><div class="vue-empty" v-else>暂无可见服务目录记录</div></div>
+                    </div>
+                    <div class="vue-panel">
+                        <div class="vue-panel-header"><h2 class="vue-panel-title"><i class="fas fa-cloud"></i>云资源与日成本</h2><span class="vue-panel-count">[[ cloudResources.length ]] 个资源</span></div>
+                        <div class="vue-panel-body"><div class="vue-command-list" v-if="cloudResources.length || cloudCosts.length"><div class="vue-command-row" v-for="item in cloudResources" :key="'resource-' + item.id"><div class="vue-row-main"><div class="vue-row-title">[[ item.provider ]] · [[ item.resource_identifier ]]</div><div class="vue-row-meta"><span>[[ item.resource_type ]]</span><span>[[ item.region ]]</span><span>服务 [[ item.service.name ]]</span></div></div></div><div class="vue-command-row" v-for="item in cloudCosts" :key="'cost-' + item.resource_id + '-' + item.cost_date"><div class="vue-row-main"><div class="vue-row-title">[[ item.service.name ]] · [[ item.provider ]]</div><div class="vue-row-meta"><span>[[ item.cost_date ]]</span><span>资源 # [[ item.resource_id ]]</span></div></div><strong>[[ item.amount ]] [[ item.currency ]]</strong></div></div><div class="vue-empty" v-else>暂无授权范围内的云资源或成本摘要</div></div>
+                    </div>
+                </section>
+
+                <section v-if="activeTab === 'delivery-gates'" class="vue-panel">
+                    <div class="vue-panel-header"><h2 class="vue-panel-title"><i class="fas fa-code-branch"></i>CI 发布门禁</h2><span class="vue-panel-count">[[ ciDeliveries.length ]] 条</span></div>
+                    <div class="vue-panel-body"><div class="vue-command-list" v-if="ciDeliveries.length"><div class="vue-command-row" v-for="item in ciDeliveries" :key="item.id"><div class="vue-row-main"><div class="vue-row-title">[[ item.provider_label || item.provider ]] · [[ item.repository ]]</div><div class="vue-row-meta"><span>修订 [[ item.revision || '-' ]]</span><span>发布 # [[ item.release_id || '-' ]]</span><span>[[ item.received_at || '-' ]]</span></div><div class="vue-row-note">[[ item.summary || '-' ]]</div></div><span class="vue-status" :class="statusClass(item.status)"><i :class="statusIcon(item.status)"></i>[[ item.status_label || item.status ]]</span></div></div><div class="vue-empty" v-else>CI 摘要接口尚未启用或当前账号无访问权限。</div></div>
                 </section>
 
                 <section v-if="activeTab === 'files'" class="vue-panel">

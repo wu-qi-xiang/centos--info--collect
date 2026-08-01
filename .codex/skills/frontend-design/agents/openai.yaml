@@ -1,0 +1,4 @@
+interface:
+  display_name: "Frontend Design"
+  short_description: "Create distinctive, intentional visual direction for operations interfaces."
+  default_prompt: "Use for a new visual direction or a focused AIOps/DevOps dashboard redesign."

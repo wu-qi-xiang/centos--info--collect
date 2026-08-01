@@ -3,11 +3,11 @@
 {% block title %}受控运行手册 - DevOps平台{% endblock %}
 
 {% block content %}
-<div class="container-fluid px-4">
+<div class="container-fluid px-4 ops-legacy-operation ops-runbook-page">
     <h1 class="h3 mb-3">受控运行手册</h1>
     {% include "devops/_nav.html" %}
     {% if can_manage %}
-    <div class="card mb-3"><div class="card-header">{% if editing_runbook %}编辑运行手册{% else %}新增运行手册{% endif %}</div><div class="card-body">
+    <div class="card mb-3 ops-legacy-card ops-runbook-management"><div class="card-header">{% if editing_runbook %}编辑运行手册{% else %}新增运行手册{% endif %}</div><div class="card-body">
         <form method="post" action="{% if editing_runbook %}{% url 'devops:runbook_update' editing_runbook.id %}{% endif %}" class="row g-3 align-items-end">
             {% csrf_token %}
             <div class="col-md-3"><label class="form-label">名称</label>{{ form.name }}{{ form.name.errors }}</div>
@@ -22,14 +22,14 @@
         </form>
     </div></div>
     {% endif %}
-    <div class="card"><div class="card-header">可用运行手册</div><div class="card-body table-responsive">
+    <div class="card ops-legacy-card ops-runbook-records"><div class="card-header">可用运行手册</div><div class="card-body table-responsive ops-legacy-table-wrap">
         <table class="table table-sm align-middle">
             <tr><th>名称</th><th>版本</th><th>触发</th><th>服务</th><th>启用</th><th>审批</th><th>更新时间</th>{% if can_manage or can_initiate %}<th>操作</th>{% endif %}</tr>
             {% for runbook in runbooks %}
             <tr>
                 <td>{{ runbook.name }}</td><td>{{ runbook.version }}</td><td>{{ runbook.get_trigger_kind_display }}</td><td>{{ runbook.service.name|default:"-" }}</td>
                 <td>{% if runbook.enabled %}是{% else %}否{% endif %}</td><td>{% if runbook.requires_approval %}是{% else %}否{% endif %}</td><td>{{ runbook.updated_at|date:"Y-m-d H:i:s" }}</td>
-                {% if can_manage or can_initiate %}<td class="text-nowrap">{% if can_manage %}<a class="btn btn-outline-primary btn-sm" href="{% url 'devops:runbooks' %}?edit={{ runbook.id }}">编辑</a>{% endif %}{% if can_initiate and runbook.enabled %}<form method="post" action="{% url 'devops:runbook_initiate' runbook.id %}" class="d-inline">{% csrf_token %}<select name="host_id" class="form-select form-select-sm d-inline-block w-auto">{% for host in runbook.allowed_hosts.all %}{% if host.id in visible_host_ids %}<option value="{{ host.id }}">{{ host.linux_name }}</option>{% endif %}{% endfor %}</select><button class="btn btn-outline-secondary btn-sm" type="submit">发起审批</button></form>{% endif %}</td>{% endif %}
+                {% if can_manage or can_initiate %}<td class="text-nowrap">{% if can_manage %}<a class="btn btn-outline-primary btn-sm" href="{% url 'devops:runbooks' %}?edit={{ runbook.id }}">编辑</a>{% endif %}{% if can_initiate and runbook.enabled %}<form method="post" action="{% url 'devops:runbook_initiate' runbook.id %}" class="d-inline ops-runbook-initiation">{% csrf_token %}<select name="host_id" class="form-select form-select-sm d-inline-block w-auto">{% for host in runbook.allowed_hosts.all %}{% if host.id in visible_host_ids %}<option value="{{ host.id }}">{{ host.linux_name }}</option>{% endif %}{% endfor %}</select><button class="btn btn-outline-secondary btn-sm" type="submit">发起审批</button></form>{% endif %}</td>{% endif %}
             </tr>
             {% empty %}<tr><td colspan="8" class="text-muted">当前授权范围内没有运行手册</td></tr>{% endfor %}
         </table>

@@ -26,3 +26,16 @@ services:
       - ../uploads:/app/uploads
       - ../logs:/app/logs
     command: python manage.py devops_worker
+
+  scheduler:
+    build:
+      context: ..
+      dockerfile: deploy/Dockerfile
+    env_file:
+      - path: ../.env
+        required: false
+    volumes:
+      - ../db.sqlite3:/app/db.sqlite3
+      - ../uploads:/app/uploads
+      - ../logs:/app/logs
+    command: python manage.py devops_scheduler

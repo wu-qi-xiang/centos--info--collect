@@ -19,7 +19,7 @@ from .settings import (
 	k8s_cache_config_from_env,
 )
 from RemoteLinux.models import NewLinux, User
-from devops.models import AlertEvent, ApprovalRequest, DevOpsRole
+from devops.models import AlertEvent, ApprovalRequest, DevOpsRole, ScheduledTaskRun
 
 
 class DatabaseConfigTests(SimpleTestCase):
@@ -707,6 +707,78 @@ class HealthEndpointTests(TestCase):
 
 		self.assertEqual(response.status_code, 401)
 		self.assertEqual(response.json(), {'ok': False, 'code': 'unauthorized'})
+
+	def test_metrics_requires_session_login(self):
+		response = self.client.get('/metrics/')
+
+		self.assertEqual(response.status_code, 401)
+		self.assertEqual(response.json(), {'ok': False, 'code': 'unauthorized'})
+
+	def test_metrics_requires_explicit_devops_admin_role(self):
+		user = User.objects.create(
+			user='metrics-viewer', email='metrics-viewer@example.com',
+			password='x', confirm_pwd='x',
+		)
+		DevOpsRole.objects.create(user=user, role=DevOpsRole.ROLE_VIEWER)
+		self.login(user)
+
+		response = self.client.get('/metrics/')
+
+		self.assertEqual(response.status_code, 403)
+		self.assertEqual(response.json(), {'ok': False, 'code': 'forbidden'})
+
+	def test_metrics_returns_safe_aggregate_prometheus_text_for_admin(self):
+		user = User.objects.create(
+			user='metrics-admin', email='metrics-admin@example.com',
+			password='x', confirm_pwd='x',
+		)
+		DevOpsRole.objects.create(user=user, role=DevOpsRole.ROLE_ADMIN)
+		self.login(user)
+		metric_values = {
+			'background_jobs': {'pending': 2, 'running': 1, 'success': 5, 'failed': 1},
+			'integration_health': {'success': 3, 'failed': 1},
+			'scheduled_task_runs': None,
+		}
+
+		with mock.patch('PyLinux.health.prometheus_metric_values', return_value=metric_values):
+			response = self.client.get('/metrics/')
+
+		self.assertEqual(response.status_code, 200)
+		self.assertEqual(response['Content-Type'], 'text/plain; version=0.0.4; charset=utf-8')
+		response_body = response.content.decode('utf-8')
+		for expected_line in (
+			'pylinux_background_jobs{status="pending"} 2',
+			'pylinux_background_jobs{status="running"} 1',
+			'pylinux_background_jobs{status="success"} 5',
+			'pylinux_background_jobs{status="failed"} 1',
+			'pylinux_integration_health_events{status="success"} 3',
+			'pylinux_integration_health_events{status="failed"} 1',
+		):
+			with self.subTest(expected_line=expected_line):
+				self.assertIn(expected_line, response_body)
+		self.assertNotIn('pylinux_scheduled_task_runs', response_body)
+		for forbidden_value in ('metrics-admin', 'error', 'task_id', 'target_id', 'command', 'url'):
+			with self.subTest(forbidden_value=forbidden_value):
+				self.assertNotIn(forbidden_value, response_body)
+
+	def test_metrics_includes_scheduler_status_aggregate_when_model_exists(self):
+		user = User.objects.create(
+			user='scheduler-metrics-admin', email='scheduler-metrics@example.com',
+			password='x', confirm_pwd='x',
+		)
+		DevOpsRole.objects.create(user=user, role=DevOpsRole.ROLE_ADMIN)
+		ScheduledTaskRun.objects.create(
+			task_name='monitor_collection', status=ScheduledTaskRun.STATUS_SUCCESS,
+		)
+		self.login(user)
+
+		response = self.client.get('/metrics/')
+
+		self.assertEqual(response.status_code, 200)
+		self.assertIn(
+			'pylinux_scheduled_task_runs{status="success"} 1',
+			response.content.decode('utf-8'),
+		)
 
 	def test_runtime_status_requires_explicit_devops_admin_role(self):
 		user = User.objects.create(user='runtime-viewer', email='viewer@example.com', password='x', confirm_pwd='x')

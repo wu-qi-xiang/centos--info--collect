@@ -25,6 +25,7 @@ except ImportError:
 from django.conf import settings
 from django.core.cache import cache
 from django.db import IntegrityError, models, transaction
+from django.core.signing import TimestampSigner
 from django.utils import timezone
 try:
     import requests
@@ -56,6 +57,7 @@ from .models import (
     AlertHistory,
     Incident,
     IncidentTimeline,
+    InspectionRecommendation,
     AlertSilence,
     ApprovalRequest,
     AuditLog,
@@ -93,6 +95,10 @@ from .models import (
     ServiceSlo,
     ServiceSloEvaluation,
     RunbookTemplate,
+    CloudResourceSummary,
+    CloudDailyCostSummary,
+    CIDelivery,
+    DeploymentHealthEvaluation,
 )
 from RemoteLinux.models import NewLinux, User
 from . import prometheus_rules as _prometheus_rules
@@ -109,6 +115,12 @@ SYSTEM_POWER_COMMANDS = ('shutdown', 'reboot', 'halt', 'poweroff')
 COMMAND_ALLOWED = 'allow'
 COMMAND_BLOCKED = 'blocked'
 COMMAND_ADMIN_REQUIRED = 'admin_required'
+
+CLOUD_RESOURCE_IDENTIFIER_RE = re.compile(r'^[A-Za-z0-9][A-Za-z0-9._:/@+=-]{0,159}$')
+CLOUD_RESOURCE_TYPE_RE = re.compile(r'^[A-Za-z][A-Za-z0-9._/-]{0,63}$')
+CLOUD_REGION_RE = re.compile(r'^[A-Za-z0-9][A-Za-z0-9-]{0,63}$')
+CLOUD_TAG_KEY_RE = re.compile(r'^[A-Za-z0-9][A-Za-z0-9_.:/=+-]{0,63}$')
+CLOUD_SENSITIVE_TAG_RE = re.compile(r'(secret|token|password|credential|private|key)', re.IGNORECASE)
 
 
 ROLE_RANKS = {
@@ -1165,6 +1177,82 @@ def enqueue_background_job(target, *args, **kwargs):
     )
 
 
+CI_QUALITY_GATE_FAILURE_STATUSES = frozenset(('failed', 'canceled', 'skipped'))
+
+
+def _pending_release_for_ci_delivery(delivery):
+    """Find one unambiguous pending release for an immutable CI revision."""
+    if not delivery.revision:
+        return None
+    matches = list(DeploymentRelease.objects.select_for_update().filter(
+        app__repository=delivery.repository,
+        version=delivery.revision,
+        status=DeploymentRelease.STATUS_PENDING,
+    ).order_by('id')[:2])
+    return matches[0] if len(matches) == 1 else None
+
+
+def record_ci_delivery(values):
+    """Persist a sanitized CI delivery and apply its bounded release gate."""
+    with transaction.atomic():
+        delivery, created = CIDelivery.objects.get_or_create(
+            fingerprint=values['fingerprint'],
+            defaults={
+                'provider': values['provider'],
+                'repository': values['repository'],
+                'delivery_id': values['delivery_id'],
+                'status': values['status'],
+                'revision': values['revision'],
+                'summary': values['summary'],
+            },
+        )
+        if not created:
+            return delivery, False, 'duplicate_delivery'
+
+        release = _pending_release_for_ci_delivery(delivery)
+        if release:
+            delivery.release = release
+            delivery.save(update_fields=['release'])
+
+        if not release:
+            return delivery, True, 'delivery_recorded'
+        if delivery.status in CI_QUALITY_GATE_FAILURE_STATUSES:
+            release.status = DeploymentRelease.STATUS_BLOCKED
+            release.summary = 'CI quality gate failed.'
+            release.finished_at = timezone.now()
+            release.save(update_fields=['status', 'summary', 'finished_at'])
+            return delivery, True, 'release_blocked'
+        if delivery.status != 'success':
+            return delivery, True, 'delivery_recorded'
+    return delivery, True, 'delivery_recorded'
+
+
+def ci_quality_gate_allows_release(release):
+    """Apply the latest CI quality gate before a deployment can execute."""
+    # Legacy applications without a repository identity cannot be safely
+    # matched to a CI provider. They retain the existing approval workflow.
+    if not (release.app.repository or '').strip():
+        return True
+    latest = CIDelivery.objects.filter(
+        repository=release.app.repository,
+        revision=release.version,
+    ).order_by(
+        '-received_at', '-id',
+    ).first()
+    if not latest:
+        return False
+    if latest.release_id != release.id:
+        latest.release = release
+        latest.save(update_fields=['release'])
+    if latest.status in CI_QUALITY_GATE_FAILURE_STATUSES:
+        release.status = DeploymentRelease.STATUS_BLOCKED
+        release.summary = 'CI quality gate failed.'
+        release.finished_at = timezone.now()
+        release.save(update_fields=['status', 'summary', 'finished_at'])
+        return False
+    return latest.status == 'success'
+
+
 def background_job_spec(target, args, kwargs):
     """Convert a supported execution call into a safe durable queue reference."""
     if kwargs and set(kwargs) != set(['role']):
@@ -1942,6 +2030,25 @@ def create_incident(request, title, severity, description='', host=None, alert=N
     return incident
 
 
+def create_critical_alert_incident(alert):
+    """Create one bounded incident for an active critical alert, without copying its payload."""
+    if alert.level != AlertEvent.LEVEL_CRITICAL or alert.status == AlertEvent.STATUS_SILENCED:
+        return None
+    incident = Incident.objects.filter(
+        alert=alert,
+        status__in=(Incident.STATUS_OPEN, Incident.STATUS_PROCESSING),
+    ).first()
+    if incident:
+        return incident
+    return Incident.objects.create(
+        title='严重告警：%s' % (alert.metric or 'general'),
+        severity=Incident.SEVERITY_CRITICAL,
+        host=alert.host,
+        alert=alert,
+        created_by='system',
+    )
+
+
 def update_incident_status(request, incident, status):
     previous_status = incident.status
     incident.status = status
@@ -1951,6 +2058,15 @@ def update_incident_status(request, incident, status):
         incident.resolved_at = None
     incident.save()
     audit(request, '更新事件状态', 'Incident', incident.id, '%s -> %s' % (previous_status, status))
+    return incident
+
+
+def assign_incident(request, incident, owner, sla_due_at=None):
+    incident.owner = owner
+    incident.assigned_at = timezone.now()
+    incident.sla_due_at = sla_due_at
+    incident.save(update_fields=['owner', 'assigned_at', 'sla_due_at', 'updated_at'])
+    audit(request, '分派事件负责人', 'Incident', incident.id, '负责人=%s' % owner)
     return incident
 
 
@@ -1971,6 +2087,43 @@ def record_incident_postmortem(request, incident, root_cause, resolution, follow
     incident.save(update_fields=['root_cause', 'resolution', 'follow_up', 'updated_at'])
     audit(request, '记录事件复盘', 'Incident', incident.id, incident.title)
     return incident
+
+
+def create_inspection_recommendation(request, compliance_result, runbook, summary=''):
+    if compliance_result.state != ComplianceResult.STATE_DRIFT:
+        raise ValueError('仅存在漂移的检查结果可创建建议')
+    if not runbook.enabled or not runbook.requires_approval:
+        raise ValueError('建议必须关联已启用且需要审批的运行手册')
+    if not can_access_host(request, compliance_result.host):
+        raise PermissionError('目标主机不在当前用户授权范围内')
+    if not runbook.allowed_hosts.filter(id=compliance_result.host_id).exists():
+        raise ValueError('目标主机不在运行手册授权范围内')
+    if runbook.service_id and not runbook.service.hosts.filter(id=compliance_result.host_id).exists():
+        raise ValueError('目标主机不属于运行手册关联服务')
+    recommendation, _ = InspectionRecommendation.objects.get_or_create(
+        compliance_result=compliance_result,
+        runbook=runbook,
+        defaults={
+            'host': compliance_result.host,
+            'summary': summary,
+            'created_by': request.session.get('user_name', ''),
+        },
+    )
+    audit(request, '创建检查修复建议', 'InspectionRecommendation', recommendation.id, '运行手册=%s' % runbook.id)
+    return recommendation
+
+
+def initiate_inspection_recommendation(request, recommendation):
+    if recommendation.status == InspectionRecommendation.STATUS_INITIATED:
+        raise ValueError('建议已提交审批')
+    if not can_access_host(request, recommendation.host):
+        raise PermissionError('目标主机不在当前用户授权范围内')
+    record, approval = initiate_runbook(request, recommendation.runbook, recommendation.host)
+    recommendation.status = InspectionRecommendation.STATUS_INITIATED
+    recommendation.initiated_approval = approval
+    recommendation.save(update_fields=['status', 'initiated_approval', 'updated_at'])
+    audit(request, '提交检查修复建议审批', 'InspectionRecommendation', recommendation.id, '审批=%s' % approval.id)
+    return record, approval
 
 
 def evaluate_command_policy(command, role=DevOpsRole.ROLE_OPERATOR):
@@ -2206,6 +2359,7 @@ def record_alert(host, metric, message, level=AlertEvent.LEVEL_WARNING):
     )
     if alert.status != AlertEvent.STATUS_SILENCED:
         notify_alert(alert)
+        create_critical_alert_incident(alert)
     return alert, True
 
 
@@ -2308,8 +2462,33 @@ def dingtalk_signed_url(url, secret):
     return '%s%stimestamp=%s&sign=%s' % (url, separator, timestamp, sign)
 
 
-def notification_payload(channel, event_type, title, content):
+def build_wecom_approval_link(approval):
+    """Create an expiring navigation link; authorization remains server-side."""
+    base_url = (getattr(settings, 'PLATFORM_PUBLIC_BASE_URL', '') or '').rstrip('/')
+    if not base_url or not getattr(approval, 'id', None):
+        return ''
+    token = TimestampSigner(salt='devops.wecom.approval').sign(str(approval.id))
+    return '%s/devops/wecom/approvals/%s/?token=%s' % (
+        base_url, approval.id, urlparse.quote(token, safe=''),
+    )
+
+
+def valid_wecom_approval_link(approval_id, token):
+    if not approval_id or not token:
+        return False
+    try:
+        value = TimestampSigner(salt='devops.wecom.approval').unsign(
+            token, max_age=max(60, int(getattr(settings, 'WECOM_APPROVAL_LINK_TTL_SECONDS', 900))),
+        )
+    except Exception:
+        return False
+    return str(approval_id) == value
+
+
+def notification_payload(channel, event_type, title, content, wecom_link=''):
     if channel.channel_type in (NotificationChannel.TYPE_WECOM, NotificationChannel.TYPE_DINGTALK):
+        if channel.channel_type == NotificationChannel.TYPE_WECOM and wecom_link:
+            content = '%s\n[在平台中处理](%s)' % (content, wecom_link)
         return {
             'msgtype': 'text',
             'text': {
@@ -2332,7 +2511,7 @@ def notification_failure(category, attempt_count, summary):
     }
 
 
-def send_notification_channel(channel, event_type, title, content):
+def send_notification_channel(channel, event_type, title, content, wecom_link=''):
     dedup_seconds = getattr(settings, 'NOTIFICATION_DEDUP_SECONDS', 300)
     if dedup_seconds:
         since = timezone.now() - timezone.timedelta(seconds=dedup_seconds)
@@ -2367,7 +2546,7 @@ def send_notification_channel(channel, event_type, title, content):
     if channel.channel_type == NotificationChannel.TYPE_DINGTALK:
         url = dingtalk_signed_url(url, channel.decrypted_secret)
 
-    payload = notification_payload(channel, event_type, title, content)
+    payload = notification_payload(channel, event_type, title, content, wecom_link=wecom_link)
     attempts = max(1, int(getattr(settings, 'NOTIFICATION_RETRY_COUNT', 0) or 0) + 1)
     timeout = max(1, int(getattr(settings, 'NOTIFICATION_TIMEOUT_SECONDS', 5) or 5))
     status = NotificationLog.STATUS_FAILED
@@ -2431,7 +2610,7 @@ def alert_level_rank(level):
     }.get(level, 0)
 
 
-def send_notifications(event_type, title, content, template_values=None, escalation_alert=None):
+def send_notifications(event_type, title, content, template_values=None, escalation_alert=None, wecom_link=''):
     title, content = render_notification_template(event_type, title, content, template_values)
     channels = NotificationChannel.objects.filter(enabled=True)
     if event_type == NotificationLog.EVENT_ALERT:
@@ -2448,7 +2627,7 @@ def send_notifications(event_type, title, content, template_values=None, escalat
                 channels.append(rule.channel)
     logs = []
     for channel in channels:
-        logs.append(send_notification_channel(channel, event_type, title, content))
+        logs.append(send_notification_channel(channel, event_type, title, content, wecom_link=wecom_link))
     return logs
 
 
@@ -2749,7 +2928,7 @@ def notify_approval(approval, action):
         'status': approval.status,
         'requester': approval.requester,
         'approver': approval.approver,
-    })
+    }, wecom_link=build_wecom_approval_link(approval))
 
 
 def notify_deployment(release, action='发布结果'):
@@ -2936,6 +3115,82 @@ def forecast_host_capacity(hosts, now=None):
     return forecasts
 
 
+def _capacity_simulation_risk(cpu_percent, memory_percent):
+    values = [value for value in (cpu_percent, memory_percent) if value is not None]
+    if not values:
+        return 'unknown'
+    highest = max(values)
+    if highest >= 90:
+        return 'high'
+    if highest >= 75:
+        return 'medium'
+    return 'low'
+
+
+def simulate_capacity_cost_change(hosts, costs, cpu_delta_percent, memory_delta_percent, instance_delta):
+    """Calculate scoped capacity and cost aggregates without writes or external calls."""
+    hosts = list(hosts)
+    latest_metrics = latest_metric_map(hosts)
+    metric_values = {
+        MetricSample.METRIC_CPU: [],
+        MetricSample.METRIC_MEMORY: [],
+    }
+    sampled_host_ids = set()
+    for host in hosts:
+        for metric in metric_values:
+            sample = latest_metrics.get((host.id, metric))
+            value = _capacity_percent(sample.value) if sample else None
+            if value is not None:
+                metric_values[metric].append(value)
+                sampled_host_ids.add(host.id)
+
+    def average(metric):
+        values = metric_values[metric]
+        return sum(values) / len(values) if values else None
+
+    baseline_cpu = average(MetricSample.METRIC_CPU)
+    baseline_memory = average(MetricSample.METRIC_MEMORY)
+    baseline_host_count = len(hosts)
+    projected_host_count = max(1, baseline_host_count + instance_delta)
+    capacity_factor = float(baseline_host_count) / projected_host_count if baseline_host_count else 1.0
+    projected_cpu = (
+        baseline_cpu * (1 + (cpu_delta_percent / 100.0)) * capacity_factor
+        if baseline_cpu is not None else None
+    )
+    projected_memory = (
+        baseline_memory * (1 + (memory_delta_percent / 100.0)) * capacity_factor
+        if baseline_memory is not None else None
+    )
+
+    latest_costs = {}
+    for cost in costs.order_by('resource_id', 'currency', '-cost_date', '-id').iterator():
+        latest_costs.setdefault((cost.resource_id, cost.currency), cost)
+    totals = {}
+    counts = {}
+    for cost in latest_costs.values():
+        totals[cost.currency] = totals.get(cost.currency, Decimal('0')) + cost.amount
+        counts[cost.currency] = counts.get(cost.currency, 0) + 1
+    cost_summaries = []
+    for currency in sorted(totals):
+        baseline = totals[currency].quantize(Decimal('0.0001'))
+        projected_count = max(0, counts[currency] + instance_delta)
+        projected = (baseline * Decimal(projected_count) / Decimal(counts[currency])).quantize(Decimal('0.0001'))
+        cost_summaries.append({
+            'currency': currency,
+            'baseline_daily': str(baseline),
+            'projected_daily': str(projected),
+            'delta_daily': str((projected - baseline).quantize(Decimal('0.0001'))),
+        })
+    return {
+        'capacity': {
+            'baseline_risk': _capacity_simulation_risk(baseline_cpu, baseline_memory),
+            'projected_risk': _capacity_simulation_risk(projected_cpu, projected_memory),
+            'sampled_host_count': len(sampled_host_ids),
+        },
+        'costs': cost_summaries,
+    }
+
+
 def deployment_risk_preview(hosts, now=None):
     """Return read-only deployment risk data for the selected hosts."""
     hosts = list(hosts)
@@ -3113,12 +3368,34 @@ def _service_slo_display_value(slo, value):
     return None, ''
 
 
+def _service_slo_budget_snapshot(slo, displayed):
+    """Return safe error-budget values only for percentage-based SLOs."""
+    if displayed is None or slo.metric_kind not in (
+            ServiceSlo.KIND_AVAILABILITY, ServiceSlo.KIND_ERROR_RATE):
+        return None, None
+    target = float(slo.target)
+    if slo.metric_kind == ServiceSlo.KIND_AVAILABILITY:
+        allowed_error = 100 - target
+        observed_error = 100 - displayed
+    else:
+        allowed_error = target
+        observed_error = displayed
+    if allowed_error <= 0:
+        return None, None
+    burn_rate = max(0, observed_error / allowed_error)
+    budget_remaining = max(0, min(100, (1 - burn_rate) * 100))
+    return budget_remaining, burn_rate
+
+
 def evaluate_service_slo(slo, now=None):
     """Evaluate an SLO without retaining raw upstream results or query text."""
     now = now or timezone.now()
     query = _service_slo_query(slo)
     state = ServiceSlo.STATE_UNAVAILABLE
     summary = '指标不可用'
+    observed_value = None
+    budget_remaining_percent = None
+    burn_rate = None
     if query:
         from monitor.models import PrometheusConfig
         from monitor.services import query_prometheus
@@ -3129,6 +3406,8 @@ def evaluate_service_slo(slo, now=None):
         if value is not None:
             displayed, label = _service_slo_display_value(slo, value)
             if displayed is not None:
+                observed_value = displayed
+                budget_remaining_percent, burn_rate = _service_slo_budget_snapshot(slo, displayed)
                 healthy = displayed >= float(slo.target) if slo.metric_kind == ServiceSlo.KIND_AVAILABILITY else displayed <= float(slo.target)
                 state = ServiceSlo.STATE_HEALTHY if healthy else ServiceSlo.STATE_EXHAUSTED
                 summary = '%s，目标 %s' % (label, slo.target)
@@ -3136,10 +3415,18 @@ def evaluate_service_slo(slo, now=None):
     slo.last_summary = summary[:200]
     slo.last_evaluated_at = now
     slo.save(update_fields=['last_state', 'last_summary', 'last_evaluated_at', 'updated_at'])
-    return {'state': state, 'summary': slo.last_summary}
+    return {
+        'state': state,
+        'summary': slo.last_summary,
+        'observed_value': observed_value,
+        'budget_remaining_percent': budget_remaining_percent,
+        'burn_rate': burn_rate,
+    }
 
 
-def _record_service_slo_evaluation(slo_id, state, summary, evaluated_at):
+def _record_service_slo_evaluation(
+        slo_id, state, summary, evaluated_at, observed_value=None,
+        budget_remaining_percent=None, burn_rate=None):
     """Persist one evaluation and atomically claim a new exhaustion notification."""
     with transaction.atomic():
         locked_slo = ServiceSlo.objects.select_for_update().get(pk=slo_id)
@@ -3150,6 +3437,9 @@ def _record_service_slo_evaluation(slo_id, state, summary, evaluated_at):
             slo=locked_slo,
             state=state,
             summary=summary,
+            observed_value=observed_value,
+            budget_remaining_percent=budget_remaining_percent,
+            burn_rate=burn_rate,
             evaluated_at=evaluated_at,
         )
         if state != ServiceSlo.STATE_EXHAUSTED:
@@ -3178,14 +3468,23 @@ def evaluate_enabled_service_slos(now=None):
             evaluation = evaluate_service_slo(slo, now=now)
             state = evaluation.get('state')
             summary = str(evaluation.get('summary') or '')[:200]
+            observed_value = evaluation.get('observed_value')
+            budget_remaining_percent = evaluation.get('budget_remaining_percent')
+            burn_rate = evaluation.get('burn_rate')
             if state not in valid_states:
                 raise ValueError('unsupported SLO state')
         except Exception:
             state = ServiceSlo.STATE_UNAVAILABLE
             summary = '指标不可用'
+            observed_value = None
+            budget_remaining_percent = None
+            burn_rate = None
             result['errors'] += 1
 
-        should_notify = _record_service_slo_evaluation(slo.id, state, summary, now)
+        should_notify = _record_service_slo_evaluation(
+            slo.id, state, summary, now, observed_value,
+            budget_remaining_percent, burn_rate,
+        )
         result['evaluated'] += 1
         if state == ServiceSlo.STATE_EXHAUSTED:
             result['exhausted'] += 1
@@ -3210,6 +3509,63 @@ def deployment_service_slos(release):
         models.Q(hosts__in=release.hosts.all())
     ).distinct()
     return ServiceSlo.objects.filter(service__in=services, enabled=True).select_related('service')
+
+
+def evaluate_deployment_health(release, batch_hosts, now=None):
+    """Persist a fixed, post-release health summary for a release host batch.
+
+    It intentionally counts only fixed signal categories.  Alert messages,
+    command text/output, and upstream SLO query details never enter the record.
+    """
+    now = now or timezone.now()
+    requested_host_ids = [
+        getattr(host, 'pk', host) for host in (batch_hosts or [])
+    ]
+    batch_host_ids = sorted(set(release.hosts.filter(
+        pk__in=[host_id for host_id in requested_host_ids if host_id],
+    ).values_list('pk', flat=True)))
+    if not batch_host_ids:
+        raise ValueError('发布健康评估必须指定发布范围内的批次主机')
+    release_started_at = release.created_at
+
+    critical_alert_count = AlertEvent.objects.filter(
+        host_id__in=batch_host_ids,
+        level=AlertEvent.LEVEL_CRITICAL,
+        created_at__gte=release_started_at,
+    ).count()
+    failed_command_count = CommandExecution.objects.filter(
+        host_id__in=batch_host_ids,
+        status=CommandExecution.STATUS_FAILED,
+        created_at__gte=release_started_at,
+    ).count()
+    associated_services = ServiceCatalog.objects.filter(
+        hosts__id__in=batch_host_ids,
+    ).distinct()
+    exhausted_slo_count = ServiceSlo.objects.filter(
+        service__in=associated_services,
+        enabled=True,
+        last_state=ServiceSlo.STATE_EXHAUSTED,
+        last_evaluated_at__gte=release_started_at,
+    ).count()
+
+    score = max(0, 100 - (critical_alert_count * 50) -
+                (failed_command_count * 25) - (exhausted_slo_count * 25))
+    status = (
+        DeploymentHealthEvaluation.STATUS_UNHEALTHY
+        if critical_alert_count or failed_command_count or exhausted_slo_count
+        else DeploymentHealthEvaluation.STATUS_HEALTHY
+    )
+    summary = 'critical_alert=%s, failed_command=%s, exhausted_slo=%s' % (
+        critical_alert_count, failed_command_count, exhausted_slo_count,
+    )
+    return DeploymentHealthEvaluation.objects.create(
+        release=release,
+        batch_identity='host_ids=%s' % ','.join(str(host_id) for host_id in batch_host_ids),
+        status=status,
+        score=score,
+        summary=summary,
+        evaluated_at=now,
+    )
 
 
 def require_deployment_slo_approval(release, requester=''):
@@ -3358,6 +3714,10 @@ def create_deployment_result(release, host, action, record):
 
 
 def execute_deployment_release(release, role=DevOpsRole.ROLE_OPERATOR):
+    # CI callbacks never trigger execution. An unfinished linked CI delivery
+    # holds the release in its existing pending state for the normal workflow.
+    if release.status == DeploymentRelease.STATUS_PENDING and not ci_quality_gate_allows_release(release):
+        return release
     claimed = claim_pending_work(DeploymentRelease, release, DeploymentRelease.STATUS_RUNNING)
     if not claimed and not claim_running_deployment_if_empty(release, DeploymentResult.ACTION_DEPLOY):
         return release
@@ -3382,18 +3742,56 @@ def execute_deployment_release(release, role=DevOpsRole.ROLE_OPERATOR):
 
     success_count = 0
     failed_count = 0
-    for host in release.hosts.all():
-        record = CommandExecution.objects.create(
-            host=host,
-            command=release.deploy_script,
-            created_by=release.created_by,
-        )
-        execute_command_record(record, role)
-        create_deployment_result(release, host, DeploymentResult.ACTION_DEPLOY, record)
-        if record.status == CommandExecution.STATUS_SUCCESS:
-            success_count += 1
-        else:
-            failed_count += 1
+    hosts = list(release.hosts.all())
+    batch_size = release.rollout_batch_size
+    batches = (
+        [hosts[index:index + batch_size] for index in range(0, len(hosts), batch_size)]
+        if batch_size else [hosts]
+    )
+    for batch_hosts in batches:
+        for host in batch_hosts:
+            record = CommandExecution.objects.create(
+                host=host,
+                command=release.deploy_script,
+                created_by=release.created_by,
+            )
+            execute_command_record(record, role)
+            create_deployment_result(release, host, DeploymentResult.ACTION_DEPLOY, record)
+            if record.status == CommandExecution.STATUS_SUCCESS:
+                success_count += 1
+            else:
+                failed_count += 1
+
+        if batch_size and batch_hosts:
+            evaluation = evaluate_deployment_health(release, batch_hosts=batch_hosts)
+            if evaluation.status == DeploymentHealthEvaluation.STATUS_UNHEALTHY:
+                release.status = DeploymentRelease.STATUS_BLOCKED
+                release.summary = '发布健康评估不通过，已停止后续批次'
+                release.finished_at = timezone.now()
+                release.save(update_fields=['status', 'summary', 'finished_at'])
+                approval = ApprovalRequest.objects.filter(
+                    deployment_release=release,
+                    request_type=ApprovalRequest.TYPE_ROLLBACK,
+                    status__in=(ApprovalRequest.STATUS_PENDING, ApprovalRequest.STATUS_APPROVED),
+                ).order_by('-created_at').first()
+                if not approval:
+                    create_rollback_approval(
+                        release,
+                        requester=release.created_by,
+                        reason='发布健康评估不通过，需人工确认回滚',
+                    )
+                AuditLog.objects.create(
+                    user=release.created_by or 'system',
+                    action='发布健康守护拦截',
+                    target_type='DeploymentRelease',
+                    target_id=str(release.id),
+                    detail='批次=%s, 状态=%s, 分数=%s' % (
+                        evaluation.batch_identity, evaluation.status, evaluation.score,
+                    ),
+                    ip_address='',
+                )
+                notify_deployment(release, '发布健康守护')
+                return release
 
     if success_count and failed_count:
         release.status = DeploymentRelease.STATUS_PARTIAL
@@ -3526,6 +3924,79 @@ def create_deployment_approval(release, requester='', reason=''):
     return approval
 
 
+def _validated_cloud_tags(tags):
+    if tags is None:
+        return {}
+    if not isinstance(tags, dict) or len(tags) > 30:
+        raise ValueError('云资源标签无效')
+    normalized = {}
+    for key, value in tags.items():
+        key = str(key or '').strip()
+        value = str(value or '').strip()
+        if not CLOUD_TAG_KEY_RE.match(key) or len(value) > 128 or CLOUD_SENSITIVE_TAG_RE.search(key):
+            raise ValueError('云资源标签无效')
+        normalized[key] = value
+    return normalized
+
+
+def _cloud_tag_digest(tags):
+    canonical = json.dumps(_validated_cloud_tags(tags), ensure_ascii=True, sort_keys=True, separators=(',', ':'))
+    return hashlib.sha256(canonical.encode('utf-8')).hexdigest()
+
+
+def record_cloud_resource_summary(service, provider, resource_type, resource_identifier, region, tags=None):
+    """Upsert a bounded cloud-inventory summary without accepting credentials or raw tag output."""
+    if not isinstance(service, ServiceCatalog) or not service.pk:
+        raise ValueError('服务目录记录无效')
+    provider = str(provider or '').strip().lower()
+    resource_type = str(resource_type or '').strip()
+    resource_identifier = str(resource_identifier or '').strip()
+    region = str(region or '').strip().lower()
+    allowed_providers = set(dict(CloudResourceSummary.PROVIDER_CHOICES))
+    if provider not in allowed_providers:
+        raise ValueError('云服务商无效')
+    if not CLOUD_RESOURCE_TYPE_RE.match(resource_type):
+        raise ValueError('云资源类型无效')
+    if not CLOUD_RESOURCE_IDENTIFIER_RE.match(resource_identifier):
+        raise ValueError('云资源标识无效')
+    if not CLOUD_REGION_RE.match(region):
+        raise ValueError('云资源区域无效')
+    defaults = {'service': service, 'tag_digest': _cloud_tag_digest(tags)}
+    resource, _ = CloudResourceSummary.objects.update_or_create(
+        provider=provider, resource_type=resource_type,
+        resource_identifier=resource_identifier, region=region,
+        defaults=defaults,
+    )
+    return resource
+
+
+def record_cloud_daily_cost(resource, cost_date, amount, currency='USD'):
+    """Store a validated daily aggregate; this function never fetches billing data."""
+    if not isinstance(resource, CloudResourceSummary) or not resource.pk:
+        raise ValueError('云资源记录无效')
+    if isinstance(cost_date, str):
+        try:
+            cost_date = datetime.strptime(cost_date, '%Y-%m-%d').date()
+        except ValueError:
+            raise ValueError('成本日期无效')
+    if not hasattr(cost_date, 'isoformat'):
+        raise ValueError('成本日期无效')
+    try:
+        amount = Decimal(str(amount))
+    except (InvalidOperation, TypeError, ValueError):
+        raise ValueError('成本金额无效')
+    if not amount.is_finite() or amount < 0 or amount > Decimal('9999999999.9999'):
+        raise ValueError('成本金额无效')
+    currency = str(currency or '').strip().upper()
+    if not re.match(r'^[A-Z]{3}$', currency):
+        raise ValueError('成本币种无效')
+    summary, _ = CloudDailyCostSummary.objects.update_or_create(
+        resource=resource, cost_date=cost_date, currency=currency,
+        defaults={'amount': amount.quantize(Decimal('0.0001'))},
+    )
+    return summary
+
+
 def create_rollback_approval(release, requester='', reason=''):
     approval = ApprovalRequest.objects.create(
         request_type=ApprovalRequest.TYPE_ROLLBACK,
@@ -3579,6 +4050,10 @@ def execute_approval_request(approval, role=DevOpsRole.ROLE_ADMIN):
         return approval
 
     if approval.request_type == ApprovalRequest.TYPE_DEPLOYMENT and approval.deployment_release:
+        if not ci_quality_gate_allows_release(approval.deployment_release):
+            # An approval is not execution. Preserve it while CI is pending;
+            # a failed gate may already have blocked the release.
+            return approval
         execute_deployment_release(approval.deployment_release, role)
         approval.status = ApprovalRequest.STATUS_EXECUTED
         if approval.deployment_release.status == DeploymentRelease.STATUS_FAILED:

@@ -1,0 +1,36 @@
+<h2>选择浅色运维界面的密度</h2>
+<p class="subtitle">四类页面会共用同一套结构。区别在于工作区留白、表格密度和操作区的视觉重量。</p>
+
+<div class="cards">
+  <div class="card" data-choice="a" onclick="toggleSelect(this)">
+    <div class="card-image">
+      <div style="background:#f5f7fa;color:#18222d;padding:14px;min-height:215px;font:12px system-ui">
+        <div style="display:flex;justify-content:space-between;border-bottom:1px solid #d9e0e7;padding-bottom:9px"><strong>服务管理</strong><span style="color:#667085">DevOps / Service</span></div>
+        <div style="margin-top:12px;background:white;border:1px solid #d9e0e7;padding:11px"><b>执行服务操作</b><div style="display:flex;gap:6px;margin-top:9px"><span style="background:#f8fafc;border:1px solid #d9e0e7;padding:6px;flex:1">目标主机</span><span style="background:#f8fafc;border:1px solid #d9e0e7;padding:6px;flex:1">操作</span><span style="background:#1769aa;color:white;padding:6px 9px">执行</span></div></div>
+        <div style="margin-top:10px;background:white;border:1px solid #d9e0e7"><div style="padding:8px;border-bottom:1px solid #e5e9ef"><b>执行记录</b></div><div style="padding:8px;color:#667085">时间　主机　服务　状态　结果</div></div>
+      </div>
+    </div>
+    <div class="card-body"><h3>A · 精确操作台</h3><p>推荐。偏紧凑，细边框和表格主导，蓝色只表示可执行动作，适合持续使用。</p></div>
+  </div>
+  <div class="card" data-choice="b" onclick="toggleSelect(this)">
+    <div class="card-image">
+      <div style="background:#edf2f7;color:#243246;padding:14px;min-height:215px;font:12px system-ui">
+        <div style="font-size:16px;font-weight:700">服务管理</div><div style="color:#708090;margin-top:4px">操作、结果与运行记录</div>
+        <div style="margin-top:15px;background:white;border-radius:8px;padding:14px;box-shadow:0 2px 7px #cad3df"><b>执行服务操作</b><div style="margin-top:10px;background:#f7f9fc;padding:9px">目标主机　　服务名　　操作</div><div style="display:inline-block;background:#246eb9;color:white;margin-top:10px;padding:7px 14px;border-radius:5px">执行服务操作</div></div>
+      </div>
+    </div>
+    <div class="card-body"><h3>B · 柔和管理后台</h3><p>更宽松、阴影更明显，对新手友好；长时间扫描记录时密度偏低。</p></div>
+  </div>
+  <div class="card" data-choice="c" onclick="toggleSelect(this)">
+    <div class="card-image">
+      <div style="background:#eef6fb;color:#0f2435;padding:14px;min-height:215px;font:12px system-ui">
+        <div style="display:flex;gap:10px"><span style="font-size:20px;font-weight:700">监控历史</span><span style="background:#dceefd;color:#1769aa;padding:4px">最近 24 小时</span></div>
+        <div style="margin-top:12px;background:white;border-top:3px solid #247ba0;padding:10px"><b>指标趋势</b><div style="height:45px;margin-top:8px;background:linear-gradient(180deg,#f4fbff,#fff);border-bottom:1px solid #c8d9e5"></div></div>
+        <div style="margin-top:9px;display:flex;gap:8px"><span style="background:white;padding:8px;flex:1;border:1px solid #cfdfeb">主机指标</span><span style="background:white;padding:8px;flex:1;border:1px solid #cfdfeb">容量预测</span></div>
+      </div>
+    </div>
+    <div class="card-body"><h3>C · 数据工作台</h3><p>图表与筛选更突出，适合监控页；用在命令、审批和文件分发会显得过重。</p></div>
+  </div>
+</div>
+
+<div class="section"><span class="label">推荐</span><p>A 作为全局基线；仅在监控历史页面吸收 C 的图表层级。这样能让操作页保持克制，数据页也不会失去重点。</p></div>

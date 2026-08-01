@@ -96,6 +96,7 @@ from .models import (
     IntegrationHealthEvent,
     MaintenanceWindow,
     PrometheusRuleRevision,
+    PrometheusRuleRevisionReview,
 )
 from .config_governance import create_prometheus_rule_draft, serialize_revision
 from .services import (
@@ -108,6 +109,7 @@ from .services import (
     create_command_approval,
     create_deployment_approval,
     create_rollback_approval,
+    ci_quality_gate_allows_release,
     deployment_risk_preview,
     execute_approval_request,
     enqueue_background_job,
@@ -131,6 +133,7 @@ from .services import (
     load_cached_k8s_cluster_detail,
     load_cached_k8s_node_detail,
     notify_approval,
+    valid_wecom_approval_link,
     send_notification_channel,
     test_k8s_cluster_connection,
     scan_compliance_baseline,
@@ -1214,13 +1217,18 @@ def deployments(request):
                     submit_for_approval = request.POST.get('submit_mode') == 'approval' or settings_obj.force_deploy_approval
                     release = release_form.save(commit=False)
                     release.created_by = request.session.get('user_name')
-                    release.status = (
-                        DeploymentRelease.STATUS_PENDING
-                        if submit_for_approval
-                        else DeploymentRelease.STATUS_RUNNING
-                    )
+                    # CI results are recorded separately; a release cannot
+                    # enter its normal approval/queue path until the latest
+                    # matching run has passed the service-layer quality gate.
+                    release.status = DeploymentRelease.STATUS_PENDING
                     release.save()
                     release_form.save_m2m()
+                    if not ci_quality_gate_allows_release(release):
+                        if release.status == DeploymentRelease.STATUS_PENDING:
+                            release.summary = 'Awaiting successful CI quality gate.'
+                            release.save(update_fields=['summary'])
+                        audit(request, '等待CI质量门禁', 'DeploymentRelease', release.id, release.version)
+                        return redirect('devops:deployments')
                     maintenance_approval = require_deployment_maintenance_approval(
                         release,
                         requester=request.session.get('user_name'),
@@ -1231,9 +1239,6 @@ def deployments(request):
                     )
                     approval_required = maintenance_approval or slo_approval
                     if submit_for_approval or approval_required:
-                        if approval_required and release.status != DeploymentRelease.STATUS_PENDING:
-                            release.status = DeploymentRelease.STATUS_PENDING
-                            release.save(update_fields=['status'])
                         approval = create_deployment_approval(
                             release,
                             request.session.get('user_name'),
@@ -1384,6 +1389,15 @@ def maintenance_window_toggle(request, id):
 
 
 @session_login_required
+@session_login_required
+def wecom_approval_link(request, id):
+    """Validate a bot navigation link before entering the existing approval UI."""
+    if not valid_wecom_approval_link(id, request.GET.get('token', '')):
+        return HttpResponseBadRequest('企业微信审批链接无效或已过期')
+    get_object_or_404(ApprovalRequest, id=id)
+    return redirect('devops:approvals')
+
+
 def approvals(request):
     denied = require_devops_role(request, DevOpsRole.ROLE_VIEWER, MODULE_APPROVAL)
     if denied:
@@ -2268,6 +2282,7 @@ def prometheus_rule_revisions(request):
     if selected_cluster is None:
         selected_cluster = clusters.first()
     revisions = []
+    actor_reviewed_revision_ids = set()
     if selected_cluster:
         for revision in PrometheusRuleRevision.objects.filter(cluster=selected_cluster).select_related('created_by'):
             item = serialize_revision(revision)
@@ -2278,10 +2293,17 @@ def prometheus_rule_revisions(request):
                 'restore': reverse('devops:prometheus_rule_revision_restore', args=[revision.id]),
             }
             revisions.append(item)
+        actor_reviewed_revision_ids = set(
+            PrometheusRuleRevisionReview.objects.filter(
+                revision__cluster=selected_cluster,
+                reviewer_id=request.session.get('user_id'),
+            ).values_list('revision_id', flat=True)
+        )
     return render(request, 'devops/prometheus_rule_revisions.html', {
         'clusters': clusters,
         'selected_cluster': selected_cluster,
         'revisions': revisions,
+        'actor_reviewed_revision_ids': actor_reviewed_revision_ids,
         'api_revisions_url': reverse('devops:api_prometheus_rule_revisions', args=[selected_cluster.id]) if selected_cluster else '',
         'can_manage': True,
     })

@@ -37,6 +37,7 @@ from .models import (
     BatchTaskResult,
     BackgroundJob,
     CommandExecution,
+    CIDelivery,
     DeploymentApp,
     DevOpsProject,
     DeploymentRelease,
@@ -2756,6 +2757,8 @@ class DevOpsViewTests(TestCase):
         self.assertContains(response, 'devops-vue.js')
         self.assertContains(response, 'DevOps控制台')
         self.assertContains(response, '加载 DevOps 控制台')
+        self.assertContains(response, 'ops-geist-console')
+        self.assertContains(response, '20260801-geist-control-plane-01')
 
     def test_vue_static_includes_approval_decision_controls(self):
         with open('static/js/devops-vue.js', 'r') as handle:
@@ -2766,6 +2769,18 @@ class DevOpsViewTests(TestCase):
         self.assertIn('/devops/api/approvals/${item.id}/decide/', content)
         self.assertIn('canDecideApproval', content)
 
+    def test_vue_static_includes_bright_workbench_data_contract(self):
+        with open('static/js/devops-vue.js', 'r') as handle:
+            content = handle.read()
+
+        for value in (
+            'priorityItems()', 'activeWorkItems()', '需要处理', '运行中工作',
+            '主机健康概览', '/devops/api/dashboard/', 'X-CSRFToken',
+            "['resolved', 'closed', 'silenced']", 'lastLoadedAt',
+            '/devops/audit/', '查看运行记录',
+        ):
+            self.assertIn(value, content)
+
     def test_dashboard_uses_vue_shell(self):
         response = self.client.get(reverse('devops:dashboard'))
 
@@ -2773,7 +2788,7 @@ class DevOpsViewTests(TestCase):
         self.assertContains(response, 'devops-vue-root')
         self.assertContains(response, 'DevOps 控制台')
         self.assertContains(response, 'devops-vue.js')
-        self.assertContains(response, 'devops-vue.js?v=20260708')
+        self.assertContains(response, 'devops-vue.js?v=20260801-geist-control-plane-01')
 
     def test_legacy_dashboard_still_available(self):
         response = self.client.get(reverse('devops:legacy_dashboard'))
@@ -4749,12 +4764,24 @@ class DevOpsViewTests(TestCase):
         self.assertEqual(DeploymentRelease.objects.count(), release_count)
 
     def test_dangerous_deployment_is_blocked_with_host_results(self):
-        app = DeploymentApp.objects.create(name='billing-service', created_by=self.user.user)
+        revision = 'a' * 40
+        app = DeploymentApp.objects.create(
+            name='billing-service', repository='team/billing', created_by=self.user.user,
+        )
+        CIDelivery.objects.create(
+            provider=CIDelivery.PROVIDER_GITLAB,
+            repository='team/billing',
+            delivery_id='billing-success',
+            fingerprint='b' * 64,
+            status='success',
+            revision=revision,
+            summary='GitLab CI status success for team/billing.',
+        )
 
         response = self.client.post(reverse('devops:deployments'), {
             'form_type': 'release',
             'app': app.id,
-            'version': 'v1.0.0',
+            'version': revision,
             'description': 'blocked release',
             'deploy_script': 'rm -rf /',
             'rollback_script': 'echo rollback',
@@ -4982,14 +5009,18 @@ class DevOpsViewTests(TestCase):
         self.assertIn(approval.status, [ApprovalRequest.STATUS_EXECUTED, ApprovalRequest.STATUS_FAILED])
 
     def test_force_deploy_approval_creates_approval(self):
+        revision = 'c' * 40
         DevOpsSetting.objects.create(force_deploy_approval=True)
-        app = DeploymentApp.objects.create(name='force-approval-app', created_by=self.user.user)
+        app = DeploymentApp.objects.create(name='force-approval-app', repository='team/force', created_by=self.user.user)
+        CIDelivery.objects.create(provider=CIDelivery.PROVIDER_GITLAB, repository='team/force',
+            delivery_id='force-success', fingerprint='c' * 64, status='success', revision=revision,
+            summary='GitLab CI status success for team/force.')
 
         response = self.client.post(reverse('devops:deployments'), {
             'form_type': 'release',
             'submit_mode': 'execute',
             'app': app.id,
-            'version': 'v3',
+            'version': revision,
             'description': 'forced approval',
             'deploy_script': 'echo deploy',
             'rollback_script': 'echo rollback',
@@ -5004,13 +5035,17 @@ class DevOpsViewTests(TestCase):
         self.assertEqual(approval.deployment_release, release)
 
     def test_deployment_can_be_submitted_for_approval(self):
-        app = DeploymentApp.objects.create(name='approval-app', created_by=self.user.user)
+        revision = 'd' * 40
+        app = DeploymentApp.objects.create(name='approval-app', repository='team/approval', created_by=self.user.user)
+        CIDelivery.objects.create(provider=CIDelivery.PROVIDER_GITLAB, repository='team/approval',
+            delivery_id='approval-success', fingerprint='d' * 64, status='success', revision=revision,
+            summary='GitLab CI status success for team/approval.')
 
         response = self.client.post(reverse('devops:deployments'), {
             'form_type': 'release',
             'submit_mode': 'approval',
             'app': app.id,
-            'version': 'v2',
+            'version': revision,
             'description': 'needs approval',
             'deploy_script': 'echo deploy',
             'rollback_script': 'echo rollback',
@@ -5865,6 +5900,59 @@ class IntegrationHealthCoreContractTests(TestCase):
         self.assertEqual(summary['recent_event_counts']['failed'], 2)
 
 
+class WeComBotApprovalLinkTests(TestCase):
+    @override_settings(PLATFORM_PUBLIC_BASE_URL='https://ops.example.test')
+    def test_wecom_approval_notification_contains_expiring_authenticated_link_only(self):
+        from .services import build_wecom_approval_link, send_notification_channel
+
+        user = User.objects.create(user='wecom-owner', email='wecom@example.com', password='plain', confirm_pwd='plain')
+        approval = ApprovalRequest.objects.create(
+            title='审批机器人链接', request_type=ApprovalRequest.TYPE_COMMAND,
+            requester=user.user, status=ApprovalRequest.STATUS_PENDING,
+        )
+        channel = NotificationChannel.objects.create(
+            name='wecom-bot', channel_type=NotificationChannel.TYPE_WECOM,
+            webhook_url='https://example.com/wecom', notify_approval=True,
+        )
+        link = build_wecom_approval_link(approval)
+
+        self.assertTrue(link.startswith('https://ops.example.test/devops/wecom/approvals/'))
+        self.assertNotIn(approval.title, link)
+        with mock.patch('devops.services.requests.post', return_value=mock.Mock(status_code=200)) as post:
+            send_notification_channel(
+                channel, NotificationLog.EVENT_APPROVAL, '待审批', '请在平台中处理', wecom_link=link,
+            )
+
+        body = post.call_args.kwargs['json']['text']['content']
+        self.assertIn('[在平台中处理](%s)' % link, body)
+        self.assertNotIn(channel.decrypted_webhook_url, body)
+        self.assertNotIn('command=', body)
+
+    @override_settings(PLATFORM_PUBLIC_BASE_URL='https://ops.example.test')
+    def test_wecom_link_requires_session_and_never_decides_approval(self):
+        from .services import build_wecom_approval_link
+
+        user = User.objects.create(user='wecom-link-user', email='wecom-link@example.com', password='plain', confirm_pwd='plain')
+        approval = ApprovalRequest.objects.create(
+            title='链接审批', request_type=ApprovalRequest.TYPE_COMMAND,
+            requester=user.user, status=ApprovalRequest.STATUS_PENDING,
+        )
+        link = build_wecom_approval_link(approval)
+        path = link.replace('https://ops.example.test', '')
+
+        anonymous = self.client.get(path)
+        self.assertEqual(anonymous.status_code, 302)
+        session = self.client.session
+        session['is_login'] = True
+        session['user_id'] = user.id
+        session['user_name'] = user.user
+        session.save()
+        response = self.client.get(path)
+        self.assertRedirects(response, reverse('devops:approvals'))
+        approval.refresh_from_db()
+        self.assertEqual(approval.status, ApprovalRequest.STATUS_PENDING)
+
+
 class BackgroundJobSummaryTests(TestCase):
     def create_job(self, status, **kwargs):
         return BackgroundJob.objects.create(
@@ -6665,7 +6753,10 @@ class ServiceSloHistoryTests(TestCase):
         ])
         self.assertEqual(
             set(field.name for field in ServiceSloEvaluation._meta.fields),
-            {'id', 'slo', 'state', 'summary', 'evaluated_at'},
+            {
+                'id', 'slo', 'state', 'summary', 'observed_value',
+                'budget_remaining_percent', 'burn_rate', 'evaluated_at',
+            },
         )
         notify.assert_called_once()
         self.assertEqual(notify.call_args[0][0], NotificationLog.EVENT_ALERT)

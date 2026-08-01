@@ -1,6 +1,6 @@
 {% load static %}
 
-<nav class="navbar navbar-light navbar-custom app-sidebar">
+<nav class="navbar navbar-light navbar-custom app-sidebar" aria-label="主导航">
     <div class="sidebar-inner">
         <a class="navbar-brand" href="{% url 'index' %}">
             <i class="fas fa-server"></i>
@@ -11,10 +11,15 @@
             <div class="sidebar-label">导航</div>
             <ul class="navbar-nav sidebar-nav">
                 <li class="nav-item sidebar-nav-group">
-                    <a class="nav-link sidebar-parent-link" href="{% url 'asset_management' %}"
-                       role="button" aria-expanded="false" aria-controls="sidebar-assets-subnav">
-                        <i class="fas fa-boxes-stacked"></i><span>资产管理</span>
-                    </a>
+                    <div class="sidebar-parent-row">
+                        <a class="nav-link sidebar-parent-link" href="{% url 'asset_management' %}">
+                            <i class="fas fa-boxes-stacked" aria-hidden="true"></i><span>资产管理</span>
+                        </a>
+                        <button class="sidebar-disclosure" type="button" aria-label="展开资产管理"
+                                aria-expanded="false" aria-controls="sidebar-assets-subnav">
+                            <i class="fas fa-chevron-down" aria-hidden="true"></i>
+                        </button>
+                    </div>
                     <ul class="sidebar-subnav" id="sidebar-assets-subnav">
                         <li>
                             <a class="nav-link sidebar-subnav-link" href="{% url 'linux' %}">
@@ -29,10 +34,15 @@
                     </ul>
                 </li>
                 <li class="nav-item sidebar-nav-group">
-                    <a class="nav-link sidebar-parent-link" href="{% url 'password:credential_management' %}"
-                       role="button" aria-expanded="false" aria-controls="sidebar-credentials-subnav">
-                        <i class="fas fa-key"></i><span>凭据管理</span>
-                    </a>
+                    <div class="sidebar-parent-row">
+                        <a class="nav-link sidebar-parent-link" href="{% url 'password:credential_management' %}">
+                            <i class="fas fa-key" aria-hidden="true"></i><span>凭据管理</span>
+                        </a>
+                        <button class="sidebar-disclosure" type="button" aria-label="展开凭据管理"
+                                aria-expanded="false" aria-controls="sidebar-credentials-subnav">
+                            <i class="fas fa-chevron-down" aria-hidden="true"></i>
+                        </button>
+                    </div>
                     <ul class="sidebar-subnav" id="sidebar-credentials-subnav">
                         <li>
                             <a class="nav-link sidebar-subnav-link" href="{% url 'password:password_manage' %}">
@@ -42,10 +52,15 @@
                     </ul>
                 </li>
                 <li class="nav-item sidebar-nav-group">
-                    <a class="nav-link sidebar-parent-link" href="/monitor/manage/"
-                       role="button" aria-expanded="false" aria-controls="sidebar-monitor-subnav">
-                        <i class="fas fa-chart-line"></i><span>监控管理</span>
-                    </a>
+                    <div class="sidebar-parent-row">
+                        <a class="nav-link sidebar-parent-link" href="/monitor/manage/">
+                            <i class="fas fa-chart-line" aria-hidden="true"></i><span>监控管理</span>
+                        </a>
+                        <button class="sidebar-disclosure" type="button" aria-label="展开监控管理"
+                                aria-expanded="false" aria-controls="sidebar-monitor-subnav">
+                            <i class="fas fa-chevron-down" aria-hidden="true"></i>
+                        </button>
+                    </div>
                     <ul class="sidebar-subnav" id="sidebar-monitor-subnav">
                         <li>
                             <a class="nav-link sidebar-subnav-link" href="/monitor/manage/">
@@ -91,10 +106,15 @@
                 </li>
                 {% if devops_navigation.can_view_cluster %}
                 <li class="nav-item sidebar-nav-group">
-                    <a class="nav-link sidebar-parent-link" href="{% url 'devops:clusters' %}"
-                       role="button" aria-expanded="false" aria-controls="sidebar-k8s-subnav">
-                        <i class="fas fa-cubes"></i><span>K8s集群管理</span>
-                    </a>
+                    <div class="sidebar-parent-row">
+                        <a class="nav-link sidebar-parent-link" href="{% url 'devops:clusters' %}">
+                            <i class="fas fa-cubes" aria-hidden="true"></i><span>K8s集群管理</span>
+                        </a>
+                        <button class="sidebar-disclosure" type="button" aria-label="展开K8s集群管理"
+                                aria-expanded="false" aria-controls="sidebar-k8s-subnav">
+                            <i class="fas fa-chevron-down" aria-hidden="true"></i>
+                        </button>
+                    </div>
                     <ul class="sidebar-subnav" id="sidebar-k8s-subnav">
                         {% if devops_navigation.can_manage_cluster %}
                         <li>

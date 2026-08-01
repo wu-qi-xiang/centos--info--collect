@@ -4,6 +4,101 @@
     color: var(--ops-text);
 }
 
+body.ops-console .devops-vue-shell:not(.ops-geist-console),
+body.ops-console .devops-vue-shell:not(.ops-geist-console) .vue-user-line { color: var(--ops-console-text); }
+body.ops-console .devops-vue-shell:not(.ops-geist-console) .vue-topbar,
+body.ops-console .devops-vue-shell:not(.ops-geist-console) .vue-tabs,
+body.ops-console .devops-vue-shell:not(.ops-geist-console) .vue-panel,
+body.ops-console .devops-vue-shell:not(.ops-geist-console) .vue-stat-card,
+body.ops-console .devops-vue-shell:not(.ops-geist-console) .vue-loading { background: var(--ops-console-surface); border-color: var(--ops-console-line); box-shadow: none; }
+body.ops-console .devops-vue-shell:not(.ops-geist-console) .vue-topbar { border-inline-start: 3px solid var(--ops-console-signal); }
+body.ops-console .devops-vue-shell:not(.ops-geist-console) .vue-tab.active,
+body.ops-console .devops-vue-shell:not(.ops-geist-console) .vue-tab:hover { background: var(--ops-console-raised); color: var(--ops-console-signal); }
+body.ops-console .devops-vue-shell:not(.ops-geist-console) .vue-role-pill,
+body.ops-console .devops-vue-shell:not(.ops-geist-console) .vue-panel-count,
+body.ops-console .devops-vue-shell:not(.ops-geist-console) .vue-tab em { background: var(--ops-console-raised); color: var(--ops-console-muted); }
+body.ops-console .devops-vue-shell:not(.ops-geist-console) .vue-avatar,
+body.ops-console .devops-vue-shell:not(.ops-geist-console) .vue-stat-icon { background: var(--ops-console-raised); color: var(--ops-console-signal); }
+
+@media (max-width: 768px) {
+    .devops-vue-shell .vue-topbar { flex-direction: column; }
+    .devops-vue-shell .vue-topbar-actions { justify-content: flex-start; }
+    .devops-vue-shell .vue-stat-grid,
+    .devops-vue-shell .vue-grid { grid-template-columns: minmax(0, 1fr); }
+}
+
+/* Geist control plane: compact neutral surfaces with semantic status colors. */
+.ops-geist-console {
+    --ops-geist-canvas: #fafafa;
+    --ops-geist-surface: #ffffff;
+    --ops-geist-raised: #f5f5f5;
+    --ops-geist-line: #eaeaea;
+    --ops-geist-line-strong: #d4d4d4;
+    --ops-geist-text: #171717;
+    --ops-geist-muted: #737373;
+    --ops-geist-blue: #0070f3;
+    --ops-geist-green: #15803d;
+    --ops-geist-amber: #a16207;
+    --ops-geist-red: #dc2626;
+    min-width: 0;
+    padding: 2px;
+    color: var(--ops-geist-text);
+    background: var(--ops-geist-canvas);
+}
+
+.ops-geist-console.devops-vue-shell { gap: 10px; }
+.ops-geist-console .vue-loading,
+.ops-geist-console .vue-topbar,
+.ops-geist-console .vue-tabs,
+.ops-geist-console .vue-panel,
+.ops-geist-console .vue-stat-card {
+    border-color: var(--ops-geist-line);
+    border-radius: 6px;
+    background: var(--ops-geist-surface);
+    box-shadow: none;
+}
+.ops-geist-console .vue-topbar { padding: 13px 14px; border-inline-start: 3px solid var(--ops-geist-blue); }
+.ops-geist-console .vue-title { font-size: 18px; font-weight: 700; letter-spacing: 0; }
+.ops-geist-console .vue-subtitle,
+.ops-geist-console .vue-user-line,
+.ops-geist-console .vue-stat-label,
+.ops-geist-console .vue-stat-note,
+.ops-geist-console .vue-row-meta { color: var(--ops-geist-muted); }
+.ops-geist-console .vue-tabs { gap: 2px; padding: 4px; }
+.ops-geist-console .vue-tab { min-height: 32px; border-radius: 4px; padding: 6px 9px; color: #525252; font-size: 13px; font-weight: 600; }
+.ops-geist-console .vue-tab.active,
+.ops-geist-console .vue-tab:hover { color: var(--ops-geist-blue); background: #eef6ff; }
+.ops-geist-console .vue-avatar,
+.ops-geist-console .vue-stat-icon,
+.ops-geist-console .vue-host-avatar { border-radius: 5px; background: #f5f5f5; color: var(--ops-geist-blue); }
+.ops-geist-console .vue-role-pill,
+.ops-geist-console .vue-panel-count,
+.ops-geist-console .vue-tab em { border-radius: 4px; padding: 4px 6px; background: #f5f5f5; color: #525252; }
+.ops-geist-console .vue-stat-card { gap: 10px; padding: 12px; }
+.ops-geist-console .vue-stat-value { font-size: 23px; font-weight: 700; }
+.ops-geist-console .vue-panel-header { min-height: 42px; padding: 9px 12px; border-color: var(--ops-geist-line); background: var(--ops-geist-raised); }
+.ops-geist-console .vue-panel-title { font-size: 13px; font-weight: 700; }
+.ops-geist-console .vue-panel-title i { color: var(--ops-geist-blue); }
+.ops-geist-console .vue-panel-body { padding: 12px; }
+.ops-geist-console .vue-row,
+.ops-geist-console .vue-command-row,
+.ops-geist-console .vue-host-row { border-color: var(--ops-geist-line); border-radius: 5px; background: #fff; }
+.ops-geist-console .vue-row:hover,
+.ops-geist-console .vue-command-row:hover,
+.ops-geist-console .vue-host-row:hover { border-color: var(--ops-geist-line-strong); background: #fafafa; }
+.ops-geist-console :is(.form-control, .form-select) { min-height: 32px; border-color: var(--ops-geist-line-strong); border-radius: 5px; color: var(--ops-geist-text); box-shadow: none; }
+.ops-geist-console :is(.form-control, .form-select):focus { border-color: var(--ops-geist-blue); box-shadow: 0 0 0 2px rgba(0, 112, 243, .14); }
+.ops-geist-console .btn { min-height: 32px; border-radius: 5px; font-weight: 600; }
+.ops-geist-console .btn-primary { border-color: #171717; background: #171717; color: #fff; }
+.ops-geist-console .btn-primary:hover,
+.ops-geist-console .btn-primary:focus { border-color: #000; background: #000; color: #fff; }
+.ops-geist-console .btn-outline-primary { border-color: var(--ops-geist-line-strong); color: #262626; }
+.ops-geist-console .btn-outline-primary:hover { border-color: #171717; background: #171717; color: #fff; }
+.ops-geist-console .vue-status { border-radius: 4px; font-weight: 700; }
+.ops-geist-console .vue-status.success { color: var(--ops-geist-green); background: #f0fdf4; }
+.ops-geist-console .vue-status.warning { color: var(--ops-geist-amber); background: #fffbeb; }
+.ops-geist-console .vue-status.danger { color: var(--ops-geist-red); background: #fef2f2; }
+
 .vue-loading {
     min-height: 320px;
     display: flex;
@@ -685,4 +780,107 @@
     .vue-topbar-actions .btn {
         flex: 0 0 auto;
     }
+}
+
+/* The bright workbench is deliberately scoped so legacy DevOps views keep their current shell. */
+.ops-bright-workbench {
+    min-width: 0;
+    background: var(--ops-workbench-canvas);
+    --ops-workbench-canvas: #f4f7fa;
+    --ops-workbench-surface: #ffffff;
+    --ops-workbench-line: #dbe3ec;
+    --ops-workbench-text: #17212b;
+    --ops-workbench-muted: #64748b;
+    --ops-workbench-primary: #1769e0;
+    --ops-workbench-soft: #f8fafc;
+}
+
+.ops-bright-workbench .devops-vue-shell,
+.ops-bright-workbench.devops-vue-shell {
+    min-width: 0;
+    color: var(--ops-workbench-text);
+}
+
+body.ops-console .ops-bright-workbench,
+body.ops-console .ops-bright-workbench .vue-user-line { color: var(--ops-workbench-text); }
+body.ops-console .ops-bright-workbench .vue-topbar,
+body.ops-console .ops-bright-workbench .vue-tabs,
+body.ops-console .ops-bright-workbench .vue-panel,
+body.ops-console .ops-bright-workbench .vue-stat-card,
+body.ops-console .ops-bright-workbench .vue-loading {
+    background: var(--ops-workbench-surface);
+    border-color: var(--ops-workbench-line);
+    box-shadow: none;
+}
+
+body.ops-console .ops-bright-workbench .vue-topbar { border-inline-start-color: var(--ops-workbench-primary); }
+body.ops-console .ops-bright-workbench .vue-tab.active,
+body.ops-console .ops-bright-workbench .vue-tab:hover { background: #edf5ff; color: var(--ops-workbench-primary); }
+.ops-bright-workbench .vue-panel-header { background: var(--ops-workbench-soft); border-color: var(--ops-workbench-line); }
+.ops-bright-workbench .vue-panel-title i { color: var(--ops-workbench-primary); }
+.ops-bright-workbench .vue-stat-card { min-width: 0; padding: 13px; }
+.ops-bright-workbench .vue-stat-note { color: var(--ops-workbench-muted); }
+
+.ops-bright-workbench .ops-workbench-dashboard {
+    display: grid;
+    gap: 14px;
+    min-width: 0;
+}
+
+.ops-bright-workbench .ops-workbench-stats { gap: 10px; }
+
+.ops-bright-workbench .ops-workbench-queues {
+    display: grid;
+    grid-template-columns: minmax(0, 1.45fr) minmax(0, 1fr);
+    gap: 14px;
+    align-items: start;
+    min-width: 0;
+}
+
+.ops-bright-workbench .ops-work-queue { display: grid; gap: 8px; }
+
+.ops-bright-workbench .ops-work-item {
+    display: grid;
+    grid-template-columns: minmax(0, 1fr) auto;
+    gap: 12px;
+    align-items: center;
+    min-width: 0;
+    padding: 9px 10px 9px 13px;
+    border: 1px solid var(--ops-workbench-line);
+    border-inline-start: 4px solid #94a3b8;
+    border-radius: var(--ops-radius-sm);
+    background: #ffffff;
+}
+
+.ops-bright-workbench .ops-rail-failed { border-inline-start-color: #dc2626; }
+.ops-bright-workbench .ops-rail-pending { border-inline-start-color: #d97706; }
+.ops-bright-workbench .ops-rail-running { border-inline-start-color: #1769e0; }
+.ops-bright-workbench .ops-work-item-main { min-width: 0; }
+.ops-bright-workbench .ops-work-item-type { color: var(--ops-workbench-muted); font-size: 11px; font-weight: 750; }
+.ops-bright-workbench .ops-work-item .vue-row-title { overflow-wrap: anywhere; }
+.ops-bright-workbench .ops-work-item .vue-row-meta { margin-bottom: 0; }
+.ops-bright-workbench .ops-host-health-panel { min-width: 0; }
+
+.ops-bright-workbench .ops-table-scroll {
+    max-width: 100%;
+    overflow-x: auto;
+    -webkit-overflow-scrolling: touch;
+}
+
+.ops-bright-workbench .ops-host-health-table { width: 100%; min-width: 650px; border-collapse: collapse; }
+.ops-bright-workbench .ops-host-health-table th,
+.ops-bright-workbench .ops-host-health-table td {
+    padding: 10px 14px;
+    border-bottom: 1px solid var(--ops-workbench-line);
+    text-align: left;
+    white-space: nowrap;
+}
+.ops-bright-workbench .ops-host-health-table th { color: var(--ops-workbench-muted); font-size: 12px; font-weight: 750; background: var(--ops-workbench-soft); }
+.ops-bright-workbench .ops-host-health-table tbody tr:last-child td { border-bottom: 0; }
+
+@media (max-width: 768px) {
+    .ops-bright-workbench .ops-workbench-stats { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+    .ops-bright-workbench .ops-workbench-queues { grid-template-columns: minmax(0, 1fr); }
+    .ops-bright-workbench .ops-work-item { grid-template-columns: minmax(0, 1fr); gap: 7px; }
+    .ops-bright-workbench .ops-work-item .vue-status { justify-self: start; }
 }

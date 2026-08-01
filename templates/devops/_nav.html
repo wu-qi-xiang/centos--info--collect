@@ -1,4 +1,4 @@
-<div class="devops-nav d-flex flex-wrap gap-2 mb-4">
+<nav class="devops-nav ops-legacy-nav d-flex flex-wrap gap-2 mb-4" aria-label="DevOps 操作导航">
     <a class="btn btn-outline-primary btn-sm" href="{% url 'devops:dashboard' %}">新版控制台</a>
     {% if devops_navigation.can_view_security %}
     <a class="btn btn-outline-primary btn-sm" href="{% url 'devops:group_list' %}">主机分组</a>
@@ -53,4 +53,4 @@
     {% if devops_navigation.can_view_audit %}
     <a class="btn btn-outline-primary btn-sm" href="{% url 'devops:audit_logs' %}">审计日志</a>
     {% endif %}
-</div>
+</nav>

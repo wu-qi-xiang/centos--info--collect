@@ -1480,7 +1480,7 @@ class MonitorSecurityTests(TestCase):
 		self.assertIn('this.expandedRuleCells.query = [];', vue_source)
 		self.assertIn('this.expandedRuleCells.labels = [];', vue_source)
 
-		static_version = '20260723-prometheus-rule-governance-01'
+		static_version = '20260724-prometheus-rule-errors-01'
 		self.assertEqual(page_template.count('?v=%s' % static_version), 2)
 		self.assertIn("static 'css/ops-vue-pages.css'", page_template)
 		self.assertIn("static 'js/ops-vue-pages.js'", page_template)
@@ -3804,9 +3804,13 @@ spec:
 		self.assertIn("v-if=\"data.prometheus_rules.can_create && data.prometheus_rules.configured\"", page_template)
 		self.assertIn('ops-rule-workbench__state is-denied', page_template)
 		self.assertIn('.ops-rule-workbench', page_styles)
-		self.assertIn('20260723-prometheus-rule-governance-01', page_shell)
+		self.assertIn('20260724-prometheus-rule-errors-01', page_shell)
 		self.assertIn('修订管理', page_template)
 		self.assertIn('创建待复核草稿', page_template)
+		self.assertIn('规则摘要不可用', page_template)
+		self.assertIn('创建草稿失败', page_template)
+		self.assertIn('data.prometheus_rules.create_error', page_template)
+		self.assertNotIn('v-if="!data.prometheus_rules.error" class="ops-rule-workbench__layout"', page_template)
 
 	@mock.patch('monitor.views.list_prometheus_rules')
 	def test_admin_sees_create_form_and_user_without_cluster_permission_sees_no_rule_data(self, list_rules):
@@ -3848,6 +3852,24 @@ spec:
 		self.assertFalse(AuditLog.objects.filter(action='创建PrometheusRule草稿').exists())
 		self.set_cluster_permission(DevOpsRole.ROLE_ADMIN)
 		self.assertEqual(self.client.get('/monitor/prometheus-rules/create/').status_code, 405)
+
+	@mock.patch('monitor.views.create_prometheus_rule_draft')
+	def test_invalid_yaml_is_a_create_error_and_keeps_the_editor_available(self, create_draft):
+		self.set_cluster_permission(DevOpsRole.ROLE_ADMIN)
+		yaml_text = 'apiVersion: monitoring.coreos.com/v1\nkind: PrometheusRule\nmetadata: ['
+
+		response = self.client.post('/monitor/prometheus-rules/create/', {
+			'cluster': self.cluster.id, 'yaml': yaml_text,
+		})
+		rules_data = self.vue_data(response)['prometheus_rules']
+
+		self.assertEqual(response.status_code, 400)
+		self.assertEqual(rules_data['error'], '')
+		self.assertEqual(rules_data['create_error'], '规则 YAML 格式或资源身份无效。')
+		self.assertTrue(rules_data['configured'])
+		self.assertTrue(rules_data['can_create'])
+		self.assertEqual(rules_data['form']['yaml'], yaml_text)
+		create_draft.assert_not_called()
 
 	@mock.patch('monitor.views.create_prometheus_rule_draft')
 	def test_successful_create_creates_draft_audits_safe_identity_and_redirects(self, create_draft):
@@ -3902,7 +3924,8 @@ spec:
 			self.assertTrue(rules_data['configured'])
 			self.assertTrue(rules_data['can_create'])
 			self.assertEqual(rules_data['form']['yaml'], yaml_text)
-			self.assertEqual(rules_data['error'], message)
+			self.assertEqual(rules_data['create_error'], message)
+			self.assertEqual(rules_data['error'], '')
 			self.assertNotContains(response, result['message'], status_code=status)
 			audit_log = AuditLog.objects.filter(
 				action='创建PrometheusRule草稿', target_id=str(self.cluster.id),
@@ -3916,6 +3939,24 @@ spec:
 			self.assertNotIn(yaml_text, audit_log.detail)
 			self.assertNotIn(result['message'], audit_log.detail)
 		self.assertEqual(AuditLog.objects.filter(action='创建PrometheusRule草稿').count(), 4)
+
+	@mock.patch('monitor.views.list_prometheus_rules')
+	def test_rule_summary_failure_keeps_authorized_creator_available(self, list_rules):
+		self.set_cluster_permission(DevOpsRole.ROLE_ADMIN)
+		list_rules.return_value = {
+			'ok': False, 'code': 'offline', 'message': 'raw cluster endpoint detail',
+		}
+
+		response = self.client.get(reverse('monitor:monitor_index'), {'cluster': self.cluster.id})
+		rules_data = self.vue_data(response)['prometheus_rules']
+
+		self.assertEqual(response.status_code, 200)
+		self.assertEqual(rules_data['error'], '无法连接 Kubernetes 集群，请确认集群状态后重试。')
+		self.assertEqual(rules_data['create_error'], '')
+		self.assertTrue(rules_data['configured'])
+		self.assertTrue(rules_data['can_create'])
+		self.assertIn('yaml', rules_data['form'])
+		self.assertNotContains(response, 'raw cluster endpoint detail')
 
 	@mock.patch('monitor.views.list_prometheus_rules')
 	def test_created_draft_notice_never_claims_rule_was_published(self, list_rules):

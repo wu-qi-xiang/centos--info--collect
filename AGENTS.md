@@ -34,6 +34,33 @@ Before focused work, read the matching project skill under `.codex/skills/`:
 - Templates/static UI: `centos-frontend-ui-dev`.
 - Settings/deploy/runtime: `centos-deploy-runtime-dev`.
 
+### Frontend Skill Routing
+
+For work that changes `templates/`, `static/`, Vue-rendered pages, or shared UI
+styles, always read `centos-frontend-ui-dev` first. Then select the smallest
+additional frontend skill set that matches the requested behavior:
+
+- New visual direction, dashboard re-theme, or a distinctive AIOps/DevOps
+  experience: `frontend-design` and `visual-design-foundations`.
+- Shared tokens, component conventions, themes, or a reusable UI foundation:
+  `design-system-patterns`.
+- Desktop/mobile layout changes, data-table adaptation, or component-level
+  sizing: `responsive-design`.
+- Purposeful state transitions, progressive disclosure, loading feedback, or
+  reduced-motion-aware microinteractions: `interaction-design`.
+- Reusable Vue/HTML component structure or scoped component styling:
+  `web-component-design`.
+- UI review, accessibility audit, keyboard navigation, semantic markup, or
+  pre-completion visual quality checks: `web-design-guidelines` and
+  `accessibility-compliance`.
+
+Do not load every frontend skill by default. The project-specific UI skill,
+existing Django/Vue conventions, operational density, security rules, and user
+requirements take precedence over third-party design guidance. In particular,
+these skills must not turn operational pages into marketing layouts, add remote
+runtime dependencies, replace existing CSRF handling, expose sensitive data, or
+add motion that impairs monitoring and incident-response workflows.
+
 Use the smallest relevant skill set. Do not treat this file as a replacement for feature-specific instructions.
 
 ## Execution Model

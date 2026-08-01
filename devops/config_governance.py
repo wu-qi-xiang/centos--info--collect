@@ -217,6 +217,8 @@ def publish_revision(revision_id, actor):
             return _result(False, 'not_found', '修订不存在。')
         if actor.id == revision.created_by_id:
             return _result(False, 'validation_error', '创建人不能发布自己的修订。')
+        if PrometheusRuleRevisionReview.objects.filter(revision=revision, reviewer_id=actor.id).exists():
+            return _result(False, 'validation_error', '复核人不能发布已复核的修订。')
         if revision.status != PrometheusRuleRevision.STATUS_APPROVED:
             return _result(False, 'validation_error', '仅已批准修订可以发布。')
         if revision.publish_claimed_at:

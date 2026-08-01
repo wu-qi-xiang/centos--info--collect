@@ -1,0 +1,4 @@
+interface:
+  display_name: "Web Component Design"
+  short_description: "Structure reusable web components with scoped styles and accessibility."
+  default_prompt: "Use for reusable Vue or HTML component structure and styling changes."

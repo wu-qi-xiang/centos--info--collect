@@ -3,10 +3,10 @@
 {% block title %}命令执行 - DevOps平台{% endblock %}
 
 {% block content %}
-<div class="container-fluid px-4">
+<div class="container-fluid px-4 ops-legacy-operation ops-command-page">
     <h1 class="h3 mb-3">命令执行中心</h1>
     {% include "devops/_nav.html" %}
-    <div class="card mb-3"><div class="card-body">
+    <div class="card mb-3 ops-legacy-card ops-critical-action"><div class="card-body">
         <div class="alert alert-info py-2">命令提交后会在后台执行，可进入详情查看实时状态。</div>
         <form method="post">
             {% csrf_token %}
@@ -16,12 +16,12 @@
         </form>
     </div></div>
     {% if result %}
-    <div class="card mb-3"><div class="card-header">本次执行状态：{{ result.get_status_display }}</div><div class="card-body">
+    <div class="card mb-3 ops-legacy-card ops-command-result"><div class="card-header">本次执行状态：{{ result.get_status_display }}</div><div class="card-body">
         <pre class="bg-light p-3">{{ result.output|default:result.error }}</pre>
         <a class="btn btn-sm btn-outline-primary" href="{% url 'devops:command_detail' result.id %}">查看详情</a>
     </div></div>
     {% endif %}
-    <div class="card"><div class="card-header">执行记录</div><div class="card-body table-responsive">
+    <div class="card ops-legacy-card ops-legacy-records"><div class="card-header">执行记录</div><div class="card-body table-responsive ops-legacy-table-wrap">
         <table class="table table-sm">
             <tr><th>时间</th><th>主机</th><th>状态</th><th>耗时</th><th>命令</th><th>输出</th><th>操作</th></tr>
             {% for item in records %}

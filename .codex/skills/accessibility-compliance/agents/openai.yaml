@@ -1,0 +1,4 @@
+interface:
+  display_name: "Accessibility Compliance"
+  short_description: "Apply accessibility requirements to interactive web interfaces."
+  default_prompt: "Use when auditing keyboard access, semantic markup, or accessibility behavior."

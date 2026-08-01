@@ -10,6 +10,7 @@ from devops.models import (
     AuditLog,
     CommandExecution,
     DeploymentApp,
+    DeploymentHealthEvaluation,
     DeploymentRelease,
     DevOpsHostScope,
     DevOpsModulePermission,
@@ -119,6 +120,27 @@ class ChangeImpactTests(TestCase):
 
         self.assertEqual(len(impacts), 1)
         self.assertNotIn('prometheus_rule_revision', [item['kind'] for item in impacts[0]['evidence']])
+
+    def test_includes_only_safe_deployment_health_evidence(self):
+        release = self._release()
+        DeploymentHealthEvaluation.objects.create(
+            release=release, batch_identity='host_ids=%s' % self.host.id,
+            status=DeploymentHealthEvaluation.STATUS_UNHEALTHY,
+            score=50,
+            summary='critical_alert=1, failed_command=0, exhausted_slo=0',
+            evaluated_at=timezone.now(),
+        )
+        alert = AlertEvent.objects.create(
+            host=self.host, level='critical', metric='cpu',
+            message='private alert message',
+        )
+
+        impacts = build_change_impacts(self._request(), [alert], [], [self.host])
+
+        health = [item for item in impacts[0]['evidence'] if item['kind'] == 'deployment_health'][0]
+        self.assertEqual(health['status'], DeploymentHealthEvaluation.STATUS_UNHEALTHY)
+        self.assertEqual(health['score'], 50)
+        self.assertNotIn('private alert message', repr(health))
 
     def test_uses_only_visible_hosts_and_ignores_old_changes(self):
         group = HostGroup.objects.create(name='impact-visible')

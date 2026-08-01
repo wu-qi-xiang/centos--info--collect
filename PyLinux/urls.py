@@ -30,6 +30,7 @@ urlpatterns = [
     path('health/live/', health.liveness, name='health_liveness'),
     path('health/ready/', health.readiness, name='health_readiness'),
     path('runtime/status/', health.runtime_status, name='runtime_status'),
+    path('metrics/', health.metrics, name='metrics'),
     path('', include('userprofile.urls', namespace='login')),
     path('index/', index, name='index'),
     path('assets/', asset_management, name='asset_management'),

@@ -3,7 +3,7 @@
 {% block title %}告警记录 - DevOps平台{% endblock %}
 
 {% block content %}
-<div class="container-fluid px-4">
+<div class="container-fluid px-4 ops-legacy-operation ops-alert-page">
     <h1 class="h3 mb-3">告警记录</h1>
     {% include "devops/_nav.html" %}
     <div class="d-flex flex-wrap gap-2 mb-3">
@@ -13,7 +13,7 @@
     </div>
     <div class="row g-3 mb-3">
         <div class="col-lg-4">
-            <div class="card"><div class="card-header">新增静默规则</div><div class="card-body">
+            <div class="card ops-legacy-card ops-silence-create"><div class="card-header">新增静默规则</div><div class="card-body">
                 <form method="post" action="{% url 'devops:silence_create' %}">
                     {% csrf_token %}
                     <div class="mb-3"><label class="form-label">主机</label>{{ silence_form.host }}</div>
@@ -26,7 +26,7 @@
             </div></div>
         </div>
         <div class="col-lg-8">
-            <div class="card"><div class="card-header">静默规则</div><div class="card-body table-responsive">
+            <div class="card ops-legacy-card ops-silence-list"><div class="card-header">静默规则</div><div class="card-body table-responsive ops-legacy-table-wrap">
                 <table class="table table-sm">
                     <tr><th>主机</th><th>指标</th><th>时间</th><th>原因</th><th>操作</th></tr>
                     {% for silence in silences %}
@@ -35,7 +35,7 @@
                         <td>{{ silence.metric|default:"全部" }}</td>
                         <td>{{ silence.starts_at|date:"m-d H:i" }} - {{ silence.ends_at|date:"m-d H:i" }}</td>
                         <td>{{ silence.reason }}</td>
-                        <td><form method="post" action="{% url 'devops:silence_delete' silence.id %}">{% csrf_token %}<button class="btn btn-sm btn-outline-danger" type="submit">删除</button></form></td>
+                        <td><form method="post" action="{% url 'devops:silence_delete' silence.id %}">{% csrf_token %}<button class="btn btn-sm btn-outline-danger ops-silence-delete" type="submit">删除</button></form></td>
                     </tr>
                     {% empty %}<tr><td colspan="5" class="text-muted">暂无静默规则</td></tr>{% endfor %}
                 </table>
@@ -43,7 +43,7 @@
         </div>
     </div>
 
-    <div class="card mb-3"><div class="card-body">
+    <div class="card mb-3 ops-legacy-card ops-alert-filters"><div class="card-body">
         <form method="get" class="row g-2 align-items-end">
             <div class="col-md-2">
                 <label class="form-label">指标</label>
@@ -96,7 +96,7 @@
         </form>
     </div></div>
 
-    <div class="card"><div class="card-body table-responsive">
+    <div class="card ops-legacy-card ops-alert-records"><div class="card-body table-responsive ops-legacy-table-wrap">
         <table class="table table-hover align-middle">
             <thead>
                 <tr>
@@ -119,15 +119,15 @@
                 <td><strong>{{ alert.display_name }}</strong><div class="text-muted small">{{ alert.metric|default:"-" }}</div></td>
                 <td>{{ alert.display_type }}</td>
                 <td>{{ alert.host.linux_name|default:"-" }}</td>
-                <td><span class="badge {% if alert.level == 'critical' %}bg-danger{% elif alert.level == 'warning' %}bg-warning text-dark{% else %}bg-secondary{% endif %}">{{ alert.display_level }}</span></td>
-                <td><span class="badge {% if alert.status == 'open' %}bg-danger{% elif alert.status == 'processing' %}bg-primary{% elif alert.status == 'resolved' or alert.status == 'closed' %}bg-success{% else %}bg-secondary{% endif %}">{{ alert.display_status }}</span></td>
+                <td><span class="badge {% if alert.level == 'critical' %}bg-danger ops-alert-critical{% elif alert.level == 'warning' %}bg-warning text-dark ops-alert-warning{% else %}bg-secondary ops-alert-info{% endif %}">{{ alert.display_level }}</span></td>
+                <td><span class="badge {% if alert.status == 'open' %}bg-danger ops-alert-open{% elif alert.status == 'processing' %}bg-primary ops-alert-processing{% elif alert.status == 'resolved' or alert.status == 'closed' %}bg-success ops-alert-resolved{% else %}bg-secondary ops-alert-silenced{% endif %}">{{ alert.display_status }}</span></td>
                 <td>{{ alert.repeat_count }}</td>
                 <td>{{ alert.created_at|date:"Y-m-d H:i:s" }}</td>
                 <td>{{ alert.display_creator }}</td>
                 <td>{{ alert.last_seen_at|default:alert.created_at|date:"Y-m-d H:i:s" }}</td>
                 <td>{{ alert.message|truncatechars:80 }}</td>
                 <td>
-                    <form method="post" action="{% url 'devops:alert_update' alert.id %}" class="d-flex gap-1">
+                    <form method="post" action="{% url 'devops:alert_update' alert.id %}" class="d-flex gap-1 ops-alert-update-form">
                         {% csrf_token %}
                         <input type="hidden" name="next" value="{{ request.get_full_path }}">
                         <select name="status" class="form-select form-select-sm">

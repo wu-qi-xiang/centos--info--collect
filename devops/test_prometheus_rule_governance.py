@@ -5,6 +5,7 @@ from django.test import TestCase
 from django.urls import reverse
 
 from RemoteLinux.models import User
+from .config_governance import create_prometheus_rule_draft
 from .models import DevOpsModulePermission, DevOpsRole, K8sCluster, PrometheusRuleRevision
 
 
@@ -61,7 +62,7 @@ spec:
         revision = PrometheusRuleRevision.objects.get()
         self.assertEqual(revision.desired_yaml, self.rule_yaml)
 
-    def test_two_person_review_and_separate_publish(self):
+    def test_three_person_review_and_publish_separation(self):
         revision = self.create_draft()
         submit_url = reverse('devops:prometheus_rule_revision_submit', args=[revision.id])
         review_url = reverse('devops:prometheus_rule_revision_review', args=[revision.id])
@@ -75,11 +76,56 @@ spec:
                                         content_type='application/json')
         self.assertEqual(approved.status_code, 200)
         get_rule.assert_not_called()
+
+        with mock.patch('devops.config_governance.get_prometheus_rule') as get_rule, \
+                mock.patch('devops.config_governance.replace_prometheus_rule') as replace_rule:
+            reviewer_publish = self.client.post(publish_url)
+        self.assertEqual(reviewer_publish.status_code, 400)
+        self.assertEqual(reviewer_publish.json()['code'], 'validation_error')
+        get_rule.assert_not_called()
+        replace_rule.assert_not_called()
+
+        self.login(self.publisher)
         with mock.patch('devops.config_governance.get_prometheus_rule', return_value={
             'ok': True, 'rule': {'metadata': {'resourceVersion': '42'}},
         }), mock.patch('devops.config_governance.replace_prometheus_rule', return_value={'ok': True}):
             published = self.client.post(publish_url)
         self.assertEqual(published.status_code, 200)
+        revision.refresh_from_db()
+        self.assertEqual(revision.status, PrometheusRuleRevision.STATUS_PUBLISHED)
+
+    def test_new_rule_create_revision_publishes_once_after_three_person_flow(self):
+        create_yaml = self.rule_yaml.replace('  resourceVersion: "42"\n', '')
+        draft = create_prometheus_rule_draft(
+            None, self.cluster, create_yaml,
+            action=PrometheusRuleRevision.ACTION_CREATE, actor=self.creator,
+        )
+        self.assertTrue(draft['ok'])
+        revision = PrometheusRuleRevision.objects.get(id=draft['revision']['id'])
+
+        self.login(self.creator)
+        self.assertEqual(
+            self.client.post(reverse('devops:prometheus_rule_revision_submit', args=[revision.id])).status_code,
+            200,
+        )
+        self.login(self.reviewer)
+        self.assertEqual(
+            self.client.post(
+                reverse('devops:prometheus_rule_revision_review', args=[revision.id]),
+                data=json.dumps({'decision': 'approve'}), content_type='application/json',
+            ).status_code,
+            200,
+        )
+        self.login(self.publisher)
+        with mock.patch('devops.config_governance.get_prometheus_rule', return_value={
+            'ok': False, 'code': 'crd_not_found',
+        }), mock.patch('devops.config_governance.create_prometheus_rule', return_value={'ok': True}) as create_rule:
+            published = self.client.post(
+                reverse('devops:prometheus_rule_revision_publish', args=[revision.id]),
+            )
+
+        self.assertEqual(published.status_code, 200)
+        create_rule.assert_called_once_with(self.cluster, create_yaml)
         revision.refresh_from_db()
         self.assertEqual(revision.status, PrometheusRuleRevision.STATUS_PUBLISHED)
 
@@ -99,6 +145,22 @@ spec:
         revision.refresh_from_db()
         self.assertEqual(revision.status, PrometheusRuleRevision.STATUS_FAILED)
         self.assertEqual(revision.failure_code, 'conflict')
+
+    def test_revision_page_hides_publish_action_from_reviewer(self):
+        revision = self.create_draft()
+        self.client.post(reverse('devops:prometheus_rule_revision_submit', args=[revision.id]))
+        self.login(self.reviewer)
+        self.client.post(reverse('devops:prometheus_rule_revision_review', args=[revision.id]),
+                         data=json.dumps({'decision': 'approve'}), content_type='application/json')
+
+        revision_page = reverse('devops:prometheus_rule_revisions') + '?cluster={}'.format(self.cluster.id)
+        reviewer_response = self.client.get(revision_page)
+        self.assertEqual(reviewer_response.status_code, 200)
+        self.assertNotContains(reviewer_response, 'data-action="publish"')
+
+        self.login(self.publisher)
+        publisher_response = self.client.get(revision_page)
+        self.assertContains(publisher_response, 'data-action="publish"')
 
     def test_delete_snapshot_restores_as_new_draft(self):
         self.login(self.creator)

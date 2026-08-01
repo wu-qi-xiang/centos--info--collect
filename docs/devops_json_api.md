@@ -69,6 +69,15 @@
   - 更新同一授权范围内的 SLO 配置；需要安全策略模块管理员权限。只接受受限的服务、指标类型、目标、窗口和启用状态，不接受 PromQL 或指标标签表达式。
 - `POST /devops/api/service-slos/<id>/evaluate/`
   - 手动刷新同一授权范围内 SLO 的安全状态摘要；需要安全策略模块管理员权限。仅记录状态审计，不返回查询语句或原始 Prometheus 数据。
+- `GET /devops/api/service-slos/<id>/burn-summary/`
+  - 返回当前主机范围内服务 SLO 的本地错误预算燃尽摘要，需要服务管理模块只读权限。仅可用性和错误率 SLO 在有新式历史快照时返回预算剩余比例与固定短/长窗口燃尽率；延迟 SLO 和旧历史记录统一返回 `unavailable`。
+  - 不返回 PromQL、原始指标值、样本、标签、历史摘要、主机、凭据或外部地址。接口只读取本地 SLO 评估历史，不调用 Prometheus，不写入数据库。
+- `GET /devops/api/deployments/<id>/impact-preview/?batch_size=<n>`
+  - 返回已授权发布的服务级影响模拟，需要发布部署和服务管理模块只读权限，且发布全部主机必须在当前用户范围内。`batch_size` 可选，`0` 或缺省表示全量一批。
+  - 成功仅返回风险等级、授权服务/主机数量、候选批次数、活动严重告警/开放事件/耗尽 SLO/不健康发布/失败 CI 的固定计数和固定建议；不创建发布、审批、任务或远程操作，也不返回脚本、主机、CI 仓库、版本、日志或凭据。
+- `GET /devops/api/gitops-service-impacts/`
+  - 需要 K8s 集群和服务管理模块只读权限。仅将已漂移且已绑定到当前用户可见服务的 Deployment、StatefulSet、DaemonSet 工作负载汇总为服务级风险；未映射资源不会出现在结果中。
+  - 返回服务 ID/名称、公开关键等级、漂移工作负载数量、依赖数量、风险与固定建议；不返回集群地址、清单、命名空间、资源名、哈希、kubeconfig 或凭据。接口只读取本地记录，不连接 Kubernetes 或执行修复。
 - `GET /devops/api/runbooks/`
   - 返回当前用户主机范围内、已明确绑定主机的运行手册安全摘要。需要命令模块只读权限。
   - 返回 ID、名称、版本、触发类型、关联服务、启用和审批标记；不返回固定命令、命令输出、主机凭据或审批命令正文。
@@ -78,6 +87,12 @@
 - `POST /devops/api/runbooks/<id>/initiate/`
   - JSON：`{"host_id": 1}`。需要命令模块运维操作权限，目标主机必须同时位于当前主机范围、运行手册允许主机和关联服务范围内。
   - 成功返回 `202`，创建待执行 `CommandExecution` 和 `ApprovalRequest.TYPE_COMMAND`；审批前不连接 SSH。批准后仅复用既有命令 Worker，不创建新的作业类型。AIOps 只提供运行手册 ID 和管理页链接，不能调用此接口或排队执行。
+- `GET /devops/api/runbook-executions/<id>/effectiveness-feedback/`
+  - 读取已批准运行手册执行记录的效果反馈。需要命令模块只读权限，执行记录主机必须在当前用户授权范围内。
+  - 仅返回反馈 ID、运行手册 ID/名称/版本、分类（`effective`、`partial`、`ineffective`）、安全备注、提交人和时间；不返回命令模板、执行命令、输出或错误。
+- `POST /devops/api/runbook-executions/<id>/effectiveness-feedback/`
+  - JSON：`{"classification":"effective|partial|ineffective","note":"可选，最多 300 字符"}`。需要命令模块运维操作权限，且记录必须是已批准的受控运行手册执行记录并在当前主机范围内。
+  - 该接口只追加效果反馈与审计记录，不会执行命令、重新运行手册或改变审批状态；备注中的 URL、密文和敏感键值会被脱敏后保存。
 - `GET /devops/api/dashboard/`
   - DevOps 概览、最近命令、最近告警、主机最新指标。
   - `recent_commands`、`recent_alerts`、`host_metrics` 和相关统计均按当前用户可见主机范围过滤。
@@ -100,6 +115,33 @@
   - JSON: `{"name": "check uptime", "host_ids": [1, 2], "command": "uptime"}`
   - 请求体不是合法 JSON 时返回 `400` 和 `code: "invalid_json"`。
 
+## AIOps 诊断证据
+
+- `GET /aiops/api/diagnostic-evidence/?host_id=<id>&window=6h|24h`
+  - 只读主机诊断证据包。需要 session 登录；`host_id` 必须是当前用户通过主机范围授权可见的主机。主机不存在或越权统一返回 `404`；无效主机 ID 或时间窗口返回 `400`。
+  - 调用方至少需要以下任一个模块的只读权限：告警治理、监控历史、命令执行、发布部署。缺少某个模块权限时，该模块拥有的类别会被省略，而不是返回未授权数据。
+  - 权限映射：告警与事件使用告警治理权限，指标状态使用监控历史权限，失败命令使用命令执行权限，发布健康与 CI 投递使用发布部署权限。
+  - 成功仅返回选择的 `host_id`、窗口边界和受限 `evidence[]` 元数据：固定类别、记录 ID、等级/状态、受限摘要、时间及安全关联 ID。不会返回告警正文、事件描述、命令/输出/错误、原始指标值、发布脚本、主机凭据、CI 原始载荷或外部地址。
+- `GET /aiops/api/alert-groups/?window=6h|24h`
+  - 需要 session 登录和告警治理模块只读权限；仅按当前用户可见主机聚合 `open`、`processing`、`silenced` 告警。
+  - 返回受限公开指标类别（未知类别统一为 `other`）和标准等级（非标准等级统一为 `unknown`）组成的组键、受影响主机数、活动与静默数量、累计重复次数、关联事件状态和固定建议；不返回告警正文、备注、指纹、原始指标或等级、主机 IP、事件标题或任何凭据。
+  - 该接口只读：不会创建事件、更新告警、发送通知或调用外部系统。
+  - 该接口只查询本地持久化证据；不会写入数据库、调用 SSH、命令、LLM、Prometheus、CI、云服务或其他网络服务。
+- `GET /aiops/api/signal-freshness/?window=6h|24h`
+  - 需要 session 登录和监控历史模块只读权限，仅检查当前用户主机范围内 CPU、内存和磁盘信号的本地最新观测。
+  - `results[]` 最多返回 50 项，按 `absent`、`stale`、`partial`、`healthy` 的运维紧急度及主机 ID 稳定排序。每项仅含主机显示名称、状态、三个固定指标的 `fresh`、`stale`、`missing` 状态及对应计数；不返回指标值、单位、采样时间、IP 或凭据。
+  - 一小时内的观测为新鲜；没有任何观测为 `absent`，全部已知观测过期为 `stale`，部分缺失或过期为 `partial`，三个类别都新鲜为 `healthy`。
+  - 不返回指标值、原始采样、主机 IP、凭据、采集源或原始时间戳。接口只查询本地数据库，不采集指标、不写入数据库，也不调用 SSH、LLM、Prometheus 或其他网络服务。
+- `GET /aiops/api/service-impacts/?window=6h|24h`
+  - 只读服务影响摘要。需要 session 登录和服务管理模块只读权限；服务与关联主机均按当前用户主机范围过滤，仅保留至少关联一台可见主机的服务以及无关联主机的目录服务。
+  - `results[]` 最多返回 32 项，包含安全服务 ID/名称、公开关键等级、可见主机数、受影响主机数、可见上游依赖数、活动告警/开放事件/耗尽 SLO/不健康发布/失败 CI 的固定计数、受限状态和固定建议。
+  - 发布与 CI 证据只在服务关联且至少部署到可见服务主机时计入；发布健康还必须匹配可见主机批次。接口不返回主机 IP、告警正文、事件描述、SLO 查询、部署脚本或摘要、CI 仓库/版本/摘要、凭据或外部地址。
+  - 接口只查询本地数据库，不会创建或更新告警、事件、发布、SLO、审批或通知，也不会调用 SSH、CI、LLM、Prometheus 或其他网络服务。
+- `GET /aiops/api/service-workbench/<service_id>/?window=6h|24h`
+  - 只读服务事件工作区。需要 session 登录和服务管理模块只读权限；`service_id` 必须同时位于当前可见服务目录和主机授权范围，服务不存在或越权统一返回 `404`。
+  - 返回服务 ID/名称、固定证据计数和状态，以及最多 8 条开放/处理中事件的 ID、状态、负责人、SLA 时间，和最多 8 条关联发布的 ID、发布状态、受限健康状态和观测时间。关联发布必须至少部署到一台可见服务主机；发布健康还必须属于可见主机批次。
+  - 不返回事件标题、描述、时间线备注、主机 IP、告警正文、发布脚本或摘要、CI 仓库/版本/摘要、命令、凭据、外部地址或原始载荷。接口无写入、无自动轮询、无 SSH/CI/LLM/Prometheus 或其他外部调用。
+
 ## 监控、告警、审批
 
 - `GET /devops/api/metrics/?host=1&range=24h`
@@ -113,6 +155,12 @@
   - `days_to_threshold` 是风险日桶：`1` 表示当前最后观测值或当前趋势估计已经达到阈值，或预计在未来 24 小时内达到，并不表示还需等待一天；大于 `1` 表示预测将在对应天数内达到。
   - 使用最近 30 天去重后的有效采样进行最小二乘每日趋势估算；原始比例先归一化为百分比，归一化后不在 `0..100`（含）范围内的值无效。少于 3 个不同时间点、无效值或不可计算趋势均为 `insufficient_data`。预测最多展示 50 台主机，每项最多预测 365 天。
   - 不返回采样值、时间戳、原始监控响应、标签、来源 URL、主机 IP、凭据或其他敏感字段。
+- `POST /devops/api/capacity-cost-simulation/`
+  - 只读变更仿真。JSON 必须包含 `cpu_delta_percent`、`memory_delta_percent`（均为 `-50..100` 的整数或整数字符串）和 `instance_delta`（`-10..20` 的整数或整数字符串）。
+  - 认证：需要 session 登录，并同时具备监控历史模块和服务管理模块的运维操作权限；未登录返回 `401`，任一模块权限不足返回 `403`。
+  - 主机范围：只读取当前用户可见主机的最新 CPU/内存采样，以及关联到当前可见服务的本地云成本摘要。
+  - 成功仅返回 `capacity.baseline_risk`、`capacity.projected_risk`、聚合 `sampled_host_count`，以及按 `currency` 分隔的 `baseline_daily`、`projected_daily`、`delta_daily` 成本汇总。风险为 `unknown`、`low`、`medium` 或 `high`。
+  - 安全：不返回主机、服务、资源、云账号、标签、成本明细、采样值、IP、凭据或资源标识；接口不保存仿真、不调用云厂商/网络、不执行 SSH 或命令。
 - `GET /devops/api/alerts/?limit=50`
   - 告警记录列表，仅返回当前用户可见主机上的告警和无主机关联的全局告警。
 - `GET /devops/api/incidents/?limit=50`
@@ -124,6 +172,9 @@
   - 所有主机关联引用必须在当前授权范围内；越权返回 `403` 和 `code: "host_forbidden"`。
 - `GET /devops/api/incidents/<id>/`
   - 事件详情和时间线。不可见或不存在统一返回 `404`。
+- `GET /devops/api/incidents/<id>/postmortem-draft/`
+  - 仅已解决或已关闭的、当前用户可见的事件可生成复盘草稿，需要告警治理模块只读权限。返回安全事件 ID/严重度/状态、关联证据计数，以及固定的影响、根因、处置和跟进行动填写提示。
+  - 草稿不写入数据库，也不回显事件标题、描述、时间线正文、根因、处置、命令、输出、发布脚本、主机或凭据；保存正式复盘仍必须使用既有受控接口。
 - `POST /devops/api/incidents/<id>/timeline/`
   - 追加时间线备注。需要告警模块运维操作权限，JSON：`{"note": "..."}`。
 - `POST /devops/api/incidents/<id>/status/`
@@ -144,6 +195,16 @@
   - 安全：返回字段沿用审批列表序列化，不包含主机密码、私钥、通知 webhook 或密钥。
 
 ## 发布、文件和通知
+
+### CI 发布门禁
+
+- `POST /devops/api/ci-deliveries/<provider>/`
+  - 仅支持 `jenkins` 与 `gitlab`。请求头必须包含 `X-CI-Signature: sha256=<hex>`，其中 `<hex>` 是使用 provider 对应 `*_CI_WEBHOOK_SECRET` 对原始请求体计算的 HMAC-SHA256。
+  - 请求只接受 `repository`、`status`、`delivery_id`、可选 `revision`；状态仅允许 `pending`、`running`、`success`、`failed`、`canceled`、`skipped`。包含 token、URL、日志或命令等字段的请求会被拒绝。
+  - 重复投递按 provider、仓库和投递 ID 的摘要幂等处理。安全摘要可驱动已关联发布的质量门禁，但回调本身不会执行 SSH、不会绕过审批，也不会直接运行部署。
+  - 安全：不保存原始请求体、签名、webhook URL、令牌、构建日志、命令、制品凭据或 CI 页面 URL。
+- `GET /devops/api/ci-deliveries/`
+  - 已启用时只返回 CI provider、仓库、状态、修订摘要、关联发布 ID、接收时间和安全摘要。前端在端点未部署或无权限时不显示门禁标签页。
 
 - `GET /devops/api/deployments/?limit=50`
   - 发布记录列表，仅返回包含当前用户可见主机的发布；`host_count` 只统计当前用户可见主机数量。
@@ -177,6 +238,27 @@
   - Worker 队列的只读观测汇总。需要 session 登录和安全策略模块管理员权限；未登录返回 `401`，权限不足返回 `403`。
   - 成功返回 `worker.summary`（等待、执行中、累计成功/失败、超时、近一小时完成/失败及失败率）和 `worker.thresholds`（待处理、失败率、超时三个阈值的当前值、启用阈值与触发状态）。
   - 安全：不返回任务 ID、目标对象、输入、角色、异常文本、任务错误、配置原始值、主机信息或任何凭据；接口不领取、重试、取消任务，也不写入告警状态。
+
+## 漏洞与 GitOps 发现
+
+- `GET /devops/api/vulnerabilities/`
+  - 需要 session 登录、安全策略模块只读权限，并按当前用户可见主机范围过滤。
+  - 返回 `id`、`host_id`、`package_name`、`advisory_id`、`severity`、`status`、`last_seen_at`；不返回软件包版本清单、命令输出、扫描请求或凭据。
+  - 该接口只读，不能触发漏洞扫描、软件下载、补丁或远程命令。
+- `GET /devops/api/gitops-drift/`
+  - 需要 session 登录和 K8s 集群模块只读权限。
+  - 返回固定资源身份、期望与观测 SHA-256 摘要、状态和最近发现时间；不返回 YAML、Git 仓库地址、kubeconfig、令牌或 Kubernetes 原始响应。
+  - 该接口只读，不能拉取 Git、连接 Kubernetes 或应用修复。PrometheusRule 的修复仍必须使用已有草稿、双人复核和发布流程。
+
+## 服务 CMDB 与云成本中心
+
+- `GET /devops/api/service-catalog/`
+  - 需要 session 登录和服务管理模块只读权限；仅返回当前主机范围内的服务及未绑定主机的全局服务。
+  - 返回服务负责人、环境、生命周期、关键等级、可见主机和已授权的上下游依赖；不返回主机凭据。
+- `GET /devops/api/cloud-resources/` 和 `GET /devops/api/cloud-costs/`
+  - 需要 session 登录和安全策略模块只读权限，并按关联服务的主机范围过滤。
+  - 仅返回云服务商、资源类型/标识、区域、标签 SHA-256 摘要与每日费用汇总。不会返回标签值、账单明细、账号、Token、密钥或 provider URL。
+  - 这两个接口只读，不能轮询云服务商、创建/删除资源或执行成本回收。受控导入程序必须先调用服务层输入校验并只写入摘要。
 
 ## 审计日志
 

@@ -1,0 +1,4 @@
+interface:
+  display_name: "Responsive Design"
+  short_description: "Create responsive, data-dense layouts across supported screen sizes."
+  default_prompt: "Use when adapting operational screens, data tables, or controls for mobile and desktop."

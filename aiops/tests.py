@@ -45,6 +45,79 @@ class AiopsDashboardTests(TestCase):
 		self.assertContains(response, '异常检测')
 		self.assertContains(response, 'web-01')
 
+	def test_dashboard_exposes_only_safe_diagnostic_entry_metadata(self):
+		response = self.client.get(reverse('aiops:dashboard'))
+
+		self.assertEqual(response.status_code, 200)
+		payload = response.context['aiops_payload']
+		self.assertEqual(payload['diagnostic_evidence']['endpoint'], reverse('aiops:api_diagnostic_evidence'))
+		self.assertEqual(payload['diagnostic_evidence']['hosts'], [{
+			'id': self.host.id, 'name': 'web-01',
+		}])
+		self.assertNotIn('secret', repr(payload['diagnostic_evidence']))
+
+	def test_dashboard_exposes_alert_group_endpoint_only_with_alert_view_permission(self):
+		from devops.models import DevOpsModulePermission, DevOpsRole
+		DevOpsRole.objects.create(user=self.user, role=DevOpsRole.ROLE_VIEWER)
+		permission = DevOpsModulePermission.objects.create(
+			user=self.user,
+			module=DevOpsModulePermission.MODULE_ALERT,
+			role=DevOpsModulePermission.ROLE_NONE,
+		)
+
+		response = self.client.get(reverse('aiops:dashboard'))
+		self.assertIsNone(response.context['aiops_payload']['alert_groups_endpoint'])
+
+		permission.role = DevOpsRole.ROLE_VIEWER
+		permission.save(update_fields=['role'])
+		response = self.client.get(reverse('aiops:dashboard'))
+		self.assertEqual(response.context['aiops_payload']['alert_groups_endpoint'], reverse('aiops:api_alert_groups'))
+
+	def test_dashboard_exposes_signal_freshness_endpoint_only_with_metric_view_permission(self):
+		from devops.models import DevOpsModulePermission, DevOpsRole
+		DevOpsRole.objects.create(user=self.user, role=DevOpsRole.ROLE_VIEWER)
+		permission = DevOpsModulePermission.objects.create(
+			user=self.user,
+			module=DevOpsModulePermission.MODULE_METRIC,
+			role=DevOpsModulePermission.ROLE_NONE,
+		)
+
+		response = self.client.get(reverse('aiops:dashboard'))
+		self.assertIsNone(response.context['aiops_payload']['signal_freshness_endpoint'])
+
+		permission.role = DevOpsRole.ROLE_VIEWER
+		permission.save(update_fields=['role'])
+		response = self.client.get(reverse('aiops:dashboard'))
+		self.assertEqual(
+			response.context['aiops_payload']['signal_freshness_endpoint'],
+			reverse('aiops:api_signal_freshness'),
+		)
+
+	def test_dashboard_exposes_service_impact_endpoint_only_with_service_view_permission(self):
+		from devops.models import DevOpsModulePermission, DevOpsRole
+		DevOpsRole.objects.create(user=self.user, role=DevOpsRole.ROLE_VIEWER)
+		permission = DevOpsModulePermission.objects.create(
+			user=self.user,
+			module=DevOpsModulePermission.MODULE_SERVICE,
+			role=DevOpsModulePermission.ROLE_NONE,
+		)
+
+		response = self.client.get(reverse('aiops:dashboard'))
+		self.assertIsNone(response.context['aiops_payload']['service_impacts_endpoint'])
+		self.assertIsNone(response.context['aiops_payload']['service_workbench_endpoint_template'])
+
+		permission.role = DevOpsRole.ROLE_VIEWER
+		permission.save(update_fields=['role'])
+		response = self.client.get(reverse('aiops:dashboard'))
+		self.assertEqual(
+			response.context['aiops_payload']['service_impacts_endpoint'],
+			reverse('aiops:api_service_impacts'),
+		)
+		self.assertEqual(
+			response.context['aiops_payload']['service_workbench_endpoint_template'],
+			reverse('aiops:api_service_workbench', args=[999999]).replace('999999', '{service_id}'),
+		)
+
 	def test_dashboard_filters_alert_analyses_by_visible_hosts(self):
 		group = HostGroup.objects.create(name='aiops-visible')
 		group.hosts.add(self.host)

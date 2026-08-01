@@ -3,11 +3,11 @@
 {% block title %}监控历史 - DevOps平台{% endblock %}
 
 {% block content %}
-<div class="container-fluid px-4">
+<div class="container-fluid px-4 ops-legacy-operation ops-metric-history-page">
     <h1 class="h3 mb-3">监控历史</h1>
     {% include "devops/_nav.html" %}
 
-    <div class="card mb-3">
+    <div class="card mb-3 ops-legacy-card ops-metric-filter">
         <div class="card-body">
             <form method="get" class="row g-3 align-items-end">
                 <div class="col-md-5">
@@ -33,7 +33,7 @@
         </div>
     </div>
 
-    <div class="card mb-3">
+    <div class="card mb-3 ops-legacy-card ops-metric-trend">
         <div class="card-header d-flex justify-content-between align-items-center">
             <span>指标趋势</span>
             <span class="text-muted small" id="trendSubtitle">-</span>
@@ -42,7 +42,7 @@
             <div class="metric-chart-wrap">
                 <svg id="metricTrendChart" viewBox="0 0 960 320" preserveAspectRatio="none" role="img" aria-label="监控指标趋势图"></svg>
             </div>
-            <div class="d-flex gap-3 mt-2 small">
+            <div class="d-flex gap-3 mt-2 small ops-metric-legend">
                 <span><i class="metric-legend cpu"></i>CPU</span>
                 <span><i class="metric-legend memory"></i>内存</span>
                 <span><i class="metric-legend disk"></i>磁盘</span>
@@ -50,9 +50,9 @@
         </div>
     </div>
 
-    <div class="card mb-3">
+    <div class="card mb-3 ops-legacy-card">
         <div class="card-header">主机最近指标</div>
-        <div class="card-body table-responsive">
+        <div class="card-body table-responsive ops-legacy-table-wrap">
             <table class="table table-hover align-middle">
                 <tr><th>主机</th><th>IP</th><th>CPU</th><th>内存</th><th>磁盘</th><th>最近采集</th></tr>
                 {% for item in host_metrics %}
@@ -74,16 +74,16 @@
         </div>
     </div>
 
-    <div class="card mb-3">
+    <div class="card mb-3 ops-legacy-card">
         <div class="card-header">容量预测</div>
-        <div class="card-body table-responsive">
+        <div class="card-body table-responsive ops-legacy-table-wrap">
             <table class="table table-sm mb-0">
                 <tr><th>主机</th><th>指标</th><th>状态</th><th>有效样本</th><th>预计阈值时间</th></tr>
                 {% for item in capacity_forecasts %}
                 <tr>
                     <td>{{ item.host.name }}</td>
                     <td>{{ item.metric }}</td>
-                    <td>{% if item.state == 'risk' %}<span class="text-danger">风险</span>{% elif item.state == 'stable' %}<span class="text-success">稳定</span>{% else %}<span class="text-muted">数据不足</span>{% endif %}</td>
+                    <td>{% if item.state == 'risk' %}<span class="text-danger ops-capacity-risk">风险</span>{% elif item.state == 'stable' %}<span class="text-success ops-capacity-stable">稳定</span>{% else %}<span class="text-muted ops-capacity-unknown">数据不足</span>{% endif %}</td>
                     <td>{{ item.sample_count }}</td>
                     <td>{% if item.days_to_threshold %}约 {{ item.days_to_threshold }} 天{% else %}<span class="text-muted">-</span>{% endif %}</td>
                 </tr>
@@ -92,9 +92,9 @@
         </div>
     </div>
 
-    <div class="card">
+    <div class="card ops-legacy-card">
         <div class="card-header">最近采样记录</div>
-        <div class="card-body table-responsive">
+        <div class="card-body table-responsive ops-legacy-table-wrap">
             <table class="table table-sm">
                 <tr><th>时间</th><th>主机</th><th>指标</th><th>值</th></tr>
                 {% for row in sample_rows %}

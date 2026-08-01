@@ -18,6 +18,8 @@
     <link rel="stylesheet" href="{% static 'md_css/monokai.css' %}">
     <link rel="stylesheet" href="{% static 'css/custom.css' %}">
     <link rel="stylesheet" href="{% static 'css/app-modern.css' %}?v=20260712-sidebar-toggle-fix">
+    <link rel="stylesheet" href="{% static 'css/ops-console-theme.css' %}?v=20260801-geist-shell">
+    <link rel="stylesheet" href="{% static 'css/geist-classic-pages.css' %}?v=20260801-geist-classic-pages">
     
     <!-- Font Awesome -->
     <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.0.0/css/all.min.css">
@@ -29,7 +31,8 @@
     {% block extra_css %}{% endblock %}
 </head>
 
-<body class="fade-in">
+<body class="fade-in ops-console">
+    <a class="skip-link" href="#main-content">跳到主要内容</a>
     <!-- 页面加载指示器 -->
     <div id="page-loader" class="page-loader">
         <div class="loader-spinner"></div>
@@ -37,9 +40,16 @@
     
     <!-- 导航栏 -->
     {% include 'header.html' %}
+
+    <div class="app-topbar" role="banner">
+        <div class="app-topbar-context">
+            <span class="app-topbar-kicker">CONTROL PLANE</span>
+            <span class="app-topbar-title">运维管理控制台</span>
+        </div>
+    </div>
     
     <!-- 主要内容区域 -->
-    <main class="main-content">
+    <main id="main-content" class="main-content" tabindex="-1">
         <div class="container-fluid">
             {% if request.session.is_login or vue_page_public %}
                 {% block content %}{% endblock content %}
@@ -56,8 +66,8 @@
     </main>
     
     <!-- 返回顶部按钮 -->
-    <button id="back-to-top" class="back-to-top" title="返回顶部">
-        <i class="fas fa-chevron-up"></i>
+    <button id="back-to-top" class="back-to-top" title="返回顶部" aria-label="返回顶部">
+        <i class="fas fa-chevron-up" aria-hidden="true"></i>
     </button>
     
     <!-- JavaScript文件 -->

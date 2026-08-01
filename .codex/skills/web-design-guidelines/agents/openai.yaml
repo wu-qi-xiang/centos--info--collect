@@ -1,0 +1,4 @@
+interface:
+  display_name: "Web Design Guidelines"
+  short_description: "Review web UI quality, accessibility, and interaction conventions."
+  default_prompt: "Use to audit UI code before completing an operations interface change."

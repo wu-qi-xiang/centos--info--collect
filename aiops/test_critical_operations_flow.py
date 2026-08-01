@@ -43,8 +43,9 @@ class CriticalOperationsFlowTests(TestCase):
     def setUp(self):
         self.author = self._user('critical-author')
         self.reviewer = self._user('critical-reviewer')
+        self.publisher = self._user('critical-publisher')
         self.scoped_user = self._user('critical-scoped')
-        for user in (self.author, self.reviewer):
+        for user in (self.author, self.reviewer, self.publisher):
             DevOpsRole.objects.create(user=user, role=DevOpsRole.ROLE_ADMIN)
             DevOpsModulePermission.objects.create(
                 user=user,
@@ -144,6 +145,7 @@ class CriticalOperationsFlowTests(TestCase):
         ) as get_rule, mock.patch(
             'devops.config_governance.replace_prometheus_rule', return_value={'ok': True},
         ) as replace_rule:
+            self._login(self.publisher)
             published = self.client.post(publish_url)
 
         self.assertEqual(published.status_code, 200)
@@ -164,6 +166,7 @@ class CriticalOperationsFlowTests(TestCase):
             'devops.config_governance.get_prometheus_rule',
             return_value={'ok': True, 'rule': {'metadata': {'resourceVersion': '42'}}},
         ), mock.patch('devops.config_governance.replace_prometheus_rule', return_value={'ok': True}):
+            self._login(self.publisher)
             self.assertEqual(
                 self.client.post(reverse('devops:prometheus_rule_revision_publish', args=[revision_id])).status_code,
                 200,

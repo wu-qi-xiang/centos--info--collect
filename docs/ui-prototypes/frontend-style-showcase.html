@@ -1,0 +1,96 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>DevOps / AIOps 前端风格对比</title>
+  <style>
+    :root { color-scheme: light; --ink: #172033; --muted: #65718a; --line: #e3e7ef; --page: #f5f7fb; --white: #fff; --blue: #2563eb; --violet: #7c3aed; --cyan: #0891b2; --green: #059669; --amber: #d97706; --red: #dc2626; }
+    * { box-sizing: border-box; }
+    body { margin: 0; background: var(--page); color: var(--ink); font: 14px/1.45 Inter, ui-sans-serif, -apple-system, BlinkMacSystemFont, "Segoe UI", "Microsoft YaHei", sans-serif; }
+    button { font: inherit; cursor: pointer; }
+    .intro { max-width: 1180px; margin: 0 auto; padding: 44px 24px 22px; }
+    .eyebrow { color: var(--blue); font-size: 12px; font-weight: 750; text-transform: uppercase; }
+    h1 { margin: 7px 0 8px; font-size: 30px; line-height: 1.15; letter-spacing: 0; }
+    .intro p { max-width: 760px; margin: 0; color: var(--muted); }
+    .switcher { display: flex; gap: 8px; flex-wrap: wrap; max-width: 1180px; margin: 0 auto; padding: 0 24px 22px; }
+    .switcher button { min-height: 36px; border: 1px solid #d6dce8; border-radius: 6px; padding: 0 12px; background: #fff; color: #48546c; font-weight: 700; }
+    .switcher button[aria-selected="true"] { border-color: #2563eb; background: #edf4ff; color: #1d4ed8; }
+    .showcase { max-width: 1180px; margin: 0 auto 50px; padding: 0 24px; }
+    .view { display: none; }
+    .view.active { display: block; }
+    .caption { display: grid; grid-template-columns: 1fr auto; align-items: end; gap: 20px; margin: 0 0 12px; }
+    .caption h2 { margin: 0; font-size: 18px; }
+    .caption p { max-width: 720px; margin: 4px 0 0; color: var(--muted); }
+    .fit { color: #34405a; font-size: 12px; text-align: right; }
+    .fit b { color: var(--ink); }
+
+    /* 01 Linear-style workspace */
+    .linear { overflow: hidden; border: 1px solid #dfe5ee; border-radius: 8px; background: #fff; box-shadow: 0 10px 30px rgba(22, 37, 67, .08); }
+    .linear-shell { min-height: 570px; display: grid; grid-template-columns: 208px minmax(0, 1fr); }
+    .linear-side { border-right: 1px solid #e9edf3; background: #fbfcfe; padding: 14px 10px; }
+    .product { display: flex; align-items: center; gap: 9px; padding: 8px; font-weight: 780; }
+    .product-mark { display: grid; width: 22px; height: 22px; place-items: center; border-radius: 5px; background: #111827; color: #fff; font-size: 11px; }
+    .l-nav { display: grid; gap: 2px; margin-top: 18px; }
+    .l-nav a { display: flex; gap: 9px; align-items: center; border-radius: 5px; padding: 8px; color: #536078; text-decoration: none; }
+    .l-nav a.active { background: #edf2ff; color: #263f94; font-weight: 700; }
+    .l-nav i { width: 16px; color: #9aa5b8; font-style: normal; text-align: center; }
+    .linear-main { min-width: 0; }
+    .linear-head { display: flex; justify-content: space-between; gap: 12px; align-items: center; min-height: 55px; padding: 0 20px; border-bottom: 1px solid #e9edf3; }
+    .crumb { color: #65718a; font-size: 13px; } .crumb b { color: #18233a; }
+    .icon-row { display: flex; gap: 7px; }.icon { width: 29px; height: 29px; border: 1px solid #e1e6ee; border-radius: 5px; background: #fff; color: #637089; }
+    .linear-content { padding: 22px 20px; } .linear-title { display: flex; justify-content: space-between; align-items: center; gap: 12px; }
+    .linear-title h3 { margin: 0; font-size: 20px; }.plain-btn,.blue-btn { min-height: 32px; border-radius: 5px; padding: 0 10px; font-size: 12px; font-weight: 700; }.plain-btn { border: 1px solid #dfe5ee; background: #fff; color: #45526a; }.blue-btn { border: 1px solid #2563eb; background: #2563eb; color: #fff; }
+    .linear-tabs { display: flex; gap: 18px; margin-top: 20px; border-bottom: 1px solid #e7ebf1; }.linear-tabs span { padding: 0 0 9px; color: #68748b; font-size: 13px; }.linear-tabs .on { border-bottom: 2px solid #2563eb; color: #1e3a8a; font-weight: 700; }
+    .linear-table { width: 100%; margin-top: 6px; border-collapse: collapse; font-size: 13px; }.linear-table th { color: #8791a6; text-align: left; font-size: 11px; font-weight: 700; }.linear-table th,.linear-table td { padding: 11px 8px; border-bottom: 1px solid #edf0f4; }.linear-table td:last-child { text-align: right; }.issue { display: flex; gap: 8px; align-items: center; font-weight: 680; }.dot { width: 8px; height: 8px; border-radius: 50%; }.dot.red { background: var(--red); }.dot.amber { background: var(--amber); }.dot.green { background: var(--green); }.tag { display: inline-flex; border-radius: 4px; padding: 2px 6px; font-size: 11px; font-weight: 700; }.tag.green { background: #e8f8f1; color: #047857; }.tag.amber { background: #fff5e5; color: #b45309; }.tag.blue { background: #edf4ff; color: #1d4ed8; }
+
+    /* 02 AI Bento dashboard */
+    .bento { overflow: hidden; border: 1px solid #dbe1ef; border-radius: 8px; background: #f7f8fc; box-shadow: 0 10px 30px rgba(22, 37, 67, .08); }
+    .bento-top { display: flex; justify-content: space-between; align-items: center; gap: 12px; padding: 18px 20px; }.bento-brand { font-weight: 800; font-size: 16px; }.bento-brand em { margin-left: 7px; color: #6b7280; font-size: 12px; font-style: normal; font-weight: 600; }.bento-pill { border: 1px solid #d6ddef; border-radius: 999px; padding: 5px 9px; background: #fff; color: #465271; font-size: 12px; }
+    .bento-grid { display: grid; grid-template-columns: 1.35fr .9fr .9fr; gap: 12px; padding: 0 20px 20px; }.b-card { min-height: 152px; border: 1px solid #e0e4ed; border-radius: 7px; padding: 16px; background: #fff; }.b-card h3 { margin: 0; font-size: 13px; }.b-card small { color: #6f7a91; }.impact { grid-row: span 2; background: #172033; color: #eef4ff; }.impact small { color: #b7c5e0; }.impact-number { margin: 25px 0 8px; color: #a5b4fc; font-size: 48px; font-weight: 800; line-height: 1; }.impact-bar { display: flex; gap: 4px; margin-top: 22px; }.impact-bar i { display: block; height: 6px; flex: 1; border-radius: 10px; background: #36435c; }.impact-bar i:nth-child(-n+7) { background: #818cf8; }.trend { margin-top: 18px; height: 58px; display: flex; gap: 5px; align-items: end; }.trend i { width: 9%; border-radius: 3px 3px 0 0; background: #d9e2f8; }.trend i:nth-child(3n) { background: #7c3aed; }.ai-note { grid-column: span 2; min-height: 125px; background: linear-gradient(120deg, #eef6ff, #fbf5ff); }.ai-head { display: flex; justify-content: space-between; }.ai-badge { color: #6d28d9; font-size: 11px; font-weight: 800; }.ai-note p { margin: 13px 0 0; color: #39455e; }.signal-list { margin-top: 13px; display: grid; gap: 8px; }.signal { display: flex; justify-content: space-between; color: #4b5870; font-size: 12px; }.signal b { color: #1e293b; }
+
+    /* 03 Colorful utility dashboard */
+    .utility { overflow: hidden; border: 1px solid #dbe2f2; border-radius: 8px; background: #fff; box-shadow: 0 10px 30px rgba(22, 37, 67, .08); }.u-top { display: flex; justify-content: space-between; align-items: center; gap: 14px; padding: 17px 20px; border-bottom: 1px solid #edf0f5; }.u-brand { font-weight: 820; }.u-brand span { color: #2563eb; }.u-nav { display: flex; gap: 14px; color: #6e7990; font-size: 13px; }.u-nav b { color: #18233a; }
+    .u-content { padding: 20px; }.u-title { display: flex; justify-content: space-between; align-items: end; gap: 12px; }.u-title h3 { margin: 0; font-size: 21px; }.u-title p { margin: 4px 0 0; color: #6c7890; }.u-cards { display: grid; grid-template-columns: repeat(4, 1fr); gap: 10px; margin-top: 18px; }.u-card { min-height: 112px; border-radius: 7px; padding: 14px; }.u-card span { display: block; font-size: 12px; font-weight: 700; }.u-card strong { display: block; margin-top: 12px; font-size: 28px; }.u-card small { color: #536078; }.u-card.blue { background: #eaf2ff; color: #1553bd; }.u-card.mint { background: #e6faf3; color: #08745a; }.u-card.amber { background: #fff5e6; color: #a95400; }.u-card.violet { background: #f3edff; color: #6d28d9; }
+    .u-grid { display: grid; grid-template-columns: 1.4fr .9fr; gap: 12px; margin-top: 12px; }.u-panel { border: 1px solid #e5e9f1; border-radius: 7px; overflow: hidden; }.u-panel-head { display: flex; justify-content: space-between; align-items: center; padding: 12px 14px; border-bottom: 1px solid #edf0f5; font-weight: 750; }.u-row { display: grid; grid-template-columns: 8px 1fr auto; gap: 10px; align-items: center; padding: 11px 14px; border-bottom: 1px solid #f0f2f6; }.u-row:last-child { border: 0; }.u-row p { margin: 2px 0 0; color: #78849a; font-size: 12px; }.u-line { width: 3px; height: 31px; border-radius: 2px; background: #2563eb; }.u-line.red { background: #ef4444; }.u-line.amber { background: #f59e0b; }.u-line.mint { background: #10b981; }.u-action { color: #2563eb; font-size: 12px; font-weight: 750; }
+    @media (max-width: 760px) { .intro { padding-top: 28px; } h1 { font-size: 25px; }.caption { grid-template-columns: 1fr; }.fit { text-align: left; }.linear-shell { grid-template-columns: 1fr; }.linear-side { display: flex; gap: 10px; align-items: center; overflow: auto; border-right: 0; border-bottom: 1px solid #e9edf3; }.l-nav { display: flex; gap: 2px; margin: 0; }.l-nav a { white-space: nowrap; }.bento-grid { grid-template-columns: 1fr 1fr; }.impact { grid-row: auto; grid-column: span 2; }.ai-note { grid-column: span 2; }.u-nav { display: none; }.u-cards { grid-template-columns: 1fr 1fr; }.u-grid { grid-template-columns: 1fr; } }
+    @media (max-width: 480px) { .intro,.switcher,.showcase { padding-left: 14px; padding-right: 14px; }.linear-head { padding: 0 12px; }.linear-content { padding: 16px 12px; }.linear-table { min-width: 520px; }.linear-content { overflow: hidden; }.linear-content > div:last-child { overflow: auto; }.bento-grid { grid-template-columns: 1fr; padding: 0 12px 12px; }.impact,.ai-note { grid-column: auto; }.u-content { padding: 14px; }.u-cards { grid-template-columns: 1fr 1fr; }.u-card strong { font-size: 24px; } }
+  </style>
+</head>
+<body>
+  <header class="intro">
+    <div class="eyebrow">2026 product UI directions</div>
+    <h1>三种适合 DevOps / AIOps 的主流页面风格</h1>
+    <p>同一组运维数据，不同的信息层级。点击下方标签切换风格。它们是产品界面方向，不是把趋势词堆到生产工作台上的装饰方案。</p>
+  </header>
+  <nav class="switcher" aria-label="选择展示风格">
+    <button type="button" data-target="linear" aria-selected="true">01 Linear 工作台</button>
+    <button type="button" data-target="bento" aria-selected="false">02 AI Bento 洞察</button>
+    <button type="button" data-target="utility" aria-selected="false">03 彩色工具型面板</button>
+  </nav>
+  <main class="showcase">
+    <section class="view active" id="linear">
+      <div class="caption"><div><h2>01. Linear-style Product Workspace</h2><p>精细分隔线、紧凑排版、低圆角和单一主操作色。视觉安静，但不单调。</p></div><div class="fit"><b>最适合：</b>命令、审批、发布、主机和任务列表</div></div>
+      <div class="linear"><div class="linear-shell"><aside class="linear-side"><div class="product"><span class="product-mark">O</span>Opspace</div><nav class="l-nav"><a class="active" href="#"><i>O</i>概览</a><a href="#"><i>!</i>告警</a><a href="#"><i>R</i>发布</a><a href="#"><i>A</i>审批</a><a href="#"><i>H</i>主机</a></nav></aside><div class="linear-main"><div class="linear-head"><span class="crumb"><b>生产环境</b> / 工作队列</span><div class="icon-row"><button class="icon" title="筛选">=</button><button class="icon" title="更多">...</button></div></div><div class="linear-content"><div class="linear-title"><h3>需要处理</h3><div><button class="plain-btn">筛选</button> <button class="blue-btn">新建任务</button></div></div><div class="linear-tabs"><span class="on">全部 12</span><span>告警 4</span><span>审批 3</span><span>发布 5</span></div><div><table class="linear-table"><thead><tr><th>工作项</th><th>负责人</th><th>更新时间</th><th>状态</th></tr></thead><tbody><tr><td><div class="issue"><i class="dot red"></i>支付网关错误率超过 SLO</div></td><td>值班组</td><td>2 分钟前</td><td><span class="tag amber">待确认</span></td></tr><tr><td><div class="issue"><i class="dot amber"></i>订单服务灰度发布</div></td><td>Release Bot</td><td>8 分钟前</td><td><span class="tag blue">进行中</span></td></tr><tr><td><div class="issue"><i class="dot green"></i>边缘节点配置同步</div></td><td>平台组</td><td>15 分钟前</td><td><span class="tag green">已完成</span></td></tr></tbody></table></div></div></div></div></div>
+    </section>
+    <section class="view" id="bento">
+      <div class="caption"><div><h2>02. Bento / AI-native Dashboard</h2><p>模块化摘要把风险、影响范围和诊断建议拼成一张“判断面板”，适合先判断、后进入详情。</p></div><div class="fit"><b>最适合：</b>AIOps 总览、服务影响、异常诊断</div></div>
+      <div class="bento"><header class="bento-top"><div class="bento-brand">Signal map <em>生产环境</em></div><span class="bento-pill">实时分析已更新</span></header><div class="bento-grid"><article class="b-card impact"><small>推断服务影响</small><div class="impact-number">3</div><b>支付链路上存在关联风险</b><div class="impact-bar"><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i></div></article><article class="b-card"><h3>异常信号</h3><strong style="display:block;font-size:30px;margin-top:13px;color:#d97706">07</strong><small>2 条需要人工确认</small><div class="trend"><i style="height:28%"></i><i style="height:44%"></i><i style="height:35%"></i><i style="height:75%"></i><i style="height:52%"></i><i style="height:86%"></i><i style="height:64%"></i><i style="height:40%"></i></div></article><article class="b-card"><h3>变更风险</h3><strong style="display:block;font-size:30px;margin-top:13px;color:#7c3aed">中等</strong><small>订单服务灰度仍在继续</small><div class="signal-list"><div class="signal"><span>错误预算</span><b>84%</b></div><div class="signal"><span>发布覆盖</span><b>4 / 6</b></div></div></article><article class="b-card ai-note"><div class="ai-head"><h3>诊断建议</h3><span class="ai-badge">AI 摘要</span></div><p>错误率上升与 14:12 的网关配置变更相关；先回看该变更，再验证上游依赖的延迟分位数。</p><small>基于 12 个关联事件生成，需人工验证。</small></article></div></div>
+    </section>
+    <section class="view" id="utility">
+      <div class="caption"><div><h2>03. Colorful Utility Dashboard</h2><p>浅色功能块加上克制的蓝、绿、琥珀和紫色点缀。比纯 Linear 更有识别度，仍保持表格与操作优先。</p></div><div class="fit"><b>最适合：</b>概览首页、团队看板和服务健康摘要</div></div>
+      <div class="utility"><header class="u-top"><div class="u-brand">O<span>ps</span> Console</div><nav class="u-nav"><b>概览</b><span>服务</span><span>自动化</span><span>报告</span></nav><button class="blue-btn">创建自动化</button></header><div class="u-content"><div class="u-title"><div><h3>今日运行概况</h3><p>数据更新于 14:32，生产环境 128 台受管主机。</p></div><button class="plain-btn">查看报告</button></div><div class="u-cards"><article class="u-card blue"><span>开放事件</span><strong>17</strong><small>较昨日 -4</small></article><article class="u-card mint"><span>自动化成功率</span><strong>98.7%</strong><small>过去 24 小时</small></article><article class="u-card amber"><span>待审批变更</span><strong>04</strong><small>1 个高风险</small></article><article class="u-card violet"><span>活跃发布</span><strong>03</strong><small>均处于灰度</small></article></div><div class="u-grid"><section class="u-panel"><div class="u-panel-head">优先处理 <span class="u-action">查看全部</span></div><div class="u-row"><i class="u-line red"></i><div><b>支付网关错误率持续上升</b><p>prod-k8s-01 · 触发 SLO</p></div><span class="tag amber">严重</span></div><div class="u-row"><i class="u-line amber"></i><div><b>数据库清理任务等待审批</b><p>db-prod-02 · 剩余磁盘 12%</p></div><span class="tag blue">待审批</span></div><div class="u-row"><i class="u-line mint"></i><div><b>边缘节点配置同步</b><p>12 台主机 · 8 台已完成</p></div><span class="tag green">进行中</span></div></section><aside class="u-panel"><div class="u-panel-head">快捷入口</div><div class="u-row"><i class="u-line"></i><div><b>发布中心</b><p>查看进行中的灰度发布</p></div><span class="u-action">进入</span></div><div class="u-row"><i class="u-line amber"></i><div><b>审批中心</b><p>处理高风险变更</p></div><span class="u-action">进入</span></div></aside></div></div></div>
+    </section>
+  </main>
+  <script>
+    document.querySelectorAll('[data-target]').forEach(function (button) {
+      button.addEventListener('click', function () {
+        document.querySelectorAll('[data-target]').forEach(function (item) { item.setAttribute('aria-selected', 'false'); });
+        document.querySelectorAll('.view').forEach(function (item) { item.classList.remove('active'); });
+        button.setAttribute('aria-selected', 'true');
+        document.getElementById(button.getAttribute('data-target')).classList.add('active');
+      });
+    });
+  </script>
+</body>
+</html>

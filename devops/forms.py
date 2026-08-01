@@ -329,14 +329,22 @@ class DeploymentReleaseForm(forms.ModelForm):
         queryset=NewLinux.objects.all(),
         widget=forms.CheckboxSelectMultiple,
     )
+    rollout_batch_size = forms.IntegerField(
+        required=False, min_value=0, max_value=100, initial=0,
+        label='分批发布大小（0 表示关闭）',
+    )
 
     class Meta:
         model = DeploymentRelease
-        fields = ('app', 'version', 'description', 'deploy_script', 'rollback_script', 'hosts')
+        fields = ('app', 'version', 'description', 'deploy_script', 'rollback_script', 'rollout_batch_size', 'hosts')
         widgets = {
             'deploy_script': forms.Textarea(attrs={'rows': 4}),
             'rollback_script': forms.Textarea(attrs={'rows': 4}),
         }
+
+    def clean_rollout_batch_size(self):
+        value = self.cleaned_data.get('rollout_batch_size')
+        return 0 if value is None else value
 
 
 class ApprovalDecisionForm(forms.Form):

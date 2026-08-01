@@ -1,0 +1,4 @@
+interface:
+  display_name: "Visual Design Foundations"
+  short_description: "Apply color, typography, spacing, and iconography foundations."
+  default_prompt: "Use when defining visual tokens for a focused operations UI change."

@@ -4,27 +4,15 @@
 {% block title %}{{ vue_page_title }}{% endblock %}
 
 {% block extra_css %}
-{% if vue_page_kind == 'monitor-dashboard' %}
-<link rel="stylesheet" href="{% static 'css/ops-vue-pages.css' %}?v=20260717-fcc-node-resources-01">
-{% else %}
-<link rel="stylesheet" href="{% static 'css/ops-vue-pages.css' %}?v=20260723-prometheus-rule-governance-01">
-{% endif %}
+<link rel="stylesheet" href="{% static 'css/ops-vue-pages.css' %}?v=20260801-geist-control-plane-01">
 {# PromQL native-scroll cache baseline: 20260714-promql-scroll-width-sync #}
-{% if vue_page_kind == "monitor-dashboard" %}
-<link rel="stylesheet" href="{% static 'css/monitor-command-center.css' %}?v=20260717-fcc-node-resources-01">
-<style>
-body { background: #02060b !important; }
-.main-content { background-color: #02060b !important; }
-.ops-vue-page { position: relative; min-height: calc(100vh - 48px); background-color: #02060b; }
-</style>
-{% endif %}
 {% if vue_page_kind == "webssh" %}
 <link rel="stylesheet" href="{% static 'xterm/css/xterm.css' %}">
 {% endif %}
 {% endblock %}
 
 {% block content %}
-<div id="ops-vue-root" class="ops-vue-page">
+<div id="ops-vue-root" class="ops-vue-page ops-console-page ops-geist-console ops-console-kind-{{ vue_page_kind }}">
     <div class="vue-loading">
         <div class="spinner-border text-primary" role="status"></div>
         <span>加载页面...</span>
@@ -41,9 +29,5 @@ body { background: #02060b !important; }
 <script src="{% static 'xterm/js/xterm.js' %}"></script>
 {% endif %}
 <script src="{% static 'vendor/vue.global.prod.js' %}?v=3"></script>
-{% if vue_page_kind == 'monitor-dashboard' %}
-<script src="{% static 'js/ops-vue-pages.js' %}?v=20260717-fcc-node-resources-01"></script>
-{% else %}
-<script src="{% static 'js/ops-vue-pages.js' %}?v=20260723-prometheus-rule-governance-01"></script>
-{% endif %}
+<script src="{% static 'js/ops-vue-pages.js' %}?v=20260801-geist-control-plane-01"></script>
 {% endblock %}

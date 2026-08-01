@@ -2038,6 +2038,70 @@
     .ops-dashboard-viz { min-height: 106px; }
 }
 
+/* Signal Lattice opt-in for the generic monitor Vue bridge. */
+body.ops-console .ops-vue-page.ops-console-page:not(.ops-geist-console) {
+    color: var(--ops-console-text);
+}
+
+body.ops-console .ops-vue-page.ops-console-page:not(.ops-geist-console) :is(.ops-page-header, .ops-panel, .ops-card, .ops-filter-bar, .ops-table-wrap) {
+    border-color: var(--ops-console-line);
+}
+
+body.ops-console .ops-vue-page.ops-console-page:not(.ops-geist-console) :is(.ops-page-header, .ops-panel, .ops-card, .ops-filter-bar) {
+    background: var(--ops-console-surface);
+    box-shadow: none;
+}
+
+body.ops-console .ops-vue-page.ops-console-page:not(.ops-geist-console) :is(.ops-page-header, .ops-filter-bar) {
+    border-inline-start: 3px solid var(--ops-console-signal);
+}
+
+/* Shared Geist Control Plane presentation for generic Vue-backed operations pages. */
+.ops-geist-console.ops-vue-page {
+    --ops-geist-canvas: #fafafa;
+    --ops-geist-surface: #ffffff;
+    --ops-geist-raised: #f5f5f5;
+    --ops-geist-line: #eaeaea;
+    --ops-geist-line-strong: #d4d4d4;
+    --ops-geist-text: #171717;
+    --ops-geist-muted: #737373;
+    --ops-geist-blue: #0070f3;
+    min-width: 0;
+    gap: 10px;
+    padding: 2px;
+    color: var(--ops-geist-text);
+    background: var(--ops-geist-canvas);
+}
+.ops-geist-console :is(.ops-page-head, .ops-page-header, .ops-panel, .ops-card, .ops-filter-bar, .ops-table-wrap, .ops-row, .ops-integration-picker, .ops-rule-workbench__list, .ops-rule-workbench__creator, .ops-rule-workbench__state) { border-color: var(--ops-geist-line); border-radius: 6px; background: var(--ops-geist-surface); box-shadow: none; }
+.ops-geist-console :is(.ops-page-head, .ops-page-header) { padding: 13px 14px; border-inline-start: 3px solid var(--ops-geist-blue); }
+.ops-geist-console :is(.ops-title, .ops-page-title, .ops-rule-workbench__title) { color: var(--ops-geist-text); font-size: 18px; font-weight: 700; letter-spacing: 0; }
+.ops-geist-console :is(.ops-subtitle, .ops-muted, .ops-card-label, .ops-card-meta, .ops-row-meta, .ops-kv-label, .ops-list-summary, .ops-pagination, .ops-rule-workbench__head p, .ops-rule-workbench__meta) { color: var(--ops-geist-muted) !important; }
+.ops-geist-console :is(.ops-grid, .ops-grid.two, .ops-grid.three, .ops-monitor-summary-grid, .ops-kv-grid) { gap: 10px; }
+.ops-geist-console :is(.ops-card, .ops-panel) { padding: 12px; }
+.ops-geist-console .ops-card-value { margin-top: 4px; color: var(--ops-geist-text); font-size: 23px; font-weight: 700; }
+.ops-geist-console :is(.ops-section-head, .ops-rule-workbench__list-head) { margin-bottom: 10px; }
+.ops-geist-console :is(.ops-section-title, .ops-rule-workbench__list-head strong) { color: var(--ops-geist-text); font-size: 13px; font-weight: 700; }
+.ops-geist-console .ops-section-title i { color: var(--ops-geist-blue); }
+.ops-geist-console .ops-row,
+.ops-geist-console .ops-integration-picker,
+.ops-geist-console .ops-rule-workbench__list,
+.ops-geist-console .ops-rule-workbench__creator { border-radius: 5px; }
+.ops-geist-console :is(.ops-row, .ops-integration-picker, .ops-rule-workbench__table tbody tr):hover { border-color: var(--ops-geist-line-strong); background: #fafafa; }
+.ops-geist-console :is(.ops-filter-bar, .ops-rule-workbench__toolbar, .ops-rule-workbench__list-head) { background: var(--ops-geist-raised); border-color: var(--ops-geist-line); }
+.ops-geist-console :is(.ops-table-wrap, .ops-integration-table-wrap, .ops-query-table-wrap, .ops-metric-resource-table-wrap, .ops-rule-workbench__table-wrap) { max-width: 100%; overflow-x: auto; -webkit-overflow-scrolling: touch; }
+.ops-geist-console :is(.ops-integration-table, .ops-query-table, .ops-metric-resource-table, .ops-rule-workbench__table) th { color: var(--ops-geist-muted); background: var(--ops-geist-raised); font-size: 11px; font-weight: 700; }
+.ops-geist-console :is(.ops-integration-table, .ops-query-table, .ops-metric-resource-table, .ops-rule-workbench__table) td { border-color: var(--ops-geist-line); }
+.ops-geist-console :is(.form-control, .form-select) { min-height: 32px; border-color: var(--ops-geist-line-strong); border-radius: 5px; color: var(--ops-geist-text); box-shadow: none; }
+.ops-geist-console :is(.form-control, .form-select):focus { border-color: var(--ops-geist-blue); box-shadow: 0 0 0 2px rgba(0, 112, 243, .14); }
+.ops-geist-console .btn { min-height: 32px; border-radius: 5px; font-weight: 600; }
+body.ops-console .ops-geist-console .btn-primary { border-color: #171717 !important; background: #171717 !important; color: #fff !important; }
+body.ops-console .ops-geist-console .btn-primary:hover,
+body.ops-console .ops-geist-console .btn-primary:focus { border-color: #000 !important; background: #000 !important; color: #fff !important; }
+.ops-geist-console :is(.btn-outline-primary, .btn-outline-secondary, .btn-outline-dark) { border-color: var(--ops-geist-line-strong); color: #262626; }
+.ops-geist-console :is(.btn-outline-primary, .btn-outline-secondary, .btn-outline-dark):hover { border-color: #171717; background: #171717; color: #fff; }
+.ops-geist-console :is(.badge, .ops-status, .ops-dashboard-status) { border-radius: 4px; font-weight: 700; }
+.ops-geist-console .ops-empty { border-color: var(--ops-geist-line); border-radius: 6px; background: #fff; color: var(--ops-geist-muted); }
+
 @media (max-width: 992px) {
     .ops-monitor-summary-grid {
         grid-template-columns: repeat(2, minmax(0, 1fr));

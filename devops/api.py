@@ -1,6 +1,9 @@
 import json
 import re
 import math
+import hashlib
+import hmac
+import os
 from datetime import timedelta
 
 from django.conf import settings
@@ -8,22 +11,28 @@ from django.db import models
 from django.http import JsonResponse
 from django.shortcuts import get_object_or_404
 from django.utils import timezone
+from django.utils.dateparse import parse_datetime
 from django.views.decorators.http import require_http_methods
+from django.views.decorators.csrf import csrf_exempt
 
 from RemoteLinux.models import NewLinux
 from .forms import ServiceSloForm, RunbookTemplateForm
 from .models import (
     AlertEvent,
+    AlertQualityFeedback,
+    ComplianceResult,
     ApprovalRequest,
     AuditLog,
     BatchTask,
     CommandExecution,
+    RunbookEffectivenessFeedback,
     DeploymentRelease,
     DevOpsModulePermission,
     DevOpsRole,
     FileDistribution,
     HostGroup,
     Incident,
+    InspectionRecommendation,
     IntegrationHealthEvent,
     MetricSample,
     MaintenanceWindow,
@@ -34,7 +43,17 @@ from .models import (
     ServiceSlo,
     RunbookTemplate,
     PrometheusRuleRevision,
+    VulnerabilityFinding,
+    GitOpsDriftFinding,
+    CloudResourceSummary,
+    CloudDailyCostSummary,
+    CIDelivery,
 )
+from .ci_orchestration import CIValidationError, parse_ci_delivery
+from .gitops_service_impact import build_gitops_service_impacts
+from .postmortem_draft import build_incident_postmortem_draft
+from .release_impact import build_release_impact_preview
+from .slo_burn import build_slo_burn_summary
 from .config_governance import (
     create_prometheus_rule_draft,
     publish_revision,
@@ -57,11 +76,15 @@ from .services import (
     execute_command_record,
     can_access_incident,
     create_incident,
+    assign_incident,
+    create_inspection_recommendation,
+    initiate_inspection_recommendation,
     add_incident_timeline_note,
     record_incident_postmortem,
     update_incident_status,
     evaluate_command_policy,
     forecast_host_capacity,
+    simulate_capacity_cost_change,
     has_role,
     latest_metric_map,
     notify_approval,
@@ -76,6 +99,7 @@ from .services import (
     delete_prometheus_rule,
     normalize_prometheus_rule_resource_version,
     RunbookInitiationError,
+    record_ci_delivery,
 )
 
 
@@ -91,6 +115,7 @@ MODULE_SERVICE = DevOpsModulePermission.MODULE_SERVICE
 MODULE_ALERT = DevOpsModulePermission.MODULE_ALERT
 MODULE_CLUSTER = DevOpsModulePermission.MODULE_CLUSTER
 NOTIFICATION_RESPONSE_PREVIEW_LENGTH = 300
+MAX_CI_WEBHOOK_BODY_BYTES = 256 * 1024
 SENSITIVE_URL_RE = re.compile(r'https?://[^\s,;]+', re.IGNORECASE)
 SENSITIVE_ENC_RE = re.compile(r'\benc:[^\s,;]+', re.IGNORECASE)
 SENSITIVE_KV_RE = re.compile(
@@ -121,6 +146,91 @@ def request_json(request):
         return json.loads(request.body.decode('utf-8'))
     except (TypeError, ValueError):
         return None
+
+
+def valid_ci_signature(secret, body, signature):
+    if not isinstance(signature, str) or not signature.startswith('sha256='):
+        return False
+    provided = signature[7:]
+    if not re.match(r'^[0-9a-fA-F]{64}$', provided):
+        return False
+    expected = hmac.new(secret.encode('utf-8'), body, hashlib.sha256).hexdigest()
+    return hmac.compare_digest(expected, provided.lower())
+
+
+@csrf_exempt
+def ci_deliveries(request, provider):
+    """Receive signed, bounded CI status messages without session auth."""
+    if request.method != 'POST':
+        return api_error('仅支持 POST 请求', status=405, code='method_not_allowed')
+    provider = (provider or '').strip().lower()
+    secret_names = {
+        'jenkins': 'JENKINS_CI_WEBHOOK_SECRET',
+        'gitlab': 'GITLAB_CI_WEBHOOK_SECRET',
+    }
+    secret_name = secret_names.get(provider)
+    if not secret_name:
+        return api_error('不支持的 CI 提供方', status=400, code='unsupported_provider')
+    secret = os.environ.get(secret_name, '')
+    if not secret:
+        return api_error('CI Webhook 未配置', status=503, code='webhook_not_configured')
+
+    content_length = request.META.get('CONTENT_LENGTH', '')
+    try:
+        if content_length and int(content_length) > MAX_CI_WEBHOOK_BODY_BYTES:
+            return api_error('请求体过大', status=413, code='payload_too_large')
+    except (TypeError, ValueError):
+        return api_error('请求长度无效', status=400, code='invalid_content_length')
+    body = request.body
+    if len(body) > MAX_CI_WEBHOOK_BODY_BYTES:
+        return api_error('请求体过大', status=413, code='payload_too_large')
+    if not valid_ci_signature(secret, body, request.META.get('HTTP_X_CI_SIGNATURE', '')):
+        return api_error('签名校验失败', status=401, code='invalid_signature')
+    if request.content_type != 'application/json':
+        return api_error('仅支持 JSON 请求体', status=415, code='unsupported_media_type')
+    try:
+        payload = json.loads(body.decode('utf-8'))
+    except (UnicodeDecodeError, ValueError):
+        return invalid_json_error()
+    try:
+        values = parse_ci_delivery(provider, payload)
+    except CIValidationError as exc:
+        return api_error('CI 投递数据无效', status=400, code=exc.code)
+
+    delivery, created, code = record_ci_delivery(values)
+    response = {'ok': True, 'code': code, 'delivery_id': delivery.id}
+    if delivery.release_id:
+        response['release_id'] = delivery.release_id
+    return JsonResponse(response, status=202)
+
+
+def serialize_ci_delivery(delivery):
+    return {
+        'id': delivery.id,
+        'provider': delivery.provider,
+        'provider_label': label(delivery, 'provider'),
+        'repository': delivery.repository,
+        'status': delivery.status,
+        'revision': delivery.revision,
+        'summary': delivery.summary,
+        'release_id': delivery.release_id,
+        'received_at': iso(delivery.received_at),
+    }
+
+
+@api_login_required
+@require_http_methods(['GET'])
+def ci_delivery_summaries(request):
+    if not has_role(request, DevOpsRole.ROLE_VIEWER, MODULE_DEPLOYMENT):
+        return api_error('没有 CI 发布门禁查看权限', status=403, code='forbidden')
+    visible_hosts = visible_hosts_for_request(request)
+    deliveries = CIDelivery.objects.select_related('release').filter(
+        release__hosts__in=visible_hosts,
+    ).distinct().order_by('-received_at', '-id')
+    return JsonResponse({
+        'ok': True,
+        'results': [serialize_ci_delivery(item) for item in limit_queryset(request, deliveries)],
+    })
 
 
 def iso(dt):
@@ -182,6 +292,20 @@ def serialize_command(record):
     return result
 
 
+def serialize_runbook_effectiveness_feedback(feedback):
+    runbook = feedback.command_execution.runbook_template
+    return {
+        'id': feedback.id,
+        'command_execution_id': feedback.command_execution_id,
+        'runbook': {'id': runbook.id, 'name': runbook.name, 'version': runbook.version},
+        'classification': feedback.classification,
+        'classification_label': label(feedback, 'classification'),
+        'note': feedback.note,
+        'author': feedback.created_by,
+        'created_at': iso(feedback.created_at),
+    }
+
+
 def visible_host_count(hosts, visible_hosts=None):
     if visible_hosts is None:
         return hosts.count()
@@ -235,18 +359,28 @@ def serialize_alert(alert):
     }
 
 
+def serialize_alert_quality_feedback(feedback):
+    return {
+        'id': feedback.id,
+        'classification': feedback.classification,
+        'classification_label': label(feedback, 'classification'),
+        'note': feedback.note,
+        'created_by': feedback.created_by,
+        'created_at': iso(feedback.created_at),
+    }
+
+
 def serialize_incident_reference(incident):
     command = None
     if incident.command_execution_id:
-        command_payload = serialize_command(incident.command_execution)
-        command = {'id': command_payload['id'], 'status': command_payload['status']}
-        if 'command' in command_payload:
-            command['command'] = command_payload['command']
+        command = {
+            'id': incident.command_execution_id,
+            'status': incident.command_execution.status,
+        }
     return {
         'host': serialize_host(incident.host) if incident.host_id else None,
         'alert': {
             'id': incident.alert_id,
-            'message': incident.alert.message,
             'status': incident.alert.status,
         } if incident.alert_id else None,
         'deployment': {
@@ -276,6 +410,9 @@ def serialize_incident(incident, include_timeline=False):
             'follow_up': incident.follow_up,
         },
         'created_by': incident.created_by,
+        'owner': incident.owner,
+        'assigned_at': iso(incident.assigned_at),
+        'sla_due_at': iso(incident.sla_due_at),
         'created_at': iso(incident.created_at),
         'updated_at': iso(incident.updated_at),
         'resolved_at': iso(incident.resolved_at),
@@ -340,6 +477,7 @@ def serialize_approval(approval):
 
 
 def serialize_release(release, visible_hosts=None):
+    health = release.health_evaluations.order_by('-evaluated_at', '-id').first()
     return {
         'id': release.id,
         'app': {'id': release.app_id, 'name': release.app.name if release.app_id else ''},
@@ -348,6 +486,16 @@ def serialize_release(release, visible_hosts=None):
         'status': release.status,
         'status_label': label(release, 'status'),
         'summary': release.summary,
+        'rollout_batch_size': release.rollout_batch_size,
+        'health_evaluation': {
+            'id': health.id,
+            'batch_identity': health.batch_identity,
+            'status': health.status,
+            'status_label': label(health, 'status'),
+            'score': health.score,
+            'summary': health.summary,
+            'evaluated_at': iso(health.evaluated_at),
+        } if health else None,
         'created_by': release.created_by,
         'created_at': iso(release.created_at),
         'finished_at': iso(release.finished_at),
@@ -487,6 +635,10 @@ def serialize_topology_service(service, visible_host_ids, visible_service_ids):
         'owner': service.owner,
         'environment': service.environment,
         'environment_label': label(service, 'environment'),
+        'lifecycle': service.lifecycle,
+        'lifecycle_label': label(service, 'lifecycle'),
+        'criticality': service.criticality,
+        'criticality_label': label(service, 'criticality'),
         'description': service.description,
         'hosts': [serialize_host(host) for host in service.hosts.all() if host.id in visible_host_ids],
         'upstream_dependencies': [
@@ -951,6 +1103,57 @@ def scoped_service_slo_or_error(request, id):
 
 
 @api_login_required
+@require_http_methods(['GET'])
+def service_slo_burn_summary(request, id):
+    if not has_role(request, DevOpsRole.ROLE_VIEWER, MODULE_SERVICE):
+        return api_error('没有服务 SLO 查看权限', status=403, code='forbidden')
+    slo, error = scoped_service_slo_or_error(request, id)
+    if error:
+        return error
+    return JsonResponse({'ok': True, 'summary': build_slo_burn_summary(slo)})
+
+
+@api_login_required
+@require_http_methods(['GET'])
+def release_impact_preview(request, id):
+    if (not has_role(request, DevOpsRole.ROLE_VIEWER, MODULE_DEPLOYMENT) or
+            not has_role(request, DevOpsRole.ROLE_VIEWER, MODULE_SERVICE)):
+        return api_error('没有发布影响查看权限', status=403, code='forbidden')
+    release = get_object_or_404(DeploymentRelease.objects.prefetch_related('hosts'), id=id)
+    release_hosts = list(release.hosts.all())
+    if not can_access_hosts(request, release_hosts):
+        return api_error('发布范围不在当前用户授权范围内', status=403, code='host_forbidden')
+    batch_size = request.GET.get('batch_size', '')
+    if batch_size and not batch_size.isdigit():
+        return api_error('批次大小无效', status=400, code='validation_error')
+    services = visible_catalog_services(request).filter(
+        models.Q(devops_projects__deployment_apps=release.app) |
+        models.Q(hosts__in=release_hosts),
+    ).distinct()
+    if not services.exists():
+        return api_error('发布关联服务不存在或无权访问', status=404, code='not_found')
+    try:
+        preview = build_release_impact_preview(
+            release, list(services), release_hosts, int(batch_size or 0),
+        )
+    except ValueError:
+        return api_error('批次大小无效', status=400, code='validation_error')
+    return JsonResponse({'ok': True, 'preview': preview})
+
+
+@api_login_required
+@require_http_methods(['GET'])
+def gitops_service_impacts(request):
+    if (not has_role(request, DevOpsRole.ROLE_VIEWER, MODULE_CLUSTER) or
+            not has_role(request, DevOpsRole.ROLE_VIEWER, MODULE_SERVICE)):
+        return api_error('没有 GitOps 服务影响查看权限', status=403, code='forbidden')
+    return JsonResponse({'ok': True, 'results': build_gitops_service_impacts(
+        GitOpsDriftFinding.objects.filter(status=GitOpsDriftFinding.STATUS_DRIFTED),
+        visible_catalog_services(request),
+    )})
+
+
+@api_login_required
 @require_http_methods(['POST'])
 def service_slo_update(request, id):
     if not has_role(request, DevOpsRole.ROLE_ADMIN, MODULE_SECURITY):
@@ -1152,6 +1355,79 @@ def command_detail(request, id):
     return JsonResponse({'ok': True, 'record': serialize_command(record)})
 
 
+def is_approved_runbook_execution(record):
+    return (
+        record.runbook_template_id and
+        record.status in (
+            CommandExecution.STATUS_SUCCESS,
+            CommandExecution.STATUS_FAILED,
+        ) and
+        ApprovalRequest.objects.filter(
+        command_execution=record,
+        request_type=ApprovalRequest.TYPE_COMMAND,
+        status__in=(
+            ApprovalRequest.STATUS_EXECUTED,
+            ApprovalRequest.STATUS_FAILED,
+        ),
+        ).exists()
+    )
+
+
+@api_login_required
+@require_http_methods(['GET', 'POST'])
+def runbook_effectiveness_feedback(request, id):
+    required_role = (
+        DevOpsRole.ROLE_VIEWER if request.method == 'GET'
+        else DevOpsRole.ROLE_OPERATOR
+    )
+    if not has_role(request, required_role, MODULE_COMMAND):
+        return api_error('没有运行手册反馈权限', status=403, code='forbidden')
+    record = get_object_or_404(
+        CommandExecution.objects.select_related('host', 'runbook_template'), id=id,
+    )
+    if not can_access_host(request, record.host):
+        return api_error('目标主机不在当前用户授权范围内', status=403, code='host_forbidden')
+    if not is_approved_runbook_execution(record):
+        return api_error('仅已批准的运行手册执行记录可反馈', status=400, code='validation_error')
+    if request.method == 'GET':
+        feedbacks = record.effectiveness_feedbacks.select_related(
+            'command_execution__runbook_template',
+        )
+        return JsonResponse({
+            'ok': True,
+            'results': [
+                serialize_runbook_effectiveness_feedback(item)
+                for item in limit_queryset(request, feedbacks)
+            ],
+        })
+
+    payload = request_json(request)
+    if not isinstance(payload, dict):
+        return invalid_json_error() if payload is None else api_error(
+            '请求参数无效', status=400, code='validation_error',
+        )
+    classification = payload.get('classification')
+    note = payload.get('note', '')
+    if not isinstance(classification, str) or not isinstance(note, str):
+        return api_error('反馈分类或备注无效', status=400, code='validation_error')
+    classification = classification.strip()
+    note = note.strip()
+    choices = {choice[0] for choice in RunbookEffectivenessFeedback.CLASSIFICATION_CHOICES}
+    if classification not in choices or len(note) > 300:
+        return api_error('反馈分类或备注无效', status=400, code='validation_error')
+    feedback = RunbookEffectivenessFeedback.objects.create(
+        command_execution=record,
+        classification=classification,
+        note=redact_sensitive_text(note),
+        created_by=request.session.get('user_name', ''),
+    )
+    audit(request, '提交运行手册效果反馈', 'RunbookEffectivenessFeedback', feedback.id, classification)
+    return JsonResponse({
+        'ok': True,
+        'feedback': serialize_runbook_effectiveness_feedback(feedback),
+    }, status=201)
+
+
 @api_login_required
 @require_http_methods(['GET', 'POST'])
 def tasks(request):
@@ -1236,11 +1512,77 @@ def capacity_forecast(request):
     return JsonResponse({'ok': True, 'results': forecast_host_capacity(visible_hosts_for_request(request))})
 
 
+def capacity_simulation_delta(payload, field, minimum, maximum):
+    value = payload.get(field) if isinstance(payload, dict) else None
+    if isinstance(value, bool):
+        return None
+    if isinstance(value, int):
+        number = value
+    elif isinstance(value, str) and re.match(r'^-?\d+$', value.strip()):
+        number = int(value.strip())
+    else:
+        return None
+    return number if minimum <= number <= maximum else None
+
+
+@api_login_required
+@require_http_methods(['POST'])
+def capacity_cost_simulation(request):
+    if (not has_role(request, DevOpsRole.ROLE_OPERATOR, MODULE_METRIC) or
+            not has_role(request, DevOpsRole.ROLE_OPERATOR, MODULE_SERVICE)):
+        return api_error('没有容量与成本仿真权限', status=403, code='forbidden')
+    payload = request_json(request)
+    if payload is None:
+        return invalid_json_error()
+    cpu_delta = capacity_simulation_delta(payload, 'cpu_delta_percent', -50, 100)
+    memory_delta = capacity_simulation_delta(payload, 'memory_delta_percent', -50, 100)
+    instance_delta = capacity_simulation_delta(payload, 'instance_delta', -10, 20)
+    if cpu_delta is None or memory_delta is None or instance_delta is None:
+        return api_error('仿真参数无效', status=400, code='validation_error')
+    hosts = visible_hosts_for_request(request)
+    costs = CloudDailyCostSummary.objects.filter(
+        resource__service__in=visible_catalog_services(request),
+    )
+    result = simulate_capacity_cost_change(
+        hosts, costs, cpu_delta, memory_delta, instance_delta,
+    )
+    return JsonResponse({'ok': True, **result})
+
+
 @api_login_required
 @require_http_methods(['GET'])
 def alerts(request):
     queryset = scoped_alert_queryset(visible_hosts_for_request(request))
     return JsonResponse({'ok': True, 'results': [serialize_alert(item) for item in limit_queryset(request, queryset)]})
+
+
+@api_login_required
+@require_http_methods(['GET', 'POST'])
+def alert_quality_feedback(request, id):
+    alert = get_object_or_404(scoped_alert_queryset(visible_hosts_for_request(request)), id=id)
+    if not has_role(request, DevOpsRole.ROLE_VIEWER, MODULE_ALERT):
+        return api_error('没有告警查看权限', status=403, code='forbidden')
+    if request.method == 'GET':
+        return JsonResponse({'ok': True, 'results': [
+            serialize_alert_quality_feedback(item)
+            for item in alert.quality_feedbacks.all()
+        ]})
+    if not has_role(request, DevOpsRole.ROLE_OPERATOR, MODULE_ALERT):
+        return api_error('没有告警操作权限', status=403, code='forbidden')
+    payload = request_json(request)
+    if payload is None:
+        return invalid_json_error()
+    classification = (payload.get('classification') or '').strip()
+    note = (payload.get('note') or '').strip()
+    choices = {choice[0] for choice in AlertQualityFeedback.CLASSIFICATION_CHOICES}
+    if classification not in choices or len(note) > 300:
+        return api_error('反馈分类或备注无效', status=400, code='validation_error')
+    feedback = AlertQualityFeedback.objects.create(
+        alert=alert, classification=classification, note=note,
+        created_by=request.session.get('user_name', ''),
+    )
+    audit(request, '提交告警质量反馈', 'AlertQualityFeedback', feedback.id, classification)
+    return JsonResponse({'ok': True, 'feedback': serialize_alert_quality_feedback(feedback)}, status=201)
 
 
 @api_login_required
@@ -1319,10 +1661,119 @@ def incident_detail(request, id):
     return JsonResponse({'ok': True, 'incident': serialize_incident(incident, include_timeline=True)})
 
 
+@api_login_required
+@require_http_methods(['GET'])
+def incident_postmortem_draft(request, id):
+    if not has_role(request, DevOpsRole.ROLE_VIEWER, MODULE_ALERT):
+        return api_error('没有事件复盘查看权限', status=403, code='forbidden')
+    incident, error = get_scoped_incident_or_error(request, id)
+    if error:
+        return error
+    try:
+        return JsonResponse({'ok': True, 'draft': build_incident_postmortem_draft(incident)})
+    except ValueError:
+        return api_error('仅已解决或已关闭事件可生成复盘草稿', status=400, code='validation_error')
+
+
 def incident_operator(request, id):
     if not has_role(request, DevOpsRole.ROLE_OPERATOR, MODULE_ALERT):
         return None, api_error('没有事件操作权限', status=403, code='forbidden')
     return get_scoped_incident_or_error(request, id)
+
+
+@api_login_required
+@require_http_methods(['POST'])
+def incident_assignment(request, id):
+    incident, error = incident_operator(request, id)
+    if error:
+        return error
+    payload = request_json(request)
+    if not isinstance(payload, dict):
+        return invalid_json_error() if payload is None else api_error('请求参数无效', status=400, code='validation_error')
+    owner = payload.get('owner')
+    if not isinstance(owner, str) or not owner.strip() or len(owner.strip()) > 100:
+        return api_error('负责人不能为空且不能超过 100 字符', status=400, code='validation_error')
+    sla_due_at = None
+    if payload.get('sla_due_at'):
+        sla_due_at = parse_datetime(payload['sla_due_at']) if isinstance(payload['sla_due_at'], str) else None
+        if not sla_due_at:
+            return api_error('SLA 时间无效', status=400, code='validation_error')
+        if timezone.is_naive(sla_due_at):
+            sla_due_at = timezone.make_aware(sla_due_at, timezone.get_current_timezone())
+        if sla_due_at <= timezone.now():
+            return api_error('SLA 时间必须晚于当前时间', status=400, code='validation_error')
+    return JsonResponse({'ok': True, 'incident': serialize_incident(assign_incident(request, incident, owner.strip(), sla_due_at))})
+
+
+def serialize_inspection_recommendation(item):
+    return {
+        'id': item.id,
+        'compliance_result_id': item.compliance_result_id,
+        'host_id': item.host_id,
+        'runbook_id': item.runbook_id,
+        'summary': item.summary,
+        'status': item.status,
+        'approval_id': item.initiated_approval_id,
+        'created_by': item.created_by,
+        'created_at': iso(item.created_at),
+    }
+
+
+def scoped_inspection_recommendations(request):
+    return InspectionRecommendation.objects.select_related('host', 'compliance_result', 'runbook').filter(
+        host__in=visible_hosts_for_request(request),
+    )
+
+
+@api_login_required
+@require_http_methods(['GET', 'POST'])
+def inspection_recommendations(request):
+    if request.method == 'GET':
+        if not has_role(request, DevOpsRole.ROLE_VIEWER, MODULE_SECURITY):
+            return api_error('没有检查建议查看权限', status=403, code='forbidden')
+        return JsonResponse({'ok': True, 'results': [serialize_inspection_recommendation(item) for item in limit_queryset(request, scoped_inspection_recommendations(request))]})
+    if not has_role(request, DevOpsRole.ROLE_OPERATOR, MODULE_SECURITY):
+        return api_error('没有检查建议操作权限', status=403, code='forbidden')
+    payload = request_json(request)
+    if not isinstance(payload, dict):
+        return invalid_json_error() if payload is None else api_error('请求参数无效', status=400, code='validation_error')
+    try:
+        result = ComplianceResult.objects.select_related('host').get(id=int(payload.get('compliance_result_id')))
+        runbook = RunbookTemplate.objects.get(id=int(payload.get('runbook_id')))
+    except (TypeError, ValueError, ComplianceResult.DoesNotExist, RunbookTemplate.DoesNotExist):
+        return api_error('检查结果或运行手册无效', status=400, code='validation_error')
+    summary = payload.get('summary', '')
+    if not isinstance(summary, str) or len(summary) > 300:
+        return api_error('建议摘要无效', status=400, code='validation_error')
+    try:
+        item = create_inspection_recommendation(request, result, runbook, summary.strip())
+    except PermissionError:
+        return api_error('关联主机不在当前用户授权范围内', status=403, code='host_forbidden')
+    except ValueError as exc:
+        return api_error(str(exc), status=400, code='validation_error')
+    return JsonResponse({'ok': True, 'recommendation': serialize_inspection_recommendation(item)}, status=201)
+
+
+@api_login_required
+@require_http_methods(['POST'])
+def inspection_recommendation_initiate(request, id):
+    if not has_role(request, DevOpsRole.ROLE_OPERATOR, MODULE_SECURITY):
+        return api_error('没有检查建议操作权限', status=403, code='forbidden')
+    try:
+        item = scoped_inspection_recommendations(request).get(id=id)
+    except InspectionRecommendation.DoesNotExist:
+        return api_error('检查建议不存在', status=404, code='not_found')
+    try:
+        record, approval = initiate_inspection_recommendation(request, item)
+    except PermissionError as exc:
+        return api_error(str(exc), status=403, code='forbidden')
+    except (ValueError, RunbookInitiationError) as exc:
+        return api_error(str(exc), status=400, code='validation_error')
+    return JsonResponse({
+        'ok': True, 'requires_approval': True,
+        'recommendation': serialize_inspection_recommendation(item),
+        'command_execution_id': record.id, 'approval': serialize_approval(approval),
+    }, status=202)
 
 
 @api_login_required
@@ -1562,6 +2013,87 @@ def worker_observability(request):
         return api_error('没有 Worker 观测管理权限', status=403, code='forbidden')
     payload = worker_observability_payload()
     return JsonResponse({'ok': True, 'worker': payload})
+
+
+@api_login_required
+@require_http_methods(['GET'])
+def vulnerabilities(request):
+    if not has_role(request, DevOpsRole.ROLE_VIEWER, MODULE_SECURITY):
+        return api_error('没有漏洞治理查看权限', status=403, code='forbidden')
+    visible_hosts = visible_hosts_for_request(request)
+    results = VulnerabilityFinding.objects.filter(host__in=visible_hosts).order_by('-last_seen_at')[:100]
+    return JsonResponse({'ok': True, 'results': [{
+        'id': item.id, 'host_id': item.host_id, 'package_name': item.package_name,
+        'advisory_id': item.advisory_id, 'severity': item.severity, 'status': item.status,
+        'last_seen_at': iso(item.last_seen_at),
+    } for item in results]})
+
+
+@api_login_required
+@require_http_methods(['GET'])
+def gitops_drift(request):
+    if not has_role(request, DevOpsRole.ROLE_VIEWER, MODULE_CLUSTER):
+        return api_error('没有 GitOps 漂移查看权限', status=403, code='forbidden')
+    results = GitOpsDriftFinding.objects.order_by('-last_seen_at')[:100]
+    return JsonResponse({'ok': True, 'results': [{
+        'id': item.id, 'cluster_id': item.cluster_id, 'namespace': item.namespace,
+        'resource_name': item.resource_name, 'resource_kind': item.resource_kind,
+        'desired_digest': item.desired_digest, 'observed_digest': item.observed_digest,
+        'status': item.status, 'last_seen_at': iso(item.last_seen_at),
+    } for item in results]})
+
+
+def visible_catalog_services(request):
+    hosts = visible_hosts_for_request(request)
+    return ServiceCatalog.objects.filter(
+        models.Q(hosts__in=hosts) | models.Q(hosts__isnull=True)
+    ).distinct()
+
+
+@api_login_required
+@require_http_methods(['GET'])
+def service_catalog(request):
+    if not has_role(request, DevOpsRole.ROLE_VIEWER, MODULE_SERVICE):
+        return api_error('没有服务目录查看权限', status=403, code='forbidden')
+    hosts = visible_hosts_for_request(request)
+    visible_host_ids = set(hosts.values_list('id', flat=True))
+    services = list(visible_catalog_services(request).prefetch_related('hosts', 'upstream_links__upstream_service'))
+    visible_service_ids = set(service.id for service in services)
+    return JsonResponse({'ok': True, 'results': [
+        serialize_topology_service(service, visible_host_ids, visible_service_ids) for service in services
+    ]})
+
+
+@api_login_required
+@require_http_methods(['GET'])
+def cloud_resources(request):
+    if not has_role(request, DevOpsRole.ROLE_VIEWER, MODULE_SECURITY):
+        return api_error('没有云资源查看权限', status=403, code='forbidden')
+    resources = CloudResourceSummary.objects.select_related('service').filter(
+        service__in=visible_catalog_services(request)
+    ).order_by('-last_seen_at')[:200]
+    return JsonResponse({'ok': True, 'results': [{
+        'id': item.id, 'service': {'id': item.service_id, 'name': item.service.name},
+        'provider': item.provider, 'resource_type': item.resource_type,
+        'resource_identifier': item.resource_identifier, 'region': item.region,
+        'tag_digest': item.tag_digest, 'last_seen_at': iso(item.last_seen_at),
+    } for item in resources]})
+
+
+@api_login_required
+@require_http_methods(['GET'])
+def cloud_costs(request):
+    if not has_role(request, DevOpsRole.ROLE_VIEWER, MODULE_SECURITY):
+        return api_error('没有云成本查看权限', status=403, code='forbidden')
+    costs = CloudDailyCostSummary.objects.select_related('resource__service').filter(
+        resource__service__in=visible_catalog_services(request)
+    ).order_by('-cost_date', 'id')[:500]
+    return JsonResponse({'ok': True, 'results': [{
+        'resource_id': item.resource_id,
+        'service': {'id': item.resource.service_id, 'name': item.resource.service.name},
+        'provider': item.resource.provider, 'cost_date': item.cost_date.isoformat(),
+        'amount': str(item.amount), 'currency': item.currency,
+    } for item in costs]})
 
 
 @api_login_required

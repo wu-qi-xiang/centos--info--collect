@@ -1,0 +1,43 @@
+<h2>浅色 Linear 风格运维工作台</h2>
+<p class="subtitle">以“任务上下文 + 单一操作表面”为核心，移除彩色竖条和重阴影。</p>
+
+<div style="border:1px solid #dedee3;background:#f8f8fa;color:#1b1b1f;min-height:500px;font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;font-size:12px;letter-spacing:0">
+  <div style="height:42px;background:#fff;border-bottom:1px solid #e6e6eb;display:flex;align-items:center;padding:0 16px;gap:12px">
+    <strong style="font-size:13px">Operations</strong><span style="color:#8a8a94">/</span><span style="color:#676770">Services</span><span style="margin-left:auto;color:#8a8a94">⌘ K</span><span style="width:24px;height:24px;border-radius:50%;background:#e5e5ea;display:inline-flex;align-items:center;justify-content:center">W</span>
+  </div>
+  <div style="display:grid;grid-template-columns:175px 1fr;min-height:458px">
+    <aside style="border-right:1px solid #e6e6eb;padding:13px 8px;background:#fbfbfc">
+      <div style="color:#9898a2;font-size:10px;font-weight:700;margin:5px 8px 8px">OPERATE</div>
+      <div style="padding:7px 8px;background:#ececf2;border-radius:4px;font-weight:600">◉ 服务管理</div>
+      <div style="padding:7px 8px;color:#595963">▤ 运行手册</div>
+      <div style="padding:7px 8px;color:#595963">⇄ 文件分发</div>
+      <div style="padding:7px 8px;color:#595963">⌁ 监控历史</div>
+      <div style="border-top:1px solid #e8e8ed;margin:12px 4px"></div>
+      <div style="color:#9898a2;font-size:10px;font-weight:700;margin:9px 8px">VIEW</div>
+      <div style="padding:7px 8px;color:#595963">告警记录</div>
+      <div style="padding:7px 8px;color:#595963">审批队列 <span style="float:right;color:#5e6ad2">3</span></div>
+    </aside>
+    <main style="padding:28px 32px;max-width:970px">
+      <div style="display:flex;align-items:flex-start;margin-bottom:24px">
+        <div><div style="font-size:20px;font-weight:650;line-height:1.25">服务管理</div><div style="color:#7b7b85;margin-top:5px">选择目标服务并提交一个受控操作</div></div>
+        <button style="margin-left:auto;background:#5e6ad2;color:white;border:0;border-radius:5px;padding:8px 12px;font-weight:600">执行服务操作</button>
+      </div>
+      <section style="background:#fff;border:1px solid #e1e1e7;border-radius:6px">
+        <div style="padding:13px 16px;border-bottom:1px solid #ededf1;display:flex;align-items:center"><b>操作详情</b><span style="margin-left:auto;color:#8a8a94">必填字段</span></div>
+        <div style="display:grid;grid-template-columns:1fr 1fr 1fr;gap:12px;padding:16px">
+          <div><div style="color:#777781;margin-bottom:6px">目标主机</div><div style="border:1px solid #dedee5;border-radius:4px;padding:8px;color:#303039">api-prod-03　⌄</div></div>
+          <div><div style="color:#777781;margin-bottom:6px">服务</div><div style="border:1px solid #dedee5;border-radius:4px;padding:8px;color:#303039">nginx</div></div>
+          <div><div style="color:#777781;margin-bottom:6px">操作</div><div style="border:1px solid #dedee5;border-radius:4px;padding:8px;color:#303039">重启　⌄</div></div>
+        </div>
+      </section>
+      <section style="margin-top:24px;background:#fff;border:1px solid #e1e1e7;border-radius:6px">
+        <div style="padding:13px 16px;border-bottom:1px solid #ededf1;display:flex"><b>执行记录</b><span style="margin-left:10px;color:#8a8a94">最近 30 条</span><span style="margin-left:auto;color:#5e6ad2">筛选</span></div>
+        <div style="display:grid;grid-template-columns:145px 1.2fr 1fr .7fr 1.5fr;color:#8a8a94;padding:9px 16px;border-bottom:1px solid #ededf1;font-size:10px;font-weight:700"> <span>时间</span><span>主机</span><span>服务</span><span>状态</span><span>结果</span></div>
+        <div style="display:grid;grid-template-columns:145px 1.2fr 1fr .7fr 1.5fr;padding:12px 16px;border-bottom:1px solid #f1f1f4"><span>10:42:18</span><span>api-prod-03</span><span>nginx</span><span style="color:#18794e">完成</span><span style="color:#6f6f78">已恢复服务</span></div>
+        <div style="display:grid;grid-template-columns:145px 1.2fr 1fr .7fr 1.5fr;padding:12px 16px"><span>09:55:02</span><span>web-prod-02</span><span>node-exporter</span><span style="color:#b54708">待审批</span><span style="color:#6f6f78">等待处理</span></div>
+      </section>
+    </main>
+  </div>
+</div>
+
+<div class="section"><span class="label">设计规则</span><p>主色只服务于主动作和当前导航；细线代替重卡片；上下文放入导航轨道；状态用文字加少量颜色；所有操作页都复用同一结构，监控页只额外强调趋势与数据表。</p></div>

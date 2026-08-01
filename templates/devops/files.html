@@ -3,11 +3,11 @@
 {% block title %}文件分发 - DevOps平台{% endblock %}
 
 {% block content %}
-<div class="container-fluid px-4">
+<div class="container-fluid px-4 ops-legacy-operation ops-file-distribution-page">
     <h1 class="h3 mb-3">文件分发</h1>
     {% include "devops/_nav.html" %}
 
-    <div class="card mb-3">
+    <div class="card mb-3 ops-legacy-card ops-file-distribution-action">
         <div class="card-body">
             <div class="alert alert-info py-2">文件分发提交后会在后台执行，可进入详情查看每台主机结果。</div>
             <form method="post" enctype="multipart/form-data">
@@ -23,9 +23,9 @@
         </div>
     </div>
 
-    <div class="card">
+    <div class="card ops-legacy-card ops-legacy-records">
         <div class="card-header">分发记录</div>
-        <div class="card-body table-responsive">
+        <div class="card-body table-responsive ops-legacy-table-wrap">
             <table class="table table-hover">
                 <tr><th>时间</th><th>名称</th><th>状态</th><th>主机数</th><th>远端路径</th><th>摘要</th><th>操作</th></tr>
                 {% for item in records %}

@@ -2473,7 +2473,7 @@
                             <i class="fas fa-check-circle" aria-hidden="true"></i>
                             <div><strong>草稿已创建</strong><span>[[ data.prometheus_rules.notice ]]</span></div>
                         </div>
-                        <div v-if="!data.prometheus_rules.error" class="ops-rule-workbench__layout" :class="{ 'has-creator': data.prometheus_rules.can_create && data.prometheus_rules.configured }">
+                        <div class="ops-rule-workbench__layout" :class="{ 'has-creator': data.prometheus_rules.can_create && data.prometheus_rules.configured }">
                             <section class="ops-rule-workbench__list" aria-label="PrometheusRule 列表">
                                 <div class="ops-rule-workbench__list-head">
                                     <div><strong>规则清单</strong><span>[[ data.prometheus_rules.rules.length ]] 条已加载</span></div>
@@ -2499,6 +2499,10 @@
                             </section>
                             <aside v-if="data.prometheus_rules.can_create && data.prometheus_rules.configured" class="ops-rule-workbench__creator">
                                 <div class="ops-rule-workbench__creator-head"><div><strong>创建规则草稿</strong><span>提交后需由另一名管理员复核</span></div><i class="fas fa-file-code" aria-hidden="true"></i></div>
+                                <div v-if="data.prometheus_rules.create_error" class="ops-rule-workbench__state is-error" role="alert">
+                                    <i class="fas fa-exclamation-triangle" aria-hidden="true"></i>
+                                    <div><strong>创建草稿失败</strong><span>[[ data.prometheus_rules.create_error ]]</span></div>
+                                </div>
                                 <form method="post" :action="data.prometheus_rules.create_url" @submit="submitForm">
                                     <input type="hidden" name="csrfmiddlewaretoken" :value="data.csrf">
                                     <input type="hidden" name="cluster" :value="data.prometheus_rules.selected_cluster_id">

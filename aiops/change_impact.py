@@ -43,14 +43,34 @@ def _audit_evidence(audits):
     ]
 
 
-def _deployment_evidence(release, audits):
+def _health_evidence(release, host_id):
+    prefix = 'host_ids='
+    host_token = str(host_id)
+    evidence = []
+    for evaluation in release.health_evaluations.all():
+        batch = (evaluation.batch_identity or '')
+        host_ids = batch[len(prefix):].split(',') if batch.startswith(prefix) else []
+        if host_token not in host_ids:
+            continue
+        evidence.append({
+            'kind': 'deployment_health',
+            'summary': evaluation.summary,
+            'status': evaluation.status,
+            'score': evaluation.score,
+            'observed_at': _timestamp(evaluation.evaluated_at),
+            'url': reverse('devops:deployment_detail', args=[release.id]),
+        })
+    return evidence
+
+
+def _deployment_evidence(release, audits, host_id):
     evidence = [{
         'kind': 'deployment',
         'summary': '发布：%s %s（%s）' % (release.app.name, release.version, release.status),
         'observed_at': _timestamp(release.finished_at or release.created_at),
         'url': reverse('devops:deployment_detail', args=[release.id]),
     }]
-    return evidence + _audit_evidence(audits)
+    return evidence + _health_evidence(release, host_id) + _audit_evidence(audits)
 
 
 def _revision_evidence(revision, audits):
@@ -95,7 +115,7 @@ def _recent_deployments(host_ids, cutoff):
             created_at__gte=cutoff,
         ).exclude(
             status__in=(DeploymentRelease.STATUS_PENDING, DeploymentRelease.STATUS_BLOCKED),
-        ).select_related('app').prefetch_related('hosts').distinct().order_by('-created_at', '-id')[:40]
+        ).select_related('app').prefetch_related('hosts', 'health_evaluations').distinct().order_by('-created_at', '-id')[:40]
     )
 
 
@@ -165,7 +185,7 @@ def build_change_impacts(request, open_alerts, failed_commands, hosts, now=None)
         evidence = _signal_evidence(host_signals['alerts'], host_signals['commands'])
         for deployment in host_deployments:
             evidence.extend(_deployment_evidence(
-                deployment, audits.get(('DeploymentRelease', str(deployment.id)), []),
+                deployment, audits.get(('DeploymentRelease', str(deployment.id)), []), host_id,
             ))
         for revision in revisions:
             evidence.extend(_revision_evidence(
