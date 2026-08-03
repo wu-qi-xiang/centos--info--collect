@@ -239,6 +239,24 @@
   - 成功返回 `worker.summary`（等待、执行中、累计成功/失败、超时、近一小时完成/失败及失败率）和 `worker.thresholds`（待处理、失败率、超时三个阈值的当前值、启用阈值与触发状态）。
   - 安全：不返回任务 ID、目标对象、输入、角色、异常文本、任务错误、配置原始值、主机信息或任何凭据；接口不领取、重试、取消任务，也不写入告警状态。
 
+## 受控集成与基础设施计划
+
+- `GET /devops/api/integration-readiness/`
+  - 返回 Worker 汇总、连接器安全摘要、最近采集结果和最近基础设施计划。
+  - 认证：需要 session 登录；未登录返回 `401` 和 `code: "unauthorized"`。
+  - 权限：需要 `DevOpsRole.ROLE_ADMIN` 和 `DevOpsModulePermission.MODULE_SECURITY`；权限不足返回 `403` 和 `code: "forbidden"`。
+  - 安全：连接器不返回配置、URL、令牌、凭据或原始响应；采集不返回原始清单或漏洞报告；计划仅返回定义摘要和状态。
+- `GET /devops/api/integration-connectors/`
+  - 返回已登记连接器的 `id`、名称、类型、启用状态、只读状态和安全状态。需要同上的安全模块管理员权限。
+- `POST /devops/api/integration-connectors/<id>/collect/`
+  - 仅接受空 JSON 对象或空请求体，按已登记的连接器 ID 发起采集并写入审计日志。URL、令牌、清单、命令、provider 或任意浏览器输入都会返回 `400` 和 `code: "validation_error"`。
+  - 当前默认适配器未配置且不会发起网络请求，启用连接器的结果为 `blocked/provider_unconfigured`；禁用或非只读连接器结果为 `blocked/connector_disabled`。成功响应为 `202`，仅返回安全的运行状态、结果类别、发现计数和时间。
+- `GET /devops/api/infrastructure-blueprints/`
+  - 返回蓝图 ID、名称、provider 类型、启用/只读状态、定义 SHA-256 摘要和安全摘要。需要安全模块管理员权限；不返回模板、provider 凭据或原始定义。
+- `POST /devops/api/infrastructure-blueprints/<id>/plans/`
+  - 仅接受空 JSON 对象或空请求体，按已登记蓝图 ID 创建本地计划并写入审计日志。成功返回 `202` 和 `pending` 或 `blocked` 的安全计划摘要。
+  - 此接口不会调用 Terraform、Ansible、shell、云厂商 SDK、Git、Kubernetes 或远程主机，也不会创建 apply、修复或资源变更路径。
+
 ## 漏洞与 GitOps 发现
 
 - `GET /devops/api/vulnerabilities/`

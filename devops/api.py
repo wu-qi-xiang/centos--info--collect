@@ -48,6 +48,8 @@ from .models import (
     CloudResourceSummary,
     CloudDailyCostSummary,
     CIDelivery,
+    InfrastructureBlueprint,
+    IntegrationConnector,
 )
 from .ci_orchestration import CIValidationError, parse_ci_delivery
 from .gitops_service_impact import build_gitops_service_impacts
@@ -100,6 +102,11 @@ from .services import (
     normalize_prometheus_rule_resource_version,
     RunbookInitiationError,
     record_ci_delivery,
+    integration_readiness_payload,
+    request_controlled_collection,
+    request_controlled_infrastructure_plan,
+    safe_collection_run_summary,
+    safe_infrastructure_plan_summary,
 )
 
 
@@ -2013,6 +2020,82 @@ def worker_observability(request):
         return api_error('没有 Worker 观测管理权限', status=403, code='forbidden')
     payload = worker_observability_payload()
     return JsonResponse({'ok': True, 'worker': payload})
+
+
+def _empty_json_payload_or_error(request):
+    payload = request_json(request)
+    if not isinstance(payload, dict):
+        return None, invalid_json_error()
+    if payload:
+        return None, api_error('受控集成操作不接受浏览器输入', status=400, code='validation_error')
+    return payload, None
+
+
+@api_login_required
+@require_http_methods(['GET'])
+def integration_readiness(request):
+    if not has_role(request, DevOpsRole.ROLE_ADMIN, MODULE_SECURITY):
+        return api_error('没有受控集成就绪度查看权限', status=403, code='forbidden')
+    return JsonResponse({'ok': True, **integration_readiness_payload()})
+
+
+@api_login_required
+@require_http_methods(['GET'])
+def integration_connectors(request):
+    if not has_role(request, DevOpsRole.ROLE_ADMIN, MODULE_SECURITY):
+        return api_error('没有受控集成管理权限', status=403, code='forbidden')
+    return JsonResponse({
+        'ok': True,
+        'results': [item.safe_summary() for item in IntegrationConnector.objects.order_by('name', 'id')],
+    })
+
+
+@api_login_required
+@require_http_methods(['POST'])
+def integration_connector_collect(request, id):
+    if not has_role(request, DevOpsRole.ROLE_ADMIN, MODULE_SECURITY):
+        return api_error('没有受控集成管理权限', status=403, code='forbidden')
+    _, error = _empty_json_payload_or_error(request)
+    if error:
+        return error
+    connector = IntegrationConnector.objects.filter(id=id).first()
+    if not connector:
+        return api_error('连接器不存在', status=404, code='not_found')
+    try:
+        run = request_controlled_collection(connector, requester=request.session.get('user_name', ''))
+    except ValueError:
+        return api_error('连接器类型无效', status=400, code='validation_error')
+    audit(request, '触发受控集成采集', 'IntegrationConnector', connector.id,
+          '类型=%s, 结果=%s' % (connector.connector_type, run.outcome_category or run.status))
+    return JsonResponse({'ok': True, 'run': safe_collection_run_summary(run)}, status=202)
+
+
+@api_login_required
+@require_http_methods(['GET'])
+def infrastructure_blueprints(request):
+    if not has_role(request, DevOpsRole.ROLE_ADMIN, MODULE_SECURITY):
+        return api_error('没有基础设施蓝图管理权限', status=403, code='forbidden')
+    return JsonResponse({
+        'ok': True,
+        'results': [item.safe_summary() for item in InfrastructureBlueprint.objects.order_by('name', 'id')],
+    })
+
+
+@api_login_required
+@require_http_methods(['POST'])
+def infrastructure_blueprint_plan(request, id):
+    if not has_role(request, DevOpsRole.ROLE_ADMIN, MODULE_SECURITY):
+        return api_error('没有基础设施蓝图管理权限', status=403, code='forbidden')
+    _, error = _empty_json_payload_or_error(request)
+    if error:
+        return error
+    blueprint = InfrastructureBlueprint.objects.filter(id=id).first()
+    if not blueprint:
+        return api_error('基础设施蓝图不存在', status=404, code='not_found')
+    plan = request_controlled_infrastructure_plan(blueprint, requester=request.session.get('user_name', ''))
+    audit(request, '创建受控基础设施计划', 'InfrastructureBlueprint', blueprint.id,
+          '状态=%s, 结果=%s' % (plan.status, plan.outcome_category or 'pending'))
+    return JsonResponse({'ok': True, 'plan': safe_infrastructure_plan_summary(plan)}, status=202)
 
 
 @api_login_required

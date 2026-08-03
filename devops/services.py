@@ -99,6 +99,11 @@ from .models import (
     CloudDailyCostSummary,
     CIDelivery,
     DeploymentHealthEvaluation,
+    GitOpsCollectionRun,
+    InfrastructureBlueprint,
+    InfrastructurePlan,
+    IntegrationConnector,
+    VulnerabilityImportRun,
 )
 from RemoteLinux.models import NewLinux, User
 from . import prometheus_rules as _prometheus_rules
@@ -1759,6 +1764,77 @@ def audit(request, action, target_type='', target_id='', detail=''):
         detail=detail,
         ip_address=client_ip(request),
     )
+
+
+def _controlled_integration_time(value):
+    if not value:
+        return None
+    return timezone.localtime(value).strftime('%Y-%m-%d %H:%M:%S')
+
+
+def safe_collection_run_summary(run):
+    """Return bounded collection metadata without config or provider responses."""
+    return {
+        'id': run.id,
+        'connector_id': run.connector_id,
+        'status': run.status,
+        'outcome_category': run.outcome_category,
+        'finding_count': run.finding_count,
+        'started_at': _controlled_integration_time(run.started_at),
+        'finished_at': _controlled_integration_time(run.finished_at),
+    }
+
+
+def safe_infrastructure_plan_summary(plan):
+    """Return a read-only plan record; provider definitions are digest-only."""
+    return {
+        'id': plan.id,
+        'blueprint_id': plan.blueprint_id,
+        'status': plan.status,
+        'outcome_category': plan.outcome_category,
+        'definition_digest': plan.definition_digest,
+        'resource_count': plan.resource_count,
+        'summary': plan.summary,
+        'created_at': _controlled_integration_time(plan.created_at),
+    }
+
+
+def integration_readiness_payload():
+    """Build the safe, admin-only integration readiness read model."""
+    # Imported lazily because api.py imports service permissions and audit helpers.
+    from .api import worker_observability_payload
+
+    recent_runs = list(GitOpsCollectionRun.objects.order_by('-created_at', '-id')[:10])
+    recent_runs.extend(VulnerabilityImportRun.objects.order_by('-created_at', '-id')[:10])
+    recent_runs.sort(key=lambda item: (item.created_at, item.id), reverse=True)
+    return {
+        'worker': worker_observability_payload(),
+        'connectors': [item.safe_summary() for item in IntegrationConnector.objects.order_by('name', 'id')],
+        'collections': [safe_collection_run_summary(item) for item in recent_runs[:10]],
+        'blueprint_plans': [safe_infrastructure_plan_summary(item) for item in InfrastructurePlan.objects.order_by('-created_at', '-id')[:10]],
+    }
+
+
+def request_controlled_collection(connector, requester=''):
+    """Trigger only the configured connector's local, no-network default adapter."""
+    from .integrations import collect_gitops_connector, collect_vulnerability_connector
+
+    if not isinstance(connector, IntegrationConnector) or not connector.pk:
+        raise ValueError('连接器不存在')
+    if connector.connector_type == IntegrationConnector.TYPE_GITOPS:
+        return collect_gitops_connector(connector, triggered_by=requester)
+    if connector.connector_type == IntegrationConnector.TYPE_VULNERABILITY:
+        return collect_vulnerability_connector(connector, triggered_by=requester)
+    raise ValueError('连接器类型无效')
+
+
+def request_controlled_infrastructure_plan(blueprint, requester=''):
+    """Create a local planning request only; this never invokes a provider."""
+    from .integrations import request_infrastructure_plan
+
+    if not isinstance(blueprint, InfrastructureBlueprint) or not blueprint.pk:
+        raise ValueError('基础设施蓝图不存在')
+    return request_infrastructure_plan(blueprint, requested_by=requester)
 
 
 def revoke_module_permission(request, permission):

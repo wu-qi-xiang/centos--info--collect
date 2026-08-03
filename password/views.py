@@ -1,3 +1,7 @@
+import hashlib
+
+from django.conf import settings
+from django.core.cache import cache
 from django.core.paginator import Paginator
 from django.shortcuts import get_object_or_404, render, redirect
 from django.http import HttpResponse, HttpResponseNotAllowed, JsonResponse
@@ -171,10 +175,49 @@ def password_search(request):
 	return _render_password_list(request, password, pwd)
 
 
+def _password_reveal_rate_key(request, password_id):
+	user_id = request.session.get('user_id') or request.session.get('user_name') or 'anonymous'
+	identity = '%s:%s' % (user_id, password_id)
+	return 'password-reveal:%s' % hashlib.sha256(identity.encode('utf-8')).hexdigest()
+
+
+def _password_reveal_rate_limited(request, password_id):
+	max_attempts = int(getattr(settings, 'PASSWORD_REVEAL_MAX_ATTEMPTS', 5) or 0)
+	window_seconds = int(getattr(settings, 'PASSWORD_REVEAL_WINDOW_SECONDS', 60) or 0)
+	if max_attempts <= 0 or window_seconds <= 0:
+		return False
+	key = _password_reveal_rate_key(request, password_id)
+	count = cache.get(key)
+	if count is not None and int(count) >= max_attempts:
+		return True
+	if cache.add(key, 1, timeout=window_seconds):
+		return False
+	try:
+		count = cache.incr(key)
+	except ValueError:
+		cache.set(key, 1, timeout=window_seconds)
+		count = 1
+	return int(count) > max_attempts
+
+
+def _no_store(response):
+	response['Cache-Control'] = 'no-store'
+	response['Pragma'] = 'no-cache'
+	response['X-Content-Type-Options'] = 'nosniff'
+	return response
+
+
 @session_login_required
 def password_reveal(request, id):
 	if request.method != "POST":
 		return HttpResponseNotAllowed(["POST"])
 	password = get_object_or_404(Password, id=id, auther=request.session.get('user_name'))
+	if _password_reveal_rate_limited(request, password.id):
+		audit(request, '凭据读取受限', 'Password', password.id, password.system_name)
+		return _no_store(JsonResponse({
+			'ok': False,
+			'code': 'rate_limited',
+			'message': '凭据读取过于频繁，请稍后重试',
+		}, status=429))
 	audit(request, '查看密码', 'Password', password.id, password.system_name)
-	return JsonResponse({'password': decrypt_text(password.password)})
+	return _no_store(JsonResponse({'ok': True, 'password': decrypt_text(password.password)}))

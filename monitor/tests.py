@@ -1480,7 +1480,7 @@ class MonitorSecurityTests(TestCase):
 		self.assertIn('this.expandedRuleCells.query = [];', vue_source)
 		self.assertIn('this.expandedRuleCells.labels = [];', vue_source)
 
-		static_version = '20260724-prometheus-rule-errors-01'
+		static_version = '20260801-geist-control-plane-01'
 		self.assertEqual(page_template.count('?v=%s' % static_version), 2)
 		self.assertIn("static 'css/ops-vue-pages.css'", page_template)
 		self.assertIn("static 'js/ops-vue-pages.js'", page_template)
@@ -3804,7 +3804,7 @@ spec:
 		self.assertIn("v-if=\"data.prometheus_rules.can_create && data.prometheus_rules.configured\"", page_template)
 		self.assertIn('ops-rule-workbench__state is-denied', page_template)
 		self.assertIn('.ops-rule-workbench', page_styles)
-		self.assertIn('20260724-prometheus-rule-errors-01', page_shell)
+		self.assertIn('20260801-geist-control-plane-01', page_shell)
 		self.assertIn('修订管理', page_template)
 		self.assertIn('创建待复核草稿', page_template)
 		self.assertIn('规则摘要不可用', page_template)

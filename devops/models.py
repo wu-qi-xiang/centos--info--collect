@@ -1,3 +1,6 @@
+import hashlib
+import json
+
 from django.db import models
 from django.core.exceptions import ValidationError
 from django.utils import timezone
@@ -1587,6 +1590,198 @@ class GitOpsDriftFinding(models.Model):
         db_table = 'devops_gitops_drift_finding'
         unique_together = ('cluster', 'namespace', 'resource_name', 'resource_kind')
         indexes = [models.Index(fields=['cluster', 'status'])]
+
+
+CONTROLLED_INTEGRATION_STATUS_CHOICES = (
+    ('pending', '等待执行'),
+    ('running', '执行中'),
+    ('success', '执行成功'),
+    ('failed', '执行失败'),
+    ('blocked', '已拦截'),
+)
+
+
+class IntegrationConnector(models.Model):
+    TYPE_GITOPS = 'gitops'
+    TYPE_VULNERABILITY = 'vulnerability'
+    TYPE_CHOICES = (
+        (TYPE_GITOPS, 'GitOps'),
+        (TYPE_VULNERABILITY, '漏洞导入'),
+    )
+
+    name = models.CharField(max_length=100, unique=True)
+    connector_type = models.CharField(max_length=30, choices=TYPE_CHOICES)
+    enabled = models.BooleanField(default=False)
+    read_only = models.BooleanField(default=True)
+    schedule = models.CharField(max_length=100, blank=True)
+    config_encrypted = models.TextField(blank=True)
+    last_status = models.CharField(max_length=20, choices=CONTROLLED_INTEGRATION_STATUS_CHOICES, default='blocked')
+    last_outcome_category = models.CharField(max_length=40, blank=True)
+    last_run_at = models.DateTimeField(null=True, blank=True)
+    created_by = models.CharField(max_length=100, blank=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    def __init__(self, *args, **kwargs):
+        config = kwargs.pop('config', None)
+        super().__init__(*args, **kwargs)
+        if config is not None:
+            self.set_config(config)
+
+    def set_config(self, value):
+        if not isinstance(value, dict):
+            raise ValueError('连接器配置必须是对象')
+        self.config_encrypted = encrypt_text(json.dumps(value, sort_keys=True, separators=(',', ':')))
+
+    def get_config(self):
+        if not self.config_encrypted:
+            return {}
+        try:
+            value = json.loads(decrypt_text(self.config_encrypted))
+        except (TypeError, ValueError):
+            return {}
+        return value if isinstance(value, dict) else {}
+
+    @property
+    def config(self):
+        return self.get_config()
+
+    @config.setter
+    def config(self, value):
+        self.set_config(value)
+
+    def safe_summary(self):
+        return {
+            'id': self.id,
+            'name': self.name,
+            'connector_type': self.connector_type,
+            'enabled': self.enabled,
+            'read_only': self.read_only,
+            'status': self.last_status,
+        }
+
+    class Meta:
+        db_table = 'devops_integration_connector'
+        ordering = ['name', 'id']
+
+
+class GitOpsCollectionRun(models.Model):
+    STATUS_PENDING = 'pending'
+    STATUS_RUNNING = 'running'
+    STATUS_SUCCESS = 'success'
+    STATUS_FAILED = 'failed'
+    STATUS_BLOCKED = 'blocked'
+
+    connector = models.ForeignKey(IntegrationConnector, on_delete=models.PROTECT, related_name='gitops_runs')
+    status = models.CharField(max_length=20, choices=CONTROLLED_INTEGRATION_STATUS_CHOICES, default='pending')
+    outcome_category = models.CharField(max_length=40, blank=True)
+    finding_count = models.PositiveIntegerField(default=0)
+    triggered_by = models.CharField(max_length=100, blank=True)
+    started_at = models.DateTimeField(default=timezone.now)
+    finished_at = models.DateTimeField(null=True, blank=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        db_table = 'devops_gitops_collection_run'
+        ordering = ['-created_at', '-id']
+        indexes = [models.Index(fields=['connector', '-created_at'], name='devops_gcr_connector_time_idx')]
+
+
+class VulnerabilityImportRun(models.Model):
+    STATUS_PENDING = 'pending'
+    STATUS_RUNNING = 'running'
+    STATUS_SUCCESS = 'success'
+    STATUS_FAILED = 'failed'
+    STATUS_BLOCKED = 'blocked'
+
+    connector = models.ForeignKey(IntegrationConnector, on_delete=models.PROTECT, related_name='vulnerability_runs')
+    status = models.CharField(max_length=20, choices=CONTROLLED_INTEGRATION_STATUS_CHOICES, default='pending')
+    outcome_category = models.CharField(max_length=40, blank=True)
+    finding_count = models.PositiveIntegerField(default=0)
+    triggered_by = models.CharField(max_length=100, blank=True)
+    started_at = models.DateTimeField(default=timezone.now)
+    finished_at = models.DateTimeField(null=True, blank=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        db_table = 'devops_vulnerability_import_run'
+        ordering = ['-created_at', '-id']
+        indexes = [models.Index(fields=['connector', '-created_at'], name='devops_vir_connector_time_idx')]
+
+
+class InfrastructureBlueprint(models.Model):
+    name = models.CharField(max_length=100, unique=True)
+    provider_type = models.CharField(max_length=30)
+    enabled = models.BooleanField(default=False)
+    read_only = models.BooleanField(default=True)
+    definition_digest = models.CharField(max_length=64, blank=True)
+    summary = models.CharField(max_length=200, blank=True)
+    created_by = models.CharField(max_length=100, blank=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    def __init__(self, *args, **kwargs):
+        definition = kwargs.pop('definition', None)
+        super().__init__(*args, **kwargs)
+        if definition is not None:
+            self.set_definition(definition)
+
+    def set_definition(self, value):
+        if not isinstance(value, (dict, list)):
+            raise ValueError('蓝图定义必须是对象或列表')
+        serialized = json.dumps(value, sort_keys=True, separators=(',', ':'))
+        self.definition_digest = hashlib.sha256(serialized.encode('utf-8')).hexdigest()
+
+    def safe_summary(self):
+        return {
+            'id': self.id,
+            'name': self.name,
+            'provider_type': self.provider_type,
+            'enabled': self.enabled,
+            'read_only': self.read_only,
+            'definition_digest': self.definition_digest,
+            'summary': self.summary,
+        }
+
+    class Meta:
+        db_table = 'devops_infrastructure_blueprint'
+        ordering = ['name', 'id']
+
+
+class InfrastructurePlan(models.Model):
+    STATUS_PENDING = 'pending'
+    STATUS_RUNNING = 'running'
+    STATUS_SUCCESS = 'success'
+    STATUS_FAILED = 'failed'
+    STATUS_BLOCKED = 'blocked'
+
+    blueprint = models.ForeignKey(InfrastructureBlueprint, on_delete=models.PROTECT, related_name='plans')
+    status = models.CharField(max_length=20, choices=CONTROLLED_INTEGRATION_STATUS_CHOICES, default='pending')
+    outcome_category = models.CharField(max_length=40, blank=True)
+    definition_digest = models.CharField(max_length=64, blank=True)
+    resource_count = models.PositiveIntegerField(default=0)
+    summary = models.CharField(max_length=200, blank=True)
+    requested_by = models.CharField(max_length=100, blank=True)
+    started_at = models.DateTimeField(default=timezone.now)
+    finished_at = models.DateTimeField(null=True, blank=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    def safe_summary(self):
+        return {
+            'id': self.id,
+            'blueprint_id': self.blueprint_id,
+            'status': self.status,
+            'outcome_category': self.outcome_category,
+            'definition_digest': self.definition_digest,
+            'resource_count': self.resource_count,
+            'summary': self.summary,
+            'created_at': self.created_at,
+        }
+
+    class Meta:
+        db_table = 'devops_infrastructure_plan'
+        ordering = ['-created_at', '-id']
+        indexes = [models.Index(fields=['blueprint', '-created_at'], name='devops_ip_blueprint_time_idx')]
 
 
 class ApprovalRequest(models.Model):

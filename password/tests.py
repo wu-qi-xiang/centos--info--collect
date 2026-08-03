@@ -1,4 +1,6 @@
 from django.test import TestCase
+from django.core.cache import cache
+from django.test import override_settings
 from django.urls import reverse
 
 from PyLinux.crypto import encrypt_text
@@ -26,6 +28,10 @@ class PasswordRevealTests(TestCase):
 			password=encrypt_text('secret-password'),
 			auther=self.user.user,
 		)
+
+	def tearDown(self):
+		cache.clear()
+		super().tearDown()
 
 	def test_password_list_does_not_render_plaintext_password(self):
 		response = self.client.get(reverse('password:password_manage'))
@@ -110,8 +116,47 @@ class PasswordRevealTests(TestCase):
 		response = self.client.post(reverse('password:password_reveal', args=[self.password.id]))
 
 		self.assertEqual(response.status_code, 200)
+		self.assertTrue(response.json()['ok'])
 		self.assertEqual(response.json()['password'], 'secret-password')
+		self.assertEqual(response['Cache-Control'], 'no-store')
+		self.assertEqual(response['Pragma'], 'no-cache')
+		self.assertEqual(response['X-Content-Type-Options'], 'nosniff')
 		self.assertTrue(AuditLog.objects.filter(action='查看密码', target_id=str(self.password.id)).exists())
+
+	@override_settings(PASSWORD_REVEAL_MAX_ATTEMPTS=1, PASSWORD_REVEAL_WINDOW_SECONDS=60)
+	def test_password_reveal_rate_limits_repeated_reads_without_returning_secret(self):
+		url = reverse('password:password_reveal', args=[self.password.id])
+		self.assertEqual(self.client.post(url).status_code, 200)
+
+		response = self.client.post(url)
+
+		self.assertEqual(response.status_code, 429)
+		self.assertEqual(response.json(), {
+			'ok': False,
+			'code': 'rate_limited',
+			'message': '凭据读取过于频繁，请稍后重试',
+		})
+		self.assertNotIn('secret-password', response.content.decode('utf-8'))
+
+	def test_password_reveal_does_not_allow_get(self):
+		response = self.client.get(reverse('password:password_reveal', args=[self.password.id]))
+
+		self.assertEqual(response.status_code, 405)
+
+	def test_password_reveal_is_scoped_to_owner(self):
+		other = User.objects.create(
+			user='other_pwd_user', email='other-pwd@example.com',
+			password='plain-password', confirm_pwd='plain-password',
+		)
+		other_password = Password.objects.create(
+			system_name='other-db', account='admin', password=encrypt_text('other-secret'),
+			auther=other.user,
+		)
+
+		response = self.client.post(reverse('password:password_reveal', args=[other_password.id]))
+
+		self.assertEqual(response.status_code, 404)
+		self.assertNotIn('other-secret', response.content.decode('utf-8'))
 
 	def test_password_create_records_audit(self):
 		response = self.client.post(reverse('password:password_create'), {
