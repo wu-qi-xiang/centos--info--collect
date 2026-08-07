@@ -226,6 +226,7 @@ python3 .codex/skills/centos-feature-dev/scripts/check_skill_links.py
 ### Frontend
 
 - Keep the app operational and dense, not marketing-oriented.
+- **Dashboard default style:** Build new or redesigned dashboards in the approved light, high-density observability-workspace style: a compact utility header, a summary metric row, live-data visualization/workspace panels, status side panels, and a resource detail table. Use restrained indigo as the action accent and semantic health colors; preserve real data labels and do not present snapshot values as historical trends or invented P95 metrics. Keep source selectors, filters, refresh actions, loading/error/empty states, and responsive desktop/mobile validation intact.
 - Coordinate template, static JS/CSS, and Python payload changes.
 - Keep CSRF behavior intact for POST forms and fetch calls.
 - Avoid remote CDN dependencies; prefer vendored/static assets already in the repo.

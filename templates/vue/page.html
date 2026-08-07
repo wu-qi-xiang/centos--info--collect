@@ -5,6 +5,9 @@
 
 {% block extra_css %}
 <link rel="stylesheet" href="{% static 'css/ops-vue-pages.css' %}?v=20260801-geist-control-plane-01">
+{% if vue_page_kind == "monitor-dashboard" %}
+<link rel="stylesheet" href="{% static 'css/monitor-command-center.css' %}?v=20260807-dense-observability">
+{% endif %}
 {# PromQL native-scroll cache baseline: 20260714-promql-scroll-width-sync #}
 {% if vue_page_kind == "webssh" %}
 <link rel="stylesheet" href="{% static 'xterm/css/xterm.css' %}">
@@ -29,5 +32,5 @@
 <script src="{% static 'xterm/js/xterm.js' %}"></script>
 {% endif %}
 <script src="{% static 'vendor/vue.global.prod.js' %}?v=3"></script>
-<script src="{% static 'js/ops-vue-pages.js' %}?v=20260801-geist-control-plane-01"></script>
+<script src="{% static 'js/ops-vue-pages.js' %}?v={% if vue_page_kind == "monitor-dashboard" %}20260807-monitor-dense-observability{% else %}20260801-geist-control-plane-01{% endif %}"></script>
 {% endblock %}

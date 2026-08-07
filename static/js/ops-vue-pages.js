@@ -897,6 +897,13 @@
             dashboardMetricText(value) {
                 return value === null || value === undefined ? '-' : Number(value).toFixed(1).replace(/\.0$/, '') + '%';
             },
+            dashboardAverage(rows, metric) {
+                const values = (Array.isArray(rows) ? rows : [])
+                    .map((row) => this.dashboardBarWidth(row[metric]));
+                if (!values.length) return '-';
+                const total = values.reduce((sum, value) => sum + value, 0);
+                return (total / values.length).toFixed(1).replace(/\.0$/, '') + '%';
+            },
             dashboardBarWidth(value) {
                 return value === null || value === undefined ? 0 : Math.max(0, Math.min(100, Number(value)));
             },
@@ -1788,7 +1795,53 @@
                     <div class="ops-card" v-for="item in data.items" :key="item.label"><div class="ops-card-label">[[ item.label ]]</div><div class="ops-card-value">[[ item.value ]]</div></div>
                 </section>
 
-                <section v-else-if="kind === 'monitor-dashboard'" class="fcc-shell" :aria-busy="dashboardLoading ? 'true' : 'false'">
+                <section v-else-if="kind === 'monitor-dashboard'" class="ops-monitor-overview" :aria-busy="dashboardLoading ? 'true' : 'false'">
+                    <header class="ops-monitor-topbar">
+                        <div class="ops-monitor-brand"><span class="ops-monitor-mark"><i class="fas fa-chart-line" aria-hidden="true"></i></span><div><strong>可观测性</strong><span>基础设施概览</span></div></div>
+                        <div class="ops-monitor-controls">
+                            <div class="ops-dashboard-select ops-monitor-source" :class="{ 'is-open': dashboardSelectMenu === 'prometheus' }" @keydown.esc="closeDashboardSelect">
+                                <button type="button" class="ops-dashboard-select-trigger" :disabled="dashboardLoading || !dashboardPrometheusConfigs.length" :aria-expanded="dashboardSelectMenu === 'prometheus' ? 'true' : 'false'" aria-haspopup="listbox" @click="toggleDashboardSelect('prometheus')"><i class="fas fa-satellite-dish" aria-hidden="true"></i><span>[[ dashboardFilterLabel('prometheus') ]]</span><i class="fas fa-chevron-down" aria-hidden="true"></i></button>
+                                <div v-if="dashboardSelectMenu === 'prometheus'" class="ops-dashboard-select-menu" role="listbox"><button v-for="option in dashboardFilterOptions('prometheus')" :key="option.value" type="button" class="ops-dashboard-select-option" :class="{ 'is-selected': option.value === dashboardFilterValue('prometheus') }" role="option" :aria-selected="option.value === dashboardFilterValue('prometheus') ? 'true' : 'false'" @click="chooseDashboardFilter('prometheus', option.value)">[[ option.label ]]</button></div>
+                            </div>
+                            <div class="ops-monitor-tabs" role="tablist" aria-label="资源视图"><button type="button" :class="{ 'is-active': dashboardTab === 'nodes' }" :aria-selected="dashboardTab === 'nodes' ? 'true' : 'false'" @click="setDashboardTab('nodes')"><i class="fas fa-server" aria-hidden="true"></i><span>节点</span></button><button type="button" :class="{ 'is-active': dashboardTab === 'pods' }" :aria-selected="dashboardTab === 'pods' ? 'true' : 'false'" @click="setDashboardTab('pods')"><i class="fas fa-cubes" aria-hidden="true"></i><span>Pod</span></button></div>
+                            <button type="button" class="ops-monitor-refresh" :disabled="dashboardLoading || !selectedDashboardPrometheus" @click="loadDashboard(true)"><i class="fas" :class="dashboardLoading ? 'fa-spinner fa-spin' : 'fa-sync-alt'" aria-hidden="true"></i><span>刷新数据</span></button>
+                        </div>
+                    </header>
+
+                    <section class="ops-monitor-heading"><div><h1>基础设施概览</h1><p>用高密度面板快速扫描节点、工作负载与资源使用状态。</p></div><span class="ops-monitor-source-status" :class="{ 'is-loading': dashboardLoading, 'is-error': dashboardError }"><i class="fas fa-circle" aria-hidden="true"></i>[[ dashboardError ? '数据暂不可用' : (dashboardLoading ? '正在更新数据' : 'Prometheus 数据已同步') ]]</span></section>
+
+                    <section class="ops-monitor-summary-grid" aria-label="监控摘要">
+                        <article><span>节点健康</span><strong>[[ dashboardData.hosts.length ]]</strong><em>已发现节点</em></article>
+                        <article><span>CPU 平均使用率</span><strong>[[ dashboardAverage(dashboardData.hosts, 'cpu') ]]</strong><em>当前快照</em></article>
+                        <article><span>内存平均使用率</span><strong>[[ dashboardAverage(dashboardData.hosts, 'memory') ]]</strong><em>当前快照</em></article>
+                        <article><span>工作负载</span><strong>[[ dashboardData.pods.length ]]</strong><em>活跃 Pod</em></article>
+                        <article><span>健康 Pod</span><strong>[[ dashboardHealthyPods ]]</strong><em>就绪信号</em></article>
+                    </section>
+
+                    <section v-if="dashboardLoading" class="ops-monitor-state" role="status"><i class="fas fa-spinner fa-spin" aria-hidden="true"></i><span>正在接收 Prometheus 指标</span></section>
+                    <section v-else-if="dashboardError" class="ops-monitor-state is-error" role="alert"><i class="fas fa-triangle-exclamation" aria-hidden="true"></i><span>看板数据暂时不可用，请稍后刷新</span></section>
+                    <section v-else-if="!dashboardPrometheusConfigs.length" class="ops-monitor-state"><i class="fas fa-plug" aria-hidden="true"></i><span>暂无已启用的 Prometheus 对接</span></section>
+
+                    <template v-else>
+                        <section class="ops-monitor-filterbar" aria-label="看板筛选">
+                            <div v-if="dashboardTab === 'nodes'" ref="dashboardNodeMultiSelect" class="ops-dashboard-node-filter ops-monitor-node-filter" @keydown.esc="closeDashboardNodeMenu"><span>目标节点</span><button type="button" class="ops-dashboard-node-trigger" :aria-expanded="dashboardNodeMenuOpen ? 'true' : 'false'" aria-haspopup="true" @click="toggleDashboardNodeMenu"><i class="fas fa-server" aria-hidden="true"></i><span>[[ dashboardNodeSelectionLabel ]]</span><i class="fas fa-chevron-down ops-dashboard-node-chevron" :class="{ 'is-open': dashboardNodeMenuOpen }" aria-hidden="true"></i></button><div v-if="dashboardNodeMenuOpen" class="ops-dashboard-node-menu" role="group" aria-label="选择节点"><div class="ops-dashboard-node-menu-actions"><button type="button" @click="selectAllDashboardNodes">全选</button><button type="button" @click="clearDashboardNodes">清空</button></div><div class="ops-dashboard-node-search"><i class="fas fa-search" aria-hidden="true"></i><input ref="dashboardNodeSearch" v-model="dashboardNodeQuery" type="search" autocomplete="off" placeholder="搜索节点"></div><label v-for="node in dashboardFilteredNodeOptions" :key="node" class="ops-dashboard-node-option"><input v-model="selectedDashboardNodes" type="checkbox" :value="node"><span>[[ node ]]</span></label><div v-if="!dashboardNodeOptions.length" class="ops-dashboard-node-menu-empty">暂无可用节点</div><div v-else-if="!dashboardFilteredNodeOptions.length" class="ops-dashboard-node-menu-empty">未找到匹配节点</div></div></div>
+                            <template v-else><div v-for="filter in dashboardPodFilterDefinitions" :key="filter.key" class="ops-dashboard-select ops-monitor-pod-filter" :class="{ 'is-open': dashboardSelectMenu === filter.key }" @keydown.esc="closeDashboardSelect"><span>[[ filter.label ]]</span><button type="button" class="ops-dashboard-select-trigger" :aria-expanded="dashboardSelectMenu === filter.key ? 'true' : 'false'" aria-haspopup="listbox" @click="toggleDashboardSelect(filter.key)"><span>[[ dashboardFilterLabel(filter.key) ]]</span><i class="fas fa-chevron-down" aria-hidden="true"></i></button><div v-if="dashboardSelectMenu === filter.key" class="ops-dashboard-select-menu" role="listbox"><button v-for="option in dashboardFilterOptions(filter.key)" :key="option.value" type="button" class="ops-dashboard-select-option" :class="{ 'is-selected': option.value === dashboardFilterValue(filter.key) }" role="option" :aria-selected="option.value === dashboardFilterValue(filter.key) ? 'true' : 'false'" @click="chooseDashboardFilter(filter.key, option.value)">[[ option.label ]]</button></div></div></template>
+                            <span class="ops-monitor-filter-count">[[ dashboardActiveRows.length ]] 个当前目标</span>
+                        </section>
+
+                        <section class="ops-monitor-workspace">
+                            <div class="ops-monitor-chart-grid">
+                                <article class="ops-monitor-chart"><header><div><h2>CPU 使用率分布</h2><span>当前节点资源快照</span></div><strong>[[ dashboardAverage(dashboardData.hosts, 'cpu') ]]</strong></header><div v-if="dashboardData.hosts.length" class="ops-monitor-bars"><div v-for="row in dashboardData.hosts.slice(0, 12)" :key="'cpu-' + row.id"><span :title="row.name">[[ row.name ]]</span><i><b :style="{ width: dashboardBarWidth(row.cpu) + '%' }"></b></i><strong>[[ dashboardMetricText(row.cpu) ]]</strong></div></div><div v-else class="ops-monitor-empty">暂无节点 CPU 指标</div></article>
+                                <article class="ops-monitor-chart"><header><div><h2>内存与磁盘分布</h2><span>当前节点资源快照</span></div><strong>[[ dashboardAverage(dashboardData.hosts, 'memory') ]]</strong></header><div v-if="dashboardData.hosts.length" class="ops-monitor-bars is-dual"><div v-for="row in dashboardData.hosts.slice(0, 12)" :key="'memory-' + row.id"><span :title="row.name">[[ row.name ]]</span><i><b :style="{ width: dashboardBarWidth(row.memory) + '%' }"></b></i><i class="is-disk"><b :style="{ width: dashboardBarWidth(row.disk) + '%' }"></b></i><strong>[[ dashboardMetricText(row.memory) ]]</strong></div></div><div v-else class="ops-monitor-empty">暂无节点内存指标</div><footer><span><i class="ops-monitor-legend is-memory"></i>内存</span><span><i class="ops-monitor-legend is-disk"></i>磁盘</span></footer></article>
+                            </div>
+                            <aside class="ops-monitor-sidepanels"><section><header><h2>资源状态</h2><span>[[ dashboardData.hosts.length ]] 个节点</span></header><div v-if="dashboardData.hosts.length" class="ops-monitor-status-list"><div v-for="row in dashboardData.hosts.slice(0, 5)" :key="'node-' + row.id"><i class="is-healthy"></i><div><strong>[[ row.name ]]</strong><small>CPU [[ dashboardMetricText(row.cpu) ]] · 内存 [[ dashboardMetricText(row.memory) ]]</small></div><span>正常</span></div></div><div v-else class="ops-monitor-empty">暂无节点数据</div></section><section><header><h2>工作负载状态</h2><span>[[ dashboardData.pods.length ]] 个 Pod</span></header><div v-if="dashboardData.pods.length" class="ops-monitor-status-list"><div v-for="row in dashboardData.pods.slice(0, 5)" :key="'pod-' + row.id"><i :class="dashboardStatusClass(row.status)"></i><div><strong>[[ row.name ]]</strong><small>[[ row.cluster ]] / [[ row.namespace ]]</small></div><span :class="dashboardStatusClass(row.status)">[[ dashboardStatusLabel(row.status) ]]</span></div></div><div v-else class="ops-monitor-empty">暂无 Pod 数据</div></section></aside>
+                        </section>
+
+                        <section class="ops-monitor-resource-table"><header><div><h2>资源明细</h2><span>按当前筛选展示实时资源快照</span></div><span>[[ dashboardActiveRows.length ]] 项</span></header><div class="ops-monitor-table-wrap"><table><thead><tr><th>资源</th><th>类型</th><th>CPU</th><th>内存</th><th v-if="dashboardTab === 'nodes'">磁盘</th><th>状态</th></tr></thead><tbody><tr v-for="row in dashboardActiveRows.slice(0, 50)" :key="'table-' + row.id"><td><strong>[[ row.name ]]</strong><small>[[ dashboardTab === 'nodes' ? '计算实例' : row.cluster + ' / ' + row.namespace ]]</small></td><td>[[ dashboardTab === 'nodes' ? '节点' : 'Pod' ]]</td><td><span class="ops-monitor-table-meter"><i><b :style="{ width: dashboardBarWidth(row.cpu) + '%' }"></b></i>[[ dashboardMetricText(row.cpu) ]]</span></td><td><span class="ops-monitor-table-meter"><i><b :style="{ width: dashboardBarWidth(row.memory) + '%' }"></b></i>[[ dashboardMetricText(row.memory) ]]</span></td><td v-if="dashboardTab === 'nodes'"><span class="ops-monitor-table-meter is-disk"><i><b :style="{ width: dashboardBarWidth(row.disk) + '%' }"></b></i>[[ dashboardMetricText(row.disk) ]]</span></td><td><span class="ops-monitor-status" :class="dashboardStatusClass(row.status)"><i></i>[[ dashboardStatusLabel(row.status) ]]</span></td></tr></tbody></table></div><div v-if="!dashboardActiveRows.length" class="ops-monitor-empty">当前筛选条件下没有可展示的资源</div></section>
+                    </template>
+                </section>
+
+                <section v-else-if="kind === 'monitor-dashboard-command-center'" class="fcc-shell" :aria-busy="dashboardLoading ? 'true' : 'false'">
                     <aside class="fcc-rail">
                         <div class="fcc-brand"><span class="fcc-brand-mark"><i class="fas fa-atom" aria-hidden="true"></i></span><div><b>中枢</b><span>控制台 / 01</span></div></div>
                         <div class="fcc-rail-line"></div>

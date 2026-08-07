@@ -285,3 +285,86 @@
     .ops-dashboard-kpis > div { min-height: 82px; }
     .ops-dashboard-kpis strong { font-size: 23px; }
 }
+
+/* Approved dense observability layout. It is isolated to the monitor dashboard. */
+.ops-vue-page:has(.ops-monitor-overview) {
+    padding: 0;
+    background: #f4f6f9;
+}
+.ops-monitor-overview {
+    min-height: calc(100vh - 104px);
+    color: #202633;
+    background: #f4f6f9;
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+}
+.ops-monitor-topbar {
+    display: flex;
+    min-height: 58px;
+    align-items: center;
+    justify-content: space-between;
+    gap: 16px;
+    border-bottom: 1px solid #e1e5eb;
+    padding: 9px 28px;
+    background: #fff;
+}
+.ops-monitor-brand, .ops-monitor-controls, .ops-monitor-tabs, .ops-monitor-heading,
+.ops-monitor-chart header, .ops-monitor-sidepanels header, .ops-monitor-resource-table > header,
+.ops-monitor-filterbar, .ops-monitor-status-list > div, .ops-monitor-table-meter,
+.ops-monitor-status, .ops-monitor-chart footer { display: flex; align-items: center; }
+.ops-monitor-brand { gap: 9px; min-width: 0; }
+.ops-monitor-mark { display: grid; width: 24px; height: 24px; place-items: center; border-radius: 6px; color: #fff; background: #4f5fe9; }
+.ops-monitor-brand div { display: grid; gap: 1px; }
+.ops-monitor-brand strong { font-size: 14px; line-height: 1.2; }
+.ops-monitor-brand span { color: #778093; font-size: 12px; }
+.ops-monitor-controls { justify-content: flex-end; gap: 8px; }
+.ops-monitor-source { width: 178px; }
+.ops-monitor-overview .ops-dashboard-select-trigger,
+.ops-monitor-overview .ops-dashboard-node-trigger {
+    min-height: 36px;
+    border: 1px solid #dfe3ea !important;
+    border-radius: 6px !important;
+    color: #343b48 !important;
+    background: #fff !important;
+    box-shadow: none !important;
+    font-size: 12px;
+}
+.ops-monitor-overview .ops-dashboard-select-trigger:hover,
+.ops-monitor-overview .ops-dashboard-select-trigger:focus-visible,
+.ops-monitor-overview .ops-dashboard-node-trigger:hover,
+.ops-monitor-overview .ops-dashboard-node-trigger:focus-visible { border-color: #8c96f7 !important; box-shadow: 0 0 0 3px rgba(79, 95, 233, .12) !important; }
+.ops-monitor-overview .ops-dashboard-select-menu,
+.ops-monitor-overview .ops-dashboard-node-menu { border: 1px solid #dfe3ea; border-radius: 6px; background: #fff; box-shadow: 0 12px 28px rgba(27, 35, 53, .14); }
+.ops-monitor-overview .ops-dashboard-select-option,
+.ops-monitor-overview .ops-dashboard-node-option { color: #3a4351; }
+.ops-monitor-overview .ops-dashboard-select-option:hover,
+.ops-monitor-overview .ops-dashboard-node-option:hover { color: #303bb8; background: #f0f1ff; }
+.ops-monitor-tabs { overflow: hidden; border: 1px solid #dfe3ea; border-radius: 6px; background: #fff; }
+.ops-monitor-tabs button { min-width: 56px; min-height: 34px; border: 0; color: #687386; background: transparent; font-size: 12px; }
+.ops-monitor-tabs button + button { border-left: 1px solid #e4e7ed; }
+.ops-monitor-tabs button.is-active { color: #3e4bd0; background: #f0f1ff; font-weight: 700; }
+.ops-monitor-tabs i { margin-right: 5px; }
+.ops-monitor-refresh { min-height: 36px; border: 1px solid #4f5fe9; border-radius: 6px; padding: 0 11px; color: #fff; background: #4f5fe9; font-size: 12px; font-weight: 700; }
+.ops-monitor-refresh:disabled { opacity: .6; cursor: wait; }
+.ops-monitor-refresh i { margin-right: 5px; }
+.ops-monitor-heading, .ops-monitor-summary-grid, .ops-monitor-filterbar, .ops-monitor-workspace, .ops-monitor-resource-table { max-width: 1420px; margin-right: auto; margin-left: auto; }
+.ops-monitor-heading { justify-content: space-between; gap: 16px; padding: 25px 28px 16px; }
+.ops-monitor-heading h1 { margin: 0 0 4px; font-size: 23px; line-height: 1.2; font-weight: 700; }
+.ops-monitor-heading p { margin: 0; color: #687386; font-size: 13px; }
+.ops-monitor-source-status { flex: 0 0 auto; color: #16845b; font-size: 12px; font-weight: 600; }
+.ops-monitor-source-status i { margin-right: 6px; font-size: 8px; }
+.ops-monitor-source-status.is-loading { color: #a86c13; }.ops-monitor-source-status.is-error { color: #c3384e; }
+.ops-monitor-summary-grid { display: grid; grid-template-columns: repeat(5, minmax(0, 1fr)); gap: 10px; padding: 0 28px 12px; }
+.ops-monitor-summary-grid article { display: grid; min-height: 100px; align-content: center; gap: 6px; border: 1px solid #dfe3ea; border-radius: 7px; padding: 14px; background: #fff; }
+.ops-monitor-summary-grid span, .ops-monitor-summary-grid em { color: #697487; font-size: 12px; font-style: normal; }
+.ops-monitor-summary-grid strong { color: #222938; font-size: 25px; line-height: 1; }.ops-monitor-summary-grid em { color: #15825b; }
+.ops-monitor-state { display: flex; min-height: 160px; align-items: center; justify-content: center; gap: 9px; margin: 0 28px 12px; border: 1px solid #dfe3ea; border-radius: 7px; color: #627085; background: #fff; }.ops-monitor-state.is-error { color: #c3384e; }
+.ops-monitor-filterbar { position: relative; z-index: 20; display: flex; min-height: 55px; align-items: center; gap: 10px; padding: 8px 28px; }
+.ops-monitor-node-filter, .ops-monitor-pod-filter { position: relative; display: flex; align-items: center; gap: 8px; }.ops-monitor-node-filter > span, .ops-monitor-pod-filter > span { color: #697487; font-size: 12px; }.ops-monitor-node-filter .ops-dashboard-node-trigger { min-width: 220px; }.ops-monitor-filter-count { margin-left: auto; color: #697487; font-size: 12px; }
+.ops-monitor-workspace { display: grid; grid-template-columns: minmax(0, 1fr) 304px; gap: 12px; padding: 0 28px 12px; }
+.ops-monitor-chart-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 12px; }.ops-monitor-chart, .ops-monitor-sidepanels section, .ops-monitor-resource-table { border: 1px solid #dfe3ea; border-radius: 7px; background: #fff; }
+.ops-monitor-chart { display: grid; min-height: 276px; grid-template-rows: auto 1fr auto; padding: 16px; }.ops-monitor-chart header, .ops-monitor-sidepanels header, .ops-monitor-resource-table > header { justify-content: space-between; gap: 12px; }.ops-monitor-chart h2, .ops-monitor-sidepanels h2, .ops-monitor-resource-table h2 { margin: 0; color: #252d3b; font-size: 14px; font-weight: 700; }.ops-monitor-chart header span, .ops-monitor-sidepanels header span, .ops-monitor-resource-table header span { color: #788396; font-size: 11px; }.ops-monitor-chart header > strong { color: #4857dc; font-size: 14px; }
+.ops-monitor-bars { display: grid; align-content: center; gap: 10px; padding: 14px 0; }.ops-monitor-bars > div { display: grid; grid-template-columns: minmax(66px, .75fr) minmax(70px, 2fr) 45px; align-items: center; gap: 8px; }.ops-monitor-bars > div > span { overflow: hidden; color: #4f596b; font-size: 11px; text-overflow: ellipsis; white-space: nowrap; }.ops-monitor-bars > div > i, .ops-monitor-table-meter > i { display: block; height: 7px; overflow: hidden; border-radius: 999px; background: #e8ebf2; }.ops-monitor-bars > div > i > b, .ops-monitor-table-meter > i > b { display: block; height: 100%; border-radius: inherit; background: #5566e9; }.ops-monitor-bars > div > strong { color: #5c6677; font-size: 11px; font-weight: 600; text-align: right; }.ops-monitor-bars.is-dual > div { grid-template-columns: minmax(52px, .62fr) minmax(48px, 1fr) minmax(48px, 1fr) 42px; }.ops-monitor-bars.is-dual .is-disk b { background: #2e8da5; }.ops-monitor-chart footer { gap: 14px; color: #778296; font-size: 11px; }.ops-monitor-legend { display: inline-block; width: 7px; height: 7px; margin-right: 4px; border-radius: 50%; background: #5566e9; }.ops-monitor-legend.is-disk { background: #2e8da5; }
+.ops-monitor-sidepanels { display: grid; gap: 12px; }.ops-monitor-sidepanels section { padding: 15px; }.ops-monitor-sidepanels header { padding-bottom: 11px; border-bottom: 1px solid #e7eaf0; }.ops-monitor-status-list { display: grid; }.ops-monitor-status-list > div { min-width: 0; gap: 8px; padding: 10px 0; }.ops-monitor-status-list > div + div { border-top: 1px solid #eff1f5; }.ops-monitor-status-list > div > i { flex: 0 0 auto; width: 7px; height: 7px; border-radius: 50%; background: #a8afbd; }.ops-monitor-status-list > div > i.is-healthy, .ops-monitor-status-list > div > i.is-healthy { background: #27a574; }.ops-monitor-status-list > div > i.is-warning { background: #ca8516; }.ops-monitor-status-list > div > i.is-critical { background: #d74759; }.ops-monitor-status-list > div > div { display: grid; min-width: 0; gap: 3px; }.ops-monitor-status-list strong { overflow: hidden; color: #303848; font-size: 12px; text-overflow: ellipsis; white-space: nowrap; }.ops-monitor-status-list small { overflow: hidden; color: #798396; font-size: 10px; text-overflow: ellipsis; white-space: nowrap; }.ops-monitor-status-list > div > span { margin-left: auto; color: #208b63; font-size: 10px; }.ops-monitor-status-list > div > span.is-warning { color: #a76a0d; }.ops-monitor-status-list > div > span.is-critical { color: #c43c4d; }
+.ops-monitor-resource-table { margin-bottom: 28px; padding: 16px; }.ops-monitor-resource-table > header { padding-bottom: 13px; }.ops-monitor-resource-table > header > span { color: #697487; font-size: 12px; }.ops-monitor-table-wrap { overflow-x: auto; }.ops-monitor-resource-table table { width: 100%; min-width: 650px; border-collapse: collapse; }.ops-monitor-resource-table th { padding: 9px 10px; border-bottom: 1px solid #e2e6ed; color: #788396; font-size: 11px; font-weight: 600; text-align: left; }.ops-monitor-resource-table td { padding: 11px 10px; border-bottom: 1px solid #edf0f4; color: #5f697a; font-size: 12px; }.ops-monitor-resource-table tbody tr:last-child td { border-bottom: 0; }.ops-monitor-resource-table td strong, .ops-monitor-resource-table td small { display: block; }.ops-monitor-resource-table td strong { color: #313a49; font-size: 12px; }.ops-monitor-resource-table td small { margin-top: 3px; color: #8a93a3; font-size: 10px; }.ops-monitor-table-meter { gap: 7px; min-width: 114px; color: #5b6576; font-size: 11px; }.ops-monitor-table-meter > i { width: 54px; height: 6px; }.ops-monitor-table-meter.is-disk b { background: #2e8da5; }.ops-monitor-status { gap: 5px; color: #637083; font-size: 11px; }.ops-monitor-status i { width: 7px; height: 7px; border-radius: 50%; background: currentColor; }.ops-monitor-status.is-healthy { color: #208b63; }.ops-monitor-status.is-warning { color: #a76a0d; }.ops-monitor-status.is-critical { color: #c43c4d; }.ops-monitor-empty { display: flex; min-height: 70px; align-items: center; justify-content: center; color: #7d8798; font-size: 12px; }
+@media (max-width: 980px) { .ops-monitor-summary-grid { grid-template-columns: repeat(3, minmax(0, 1fr)); }.ops-monitor-workspace { grid-template-columns: 1fr; }.ops-monitor-sidepanels { grid-template-columns: repeat(2, minmax(0, 1fr)); } }
+@media (max-width: 760px) { .ops-monitor-topbar { align-items: flex-start; flex-direction: column; padding: 10px 14px; }.ops-monitor-controls { width: 100%; justify-content: flex-start; flex-wrap: wrap; }.ops-monitor-source { flex: 1 1 160px; }.ops-monitor-heading { align-items: flex-start; flex-direction: column; padding: 18px 14px 12px; }.ops-monitor-summary-grid, .ops-monitor-filterbar, .ops-monitor-workspace { padding-right: 14px; padding-left: 14px; }.ops-monitor-summary-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 8px; }.ops-monitor-summary-grid article { min-height: 82px; padding: 12px; }.ops-monitor-summary-grid strong { font-size: 22px; }.ops-monitor-filterbar { align-items: flex-start; flex-wrap: wrap; }.ops-monitor-node-filter { width: 100%; }.ops-monitor-node-filter .ops-dashboard-node-trigger { flex: 1; min-width: 0; }.ops-monitor-filter-count { width: 100%; margin-left: 0; }.ops-monitor-chart-grid, .ops-monitor-sidepanels { grid-template-columns: 1fr; }.ops-monitor-chart { min-height: 230px; }.ops-monitor-resource-table { margin: 0 14px 18px; padding: 13px; }.ops-monitor-state { margin-right: 14px; margin-left: 14px; } }

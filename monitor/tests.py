@@ -2569,6 +2569,9 @@ class MonitorDashboardTests(TestCase):
 		self.assertEqual(data['prometheus_configs'], [{'id': enabled.id, 'name': '主集群'}])
 		self.assertEqual(data['selected_prometheus_id'], enabled.id)
 		self.assertEqual(data['dashboard_url'], reverse('monitor:monitor_dashboard_data'))
+		self.assertContains(response, 'css/monitor-command-center.css')
+		self.assertContains(response, 'monitor-command-center.css?v=20260807-dense-observability')
+		self.assertContains(response, 'ops-vue-pages.js?v=20260807-monitor-dense-observability')
 
 		session = self.client.session
 		session.clear()
@@ -2595,6 +2598,20 @@ class MonitorDashboardTests(TestCase):
 		self.assertIn('display: flex;', css_source)
 		self.assertIn('width: 100%;', css_source)
 		self.assertIn('white-space: nowrap;', css_source)
+
+	def test_dashboard_frontend_uses_dense_observability_sections(self):
+		with open('static/js/ops-vue-pages.js', 'r') as handle:
+			vue_source = handle.read()
+		with open('static/css/monitor-command-center.css', 'r') as handle:
+			css_source = handle.read()
+
+		for marker in (
+			'ops-monitor-overview', 'ops-monitor-summary-grid',
+			'ops-monitor-chart-grid', 'ops-monitor-resource-table',
+		):
+			self.assertIn(marker, vue_source)
+		self.assertIn('.ops-monitor-overview {', css_source)
+		self.assertIn('@media (max-width: 760px)', css_source)
 
 	@mock.patch('monitor.views.query_prometheus_dashboard')
 	def test_dashboard_data_requires_post_and_selected_enabled_config(self, query_dashboard):
