@@ -49,6 +49,7 @@ python manage.py runserver 0.0.0.0:8000
 - `DEVOPS_COMMAND_TIMEOUT_SECONDS`
 - `DEVOPS_COMMAND_OUTPUT_MAX_BYTES`
 - `WEBSSH_SESSION_TIMEOUT_SECONDS`
+- `WECOM_CHATOPS_WEBHOOK_SECRET`
 - `AUDIT_LOG_RETENTION_DAYS`
 - `METRIC_SAMPLE_RETENTION_DAYS`
 - `AIOPS_ANALYSIS_RETENTION_DAYS`
@@ -109,7 +110,7 @@ SQLite 部署只需启动一个 Worker；多个 Worker 需要使用支持并发�
 
 远程监控采集会写入 `MetricSample` 指标样本，用于 DevOps 监控历史和 AIOps 容量分析。`METRIC_SAMPLE_RETENTION_DAYS` 控制样本保留天数，默认 `30` 天；设置为 `0` 表示不自动清理。定时监控任务每次运行后会清理超过保留期的指标样本，不删除告警事件、告警历史或审计日志。服务 SLO 每五分钟保存一次仅含状态和摘要的评估历史；`SERVICE_SLO_EVALUATION_RETENTION_DAYS` 控制其保留期，默认 `90` 天，必须为正整数，定时评估后会自动清理超期记录。
 
-Alertmanager 接入只保留告警名称、级别、实例、允许的服务标签和经过净化的摘要，不保存原始 webhook 请求或大模型原始响应。P0 迁移会不可逆地清除已有原始告警、提供方响应和历史分析文本；生产操作员必须在迁移前按既有恢复流程完成受控备份。`AIOPS_ANALYSIS_RETENTION_DAYS` 控制分析记录保留天数，默认 `90` 天；设置为 `0` 表示不自动清理。可通过 `python manage.py cleanup_aiops_analyses` 清理超期记录，命令仅输出删除数量。
+Alertmanager 接入只保留告警名称、级别、实例、允许的服务标签和经过净化的摘要，不保存原始 webhook 请求或大模型原始响应。接入配置仅允许具有告警模块管理员权限的账号修改；其他已登录用户只能查看脱敏状态。P0 迁移会不可逆地清除已有原始告警、提供方响应和历史分析文本；生产操作员必须在迁移前按既有恢复流程完成受控备份。`AIOPS_ANALYSIS_RETENTION_DAYS` 控制分析记录保留天数，默认 `90` 天；设置为 `0` 表示不自动清理。可通过 `python manage.py cleanup_aiops_analyses` 清理超期记录，命令仅输出删除数量。
 
 ## 监控对接
 
@@ -144,7 +145,15 @@ DevOps“安全策略”页面支持服务运行状态和文件 SHA-256 合规�
 
 ## 企业微信机器人处置入口
 
-企业微信群机器人仅用于出站告警和审批通知，不接收回调、不授予权限、不执行命令。设置 HTTPS `PLATFORM_PUBLIC_BASE_URL` 后，审批通知会附带默认有效期 900 秒的签名跳转链接；访问者仍必须登录，并通过现有审批角色与主机范围校验。`WECOM_APPROVAL_LINK_TTL_SECONDS` 控制链接有效期；未配置公开基址时保持既有纯文本通知。
+企业微信群机器人继续用于出站告警和审批通知。设置 HTTPS `PLATFORM_PUBLIC_BASE_URL` 后，审批通知会附带默认有效期 900 秒的签名跳转链接；访问者仍必须登录，并通过现有审批角色与主机范围校验。`WECOM_APPROVAL_LINK_TTL_SECONDS` 控制链接有效期；未配置公开基址时保持既有纯文本通知。
+
+受控入站 ChatOps 由 `WECOM_CHATOPS_WEBHOOK_SECRET` 单独启用，留空即禁用。该值必须至少 32 个字符，部署环境使用 `X-WeCom-Signature: sha256=<原始请求体 HMAC-SHA256>` 签名。每个企业微信用户 ID 必须先由管理员绑定到一个本地账号，并可通过停用该绑定立即撤销。入口只接受 `service_status`、`pending_approvals`、`acknowledge_alert`、`approval_link`、`runbook_link` 五种固定动作，并复用本地账号的模块权限和主机范围；它不会执行命令、发布、回滚或运行手册。系统不保存原始请求、签名、密钥或消息内容，审计仅包含动作、目标标识和结果。
+
+## Host Agent 健康告警
+
+Host Agent 只允许向 `/api/agent/heartbeat/` 提交经校验的出站心跳和受限系统摘要。调度器每 `DEVOPS_SCHEDULER_AGENT_HEALTH_INTERVAL_SECONDS` 秒（默认 60 秒）检查已注册且未吊销的 Agent；若自最后心跳（首次注册前以注册时间计）超过 `AGENT_HEARTBEAT_TIMEOUT_SECONDS` 秒（默认 600 秒），会创建 `agent_heartbeat` 严重告警。采集延迟超过同一阈值则创建警告级告警，下一次健康心跳会关闭该告警。被吊销的 Agent 不参与健康评估。
+
+具备安全模块 operator 权限且拥有相应主机范围的用户可从 Agent 运营页查看安全元数据、批量吊销可见 Agent，或对单台可见主机轮换注册凭据。轮换凭据只在该次 POST 响应中返回，平台不会在页面、审计或日志中保存其明文。
 
 ## 漏洞与 GitOps 发现
 

@@ -323,6 +323,47 @@ body.ops-console.auth-page {
     place-items: center;
     background: #fafafa !important;
 }
+
+/* Standalone, unauthenticated public service-status surface. */
+body.public-status-page {
+    --public-rule: #eaeaea;
+    --public-ink: #111111;
+    --public-muted: #6b6b6b;
+    margin: 0;
+    color: var(--public-ink);
+    background: #ffffff;
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+}
+.public-status-shell { width: min(100% - 32px, 960px); margin: 0 auto; padding: 48px 0 64px; }
+.public-status-header { display: flex; align-items: flex-start; justify-content: space-between; gap: 24px; padding-bottom: 28px; border-bottom: 1px solid var(--public-rule); }
+.public-status-kicker { margin: 0 0 8px; color: var(--public-muted); font-size: 11px; font-weight: 700; letter-spacing: .08em; }
+.public-status-header h1 { margin: 0; font-size: 28px; font-weight: 650; line-height: 1.25; }
+.public-status-updated { margin: 8px 0 0; color: var(--public-muted); font-size: 13px; }
+.public-status-section-title { display: flex; align-items: center; justify-content: space-between; gap: 16px; padding: 28px 0 12px; color: var(--public-muted); font-size: 12px; }
+.public-status-section-title h2 { margin: 0; color: var(--public-ink); font-size: 15px; font-weight: 650; }
+.public-service-list, .public-status-panel { border: 1px solid var(--public-rule); border-radius: 6px; overflow: hidden; }
+.public-service-row, .public-event-row { display: flex; align-items: center; justify-content: space-between; gap: 16px; min-height: 64px; padding: 12px 16px; border-bottom: 1px solid var(--public-rule); }
+.public-service-row:last-child, .public-event-row:last-child { border-bottom: 0; }
+.public-service-row h3, .public-event-row h3 { margin: 0; font-size: 14px; font-weight: 600; }
+.public-service-meta { display: flex; align-items: center; justify-content: flex-end; gap: 12px; color: var(--public-muted); font-size: 13px; }
+.public-state { display: inline-flex; align-items: center; min-height: 24px; padding: 3px 8px; border: 1px solid #e2e2e2; border-radius: 999px; font-size: 12px; font-weight: 600; line-height: 16px; white-space: nowrap; }
+.public-state-operational { color: #08763b; background: #edfaf1; border-color: #bce9ca; }
+.public-state-degraded { color: #9a4d00; background: #fff7e8; border-color: #f5d6a2; }
+.public-state-maintenance { color: #0059c9; background: #edf6ff; border-color: #c7e3ff; }
+.public-status-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 24px; }
+.public-event-row { align-items: flex-start; min-height: 72px; }
+.public-event-row p { margin: 5px 0 0; color: var(--public-muted); font-size: 12px; }
+.public-event-row time { color: var(--public-muted); font-size: 12px; white-space: nowrap; }
+.public-empty-state { margin: 0; padding: 18px 16px; color: var(--public-muted); font-size: 13px; }
+
+@media (max-width: 640px) {
+    .public-status-shell { width: min(100% - 24px, 960px); padding-top: 28px; }
+    .public-status-header, .public-service-row, .public-event-row { align-items: flex-start; flex-direction: column; }
+    .public-status-header { gap: 14px; }
+    .public-service-meta { justify-content: flex-start; flex-wrap: wrap; }
+    .public-status-grid { grid-template-columns: 1fr; gap: 0; }
+    .public-event-row { gap: 6px; }
+}
 body.ops-console .auth-shell { width: min(100%, 960px); grid-template-columns: minmax(0, 1.2fr) minmax(340px, .8fr); gap: 48px; }
 body.ops-console .auth-panel { padding: 16px; color: var(--geist-muted); }
 body.ops-console .auth-panel h1 { max-width: 500px; font-size: 28px; line-height: 1.25; }

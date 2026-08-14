@@ -99,10 +99,33 @@
                         </li>
                     </ul>
                 </li>
-                <li class="nav-item">
-                    <a class="nav-link" href="{% url 'devops:dashboard' %}">
-                        <i class="fas fa-tools"></i><span>DevOps</span>
-                    </a>
+                {% if devops_navigation.can_view_command or devops_navigation.can_view_task or devops_navigation.can_view_file %}
+                <li class="nav-item sidebar-nav-group">
+                    <div class="sidebar-parent-row"><a class="nav-link sidebar-parent-link" href="{% url 'devops:command_center' %}"><i class="fas fa-bolt" aria-hidden="true"></i><span>DevOps 执行中心</span></a><button class="sidebar-disclosure" type="button" aria-label="展开 DevOps 执行中心" aria-expanded="false" aria-controls="sidebar-devops-execution-subnav"><i class="fas fa-chevron-down" aria-hidden="true"></i></button></div>
+                    <ul class="sidebar-subnav" id="sidebar-devops-execution-subnav">
+                        {% if devops_navigation.can_view_command %}<li><a class="nav-link sidebar-subnav-link" href="{% url 'devops:command_center' %}"><i class="fas fa-terminal"></i><span>命令执行</span></a></li>{% endif %}
+                        {% if devops_navigation.can_view_task %}<li><a class="nav-link sidebar-subnav-link" href="{% url 'devops:batch_tasks' %}"><i class="fas fa-layer-group"></i><span>批量任务</span></a></li>{% endif %}
+                        {% if devops_navigation.can_view_file %}<li><a class="nav-link sidebar-subnav-link" href="{% url 'devops:file_distributions' %}"><i class="fas fa-file-arrow-up"></i><span>文件分发</span></a></li>{% endif %}
+                    </ul>
+                </li>
+                {% endif %}
+                {% if devops_navigation.can_view_deployment or devops_navigation.can_view_cluster %}
+                <li class="nav-item sidebar-nav-group">
+                    <div class="sidebar-parent-row"><a class="nav-link sidebar-parent-link" href="{% url 'devops:deployments' %}"><i class="fas fa-truck-fast" aria-hidden="true"></i><span>DevOps 发布交付</span></a><button class="sidebar-disclosure" type="button" aria-label="展开 DevOps 发布交付" aria-expanded="false" aria-controls="sidebar-devops-delivery-subnav"><i class="fas fa-chevron-down" aria-hidden="true"></i></button></div>
+                    <ul class="sidebar-subnav" id="sidebar-devops-delivery-subnav">
+                        {% if devops_navigation.can_view_deployment %}<li><a class="nav-link sidebar-subnav-link" href="{% url 'devops:deployments' %}"><i class="fas fa-rocket"></i><span>发布部署</span></a></li>{% endif %}
+                        {% if devops_navigation.can_view_cluster %}<li><a class="nav-link sidebar-subnav-link" href="{% url 'devops:prometheus_rules' %}"><i class="fas fa-code-branch"></i><span>PrometheusRule</span></a></li>{% endif %}
+                    </ul>
+                </li>
+                {% endif %}
+                <li class="nav-item sidebar-nav-group">
+                    <div class="sidebar-parent-row"><a class="nav-link sidebar-parent-link" href="{% url 'devops:dashboard' %}"><i class="fas fa-compass" aria-hidden="true"></i><span>DevOps 运维治理</span></a><button class="sidebar-disclosure" type="button" aria-label="展开 DevOps 运维治理" aria-expanded="false" aria-controls="sidebar-devops-governance-subnav"><i class="fas fa-chevron-down" aria-hidden="true"></i></button></div>
+                    <ul class="sidebar-subnav" id="sidebar-devops-governance-subnav">
+                        <li><a class="nav-link sidebar-subnav-link" href="{% url 'devops:dashboard' %}"><i class="fas fa-gauge-high"></i><span>工作台概览</span></a></li>
+                        {% if devops_navigation.can_view_service %}<li><a class="nav-link sidebar-subnav-link" href="{% url 'devops:service_topology' %}"><i class="fas fa-sitemap"></i><span>服务治理</span></a></li>{% endif %}
+                        {% if devops_navigation.can_view_alert %}<li><a class="nav-link sidebar-subnav-link" href="{% url 'devops:alert_events' %}"><i class="fas fa-triangle-exclamation"></i><span>告警与事件</span></a></li>{% endif %}
+                        {% if devops_navigation.can_view_audit %}<li><a class="nav-link sidebar-subnav-link" href="{% url 'devops:audit_logs' %}"><i class="fas fa-clipboard-list"></i><span>审计日志</span></a></li>{% endif %}
+                    </ul>
                 </li>
                 {% if devops_navigation.can_view_cluster %}
                 <li class="nav-item sidebar-nav-group">
@@ -138,10 +161,19 @@
                     </ul>
                 </li>
                 {% endif %}
-                <li class="nav-item">
-                    <a class="nav-link" href="{% url 'aiops:dashboard' %}">
-                        <i class="fas fa-brain"></i><span>AIOps</span>
-                    </a>
+                <li class="nav-item sidebar-nav-group">
+                    <div class="sidebar-parent-row"><a class="nav-link sidebar-parent-link" href="{% url 'aiops:dashboard' %}#analysis"><i class="fas fa-chart-line" aria-hidden="true"></i><span>AIOps 运维分析</span></a><button class="sidebar-disclosure" type="button" aria-label="展开 AIOps 运维分析" aria-expanded="false" aria-controls="sidebar-aiops-analysis-subnav"><i class="fas fa-chevron-down" aria-hidden="true"></i></button></div>
+                    <ul class="sidebar-subnav" id="sidebar-aiops-analysis-subnav">
+                        <li><a class="nav-link sidebar-subnav-link" href="{% url 'aiops:dashboard' %}"><i class="fas fa-gauge-high"></i><span>分析工作台</span></a></li>
+                        <li><a class="nav-link sidebar-subnav-link" href="{% url 'aiops:dashboard' %}#analysis"><i class="fas fa-wave-square"></i><span>异常与关联</span></a></li>
+                    </ul>
+                </li>
+                <li class="nav-item sidebar-nav-group">
+                    <div class="sidebar-parent-row"><a class="nav-link sidebar-parent-link" href="{% url 'aiops:dashboard' %}#investigation"><i class="fas fa-magnifying-glass-chart" aria-hidden="true"></i><span>AIOps 事件调查</span></a><button class="sidebar-disclosure" type="button" aria-label="展开 AIOps 事件调查" aria-expanded="false" aria-controls="sidebar-aiops-investigation-subnav"><i class="fas fa-chevron-down" aria-hidden="true"></i></button></div>
+                    <ul class="sidebar-subnav" id="sidebar-aiops-investigation-subnav">
+                        <li><a class="nav-link sidebar-subnav-link" href="{% url 'aiops:dashboard' %}#investigation"><i class="fas fa-timeline"></i><span>事件研判</span></a></li>
+                        <li><a class="nav-link sidebar-subnav-link" href="{% url 'aiops:dashboard' %}#diagnostic"><i class="fas fa-stethoscope"></i><span>诊断证据</span></a></li>
+                    </ul>
                 </li>
             </ul>
         </div>

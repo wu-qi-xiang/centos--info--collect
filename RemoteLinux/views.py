@@ -1,6 +1,7 @@
 #coding-utf-8
 # 增加webssh功能
 import csv
+import json
 from .websocket import accept_websocket
 from threading import Thread
 import time
@@ -14,13 +15,18 @@ from django.urls import reverse
 from django.shortcuts import get_object_or_404, render, redirect
 from django.http import HttpResponse, HttpResponseNotAllowed, JsonResponse
 from django.core.paginator import Paginator
+from django.db import transaction
 from django.db.models import Q
+from django.utils import timezone
+from django.views.decorators.csrf import csrf_exempt
 from PyLinux.crypto import decrypt_text, encrypt_text
 from PyLinux.security import require_command_operator, require_host_access, require_host_operator, security_context
 from PyLinux.vue import form_errors, model_dict, render_vue_page
 from .collectors import collect_remote_detail
 from .forms import LinuxPostForm
-from .models import NewLinux
+from .agent import MAX_HEARTBEAT_BYTES, create_host_agent, ingest_heartbeat, revoke_host_agent
+from .agent_health import _health_state
+from .models import HostAgent, NewLinux
 from .ssh_utils import create_host_ssh_client, create_ssh_client, describe_ssh_error
 from devops.models import DevOpsHostScope, HostGroup
 from devops.services import audit, has_explicit_admin_role, visible_hosts_for_request
@@ -621,6 +627,189 @@ def server_status(request, id):
     finally:
         if ssh:
             ssh.close()
+
+
+@session_login_required
+def agent_management(request, id):
+    """Render host-scoped Agent status. Credential material is never rendered."""
+    if request.method != 'GET':
+        return HttpResponseNotAllowed(['GET'])
+    host = get_object_or_404(NewLinux, id=id)
+    denied = require_host_operator(request, host)
+    if denied:
+        return denied
+    try:
+        agent = host.agent
+    except HostAgent.DoesNotExist:
+        agent = None
+    return render(request, 'linux/agent_management.html', {
+        'host': host,
+        'agent': agent,
+        'agent_summary': agent.system_summary if agent else {},
+    })
+
+
+@session_login_required
+def agent_register(request, id):
+    """Issue an Agent registration credential once in the creation response."""
+    if request.method != 'POST':
+        return HttpResponseNotAllowed(['POST'])
+    host = get_object_or_404(NewLinux, id=id)
+    denied = require_host_operator(request, host)
+    if denied:
+        return denied
+    agent, credential = create_host_agent(host)
+    audit(request, '注册主机Agent', 'HostAgent', agent.id, '主机=%s' % host.id)
+    return JsonResponse({
+        'registration_id': agent.registration_id,
+        'credential': credential,
+        'authorization_format': 'Bearer <registration_id>.<credential>',
+    }, status=201)
+
+
+@session_login_required
+def agent_revoke(request, id):
+    if request.method != 'POST':
+        return HttpResponseNotAllowed(['POST'])
+    host = get_object_or_404(NewLinux, id=id)
+    denied = require_host_operator(request, host)
+    if denied:
+        return denied
+    try:
+        agent = host.agent
+    except HostAgent.DoesNotExist:
+        return JsonResponse({'status': 'missing'}, status=404)
+    revoke_host_agent(agent)
+    audit(request, '吊销主机Agent', 'HostAgent', agent.id, '主机=%s' % host.id)
+    return JsonResponse({'status': 'revoked'})
+
+
+@csrf_exempt
+def agent_heartbeat(request):
+    """Unauthenticated endpoint protected by bearer registration credentials."""
+    if request.method != 'POST':
+        return HttpResponseNotAllowed(['POST'])
+    if len(request.body) > MAX_HEARTBEAT_BYTES:
+        return JsonResponse({'status': 'invalid_payload'}, status=400)
+    try:
+        payload = json.loads(request.body.decode('utf-8'))
+    except (UnicodeDecodeError, ValueError):
+        return JsonResponse({'status': 'invalid_payload'}, status=400)
+    result = ingest_heartbeat(request.META.get('HTTP_AUTHORIZATION'), payload)
+    if not result.ok:
+        status = 401 if result.code == 'unauthorized' else 400
+        return JsonResponse({'status': result.code}, status=status)
+    return JsonResponse({'status': 'accepted'})
+
+
+AGENT_FLEET_STATES = ('healthy', 'stale', 'offline', 'revoked')
+
+
+def _fleet_health_state(agent, now, timeout_seconds):
+    # Registration is not evidence of connectivity: a fleet row is offline
+    # until the Agent has delivered at least one authenticated heartbeat.
+    if not agent.is_revoked and agent.last_heartbeat_at is None:
+        return 'offline'
+    return _health_state(agent, now, timeout_seconds)
+
+
+def _agent_fleet_rows(request, selected_state=''):
+    now = timezone.now()
+    timeout_seconds = getattr(settings, 'AGENT_HEARTBEAT_TIMEOUT_SECONDS', 600)
+    agents = HostAgent.objects.select_related('host').filter(
+        host__in=visible_hosts_for_request(request),
+    ).order_by('host__linux_name', 'host_id')
+    rows = []
+    for agent in agents:
+        state = _fleet_health_state(agent, now, timeout_seconds)
+        if selected_state and state != selected_state:
+            continue
+        rows.append({
+            'host_id': agent.host_id,
+            'host_name': agent.host.linux_name or '未命名主机',
+            'state': state,
+            'last_heartbeat_at': agent.last_heartbeat_at,
+            'collection_delay_seconds': agent.collection_delay_seconds,
+            'agent_version': agent.agent_version,
+        })
+    return rows
+
+
+@session_login_required
+def agent_fleet(request):
+    if request.method != 'GET':
+        return HttpResponseNotAllowed(['GET'])
+    denied = require_host_operator(request)
+    if denied:
+        return denied
+    selected_state = (request.GET.get('state') or '').strip()
+    if selected_state and selected_state not in AGENT_FLEET_STATES:
+        return HttpResponse('无效的 Agent 状态筛选条件', status=400)
+    return render(request, 'linux/agent_fleet.html', {
+        'fleet_rows': _agent_fleet_rows(request, selected_state),
+        'selected_state': selected_state,
+        'state_choices': AGENT_FLEET_STATES,
+    })
+
+
+def _selected_visible_agent_hosts(request):
+    raw_host_ids = request.POST.getlist('host_ids')
+    if not raw_host_ids or any(not value.isdigit() or int(value) <= 0 for value in raw_host_ids):
+        return None, 'invalid'
+    host_ids = [int(value) for value in raw_host_ids]
+    if len(set(host_ids)) != len(host_ids):
+        return None, 'invalid'
+    visible_count = visible_hosts_for_request(request).filter(id__in=host_ids).count()
+    if visible_count != len(host_ids):
+        return None, 'forbidden'
+    agents = HostAgent.objects.select_for_update().filter(host_id__in=host_ids)
+    if agents.count() != len(host_ids):
+        return None, 'invalid'
+    return agents, ''
+
+
+@session_login_required
+def agent_fleet_bulk_revoke(request):
+    if request.method != 'POST':
+        return HttpResponseNotAllowed(['POST'])
+    denied = require_host_operator(request)
+    if denied:
+        return denied
+    with transaction.atomic():
+        agents, error = _selected_visible_agent_hosts(request)
+        if error == 'forbidden':
+            return HttpResponse('目标主机不在当前用户授权范围内', status=403)
+        if error:
+            return JsonResponse({'status': 'invalid_selection'}, status=400)
+        changed = 0
+        for agent in agents:
+            if not agent.is_revoked:
+                revoke_host_agent(agent)
+                changed += 1
+        total = agents.count()
+    audit(request, '批量吊销主机Agent', 'HostAgent', '', '主机数=%s，已吊销=%s' % (total, changed))
+    return JsonResponse({'status': 'revoked', 'changed': changed})
+
+
+@session_login_required
+def agent_rotate_credential(request, id):
+    if request.method != 'POST':
+        return HttpResponseNotAllowed(['POST'])
+    host = get_object_or_404(NewLinux, id=id)
+    denied = require_host_operator(request, host)
+    if denied:
+        return denied
+    try:
+        HostAgent.objects.get(host=host)
+    except HostAgent.DoesNotExist:
+        return JsonResponse({'status': 'missing'}, status=404)
+    agent, credential = create_host_agent(host)
+    audit(request, '轮换主机Agent凭据', 'HostAgent', agent.id, '主机=%s' % host.id)
+    return JsonResponse({
+        'registration_id': agent.registration_id,
+        'credential': credential,
+        'authorization_format': 'Bearer <registration_id>.<credential>',
+    }, status=201)
 
 
 @accept_websocket  # 用于websocket连接的修饰器

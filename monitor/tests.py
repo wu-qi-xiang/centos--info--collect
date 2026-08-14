@@ -1481,7 +1481,8 @@ class MonitorSecurityTests(TestCase):
 		self.assertIn('this.expandedRuleCells.labels = [];', vue_source)
 
 		static_version = '20260801-geist-control-plane-01'
-		self.assertEqual(page_template.count('?v=%s' % static_version), 2)
+		self.assertEqual(page_template.count('?v=%s' % static_version), 1)
+		self.assertIn('20260807-monitor-dense-observability', page_template)
 		self.assertIn("static 'css/ops-vue-pages.css'", page_template)
 		self.assertIn("static 'js/ops-vue-pages.js'", page_template)
 

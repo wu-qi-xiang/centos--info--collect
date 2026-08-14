@@ -3,7 +3,7 @@ from io import StringIO
 from unittest import mock
 
 from django.core.management import call_command
-from django.test import TestCase
+from django.test import TestCase, override_settings
 from django.utils import timezone
 
 from devops.models import ScheduledTaskRun
@@ -11,6 +11,21 @@ from devops.scheduler import ScheduledTask, run_due_scheduled_tasks
 
 
 class DurableSchedulerTests(TestCase):
+
+    @override_settings(DEVOPS_SCHEDULER_AGENT_HEALTH_INTERVAL_SECONDS=60)
+    def test_registry_includes_fixed_agent_health_task(self):
+        from devops.scheduler import scheduled_task_registry
+
+        tasks = {task.name: task for task in scheduled_task_registry()}
+
+        self.assertIn('agent_health', tasks)
+        self.assertEqual(tasks['agent_health'].interval_seconds, 60)
+
+    @override_settings(DEVOPS_SCHEDULER_OPERATOR_SCAN_INTERVAL_SECONDS=123)
+    def test_registry_includes_operator_scan_task(self):
+        from devops.scheduler import scheduled_task_registry
+        tasks = {task.name: task for task in scheduled_task_registry()}
+        self.assertEqual(tasks['operator_scan'].interval_seconds, 123)
     def test_due_task_is_leased_once_and_records_safe_success_summary(self):
         callback = mock.Mock(return_value={'processed': 3, 'ignored': 'must not persist'})
         task = ScheduledTask('test-task', 60, callback)

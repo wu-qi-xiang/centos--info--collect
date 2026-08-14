@@ -58,7 +58,9 @@
                 cloudResources: [],
                 cloudCosts: [],
                 ciDeliveries: [],
-                featureAccess: { incidents: false, serviceCost: false, deliveryGates: false },
+                featureAccess: { incidents: false, commandCenter: false, serviceCost: false, deliveryGates: false },
+                commandCenter: { loading: false, error: '', counts: {}, timeline: [], actionSummary: {}, updatedAt: '' },
+                integrationReadiness: { loading: false, error: '', worker: null, connectors: [], collections: [], blueprints: [], plans: [], collecting: null, planning: null },
                 notifications: { channels: [], logs: [] },
                 auditLogs: [],
                 approvalComments: {},
@@ -70,19 +72,21 @@
                 metricFilters: { host: '', range: '24h' },
                 auditFilters: { q: '', user: '', action: '', target_type: '' },
                 tabs: [
-                    { key: 'dashboard', label: '概览', icon: 'fas fa-gauge-high' },
-                    { key: 'hosts', label: '主机', icon: 'fas fa-server' },
-                    { key: 'commands', label: '命令', icon: 'fas fa-terminal', permission: 'command' },
-                    { key: 'tasks', label: '任务', icon: 'fas fa-layer-group', permission: 'task' },
-                    { key: 'metrics', label: '指标', icon: 'fas fa-chart-line', permission: 'metric' },
-                    { key: 'approvals', label: '审批', icon: 'fas fa-shield-alt', permission: 'approval' },
-                    { key: 'deployments', label: '发布', icon: 'fas fa-rocket', permission: 'deployment' },
-                    { key: 'incidents', label: '事件与巡检', icon: 'fas fa-triangle-exclamation', feature: 'incidents' },
-                    { key: 'service-cost', label: '服务与云成本', icon: 'fas fa-cloud', feature: 'serviceCost' },
-                    { key: 'delivery-gates', label: 'CI 发布门禁', icon: 'fas fa-code-branch', feature: 'deliveryGates' },
-                    { key: 'files', label: '文件', icon: 'fas fa-file-arrow-up', permission: 'file' },
-                    { key: 'notifications', label: '通知', icon: 'fas fa-bullhorn', permission: 'notification' },
-                    { key: 'audit', label: '审计', icon: 'fas fa-clipboard-list', permission: 'audit' },
+                    { key: 'dashboard', label: '概览', icon: 'fas fa-gauge-high', group: 'execution' },
+                    { key: 'hosts', label: '主机', icon: 'fas fa-server', group: 'execution' },
+                    { key: 'commands', label: '命令', icon: 'fas fa-terminal', permission: 'command', group: 'execution' },
+                    { key: 'tasks', label: '任务', icon: 'fas fa-layer-group', permission: 'task', group: 'execution' },
+                    { key: 'metrics', label: '指标', icon: 'fas fa-chart-line', permission: 'metric', group: 'execution' },
+                    { key: 'approvals', label: '审批', icon: 'fas fa-shield-alt', permission: 'approval', group: 'governance' },
+                    { key: 'deployments', label: '发布', icon: 'fas fa-rocket', permission: 'deployment', group: 'delivery' },
+                    { key: 'command-center', label: '事件指挥', icon: 'fas fa-tower-broadcast', feature: 'commandCenter', group: 'governance' },
+                    { key: 'incidents', label: '事件与巡检', icon: 'fas fa-triangle-exclamation', feature: 'incidents', group: 'governance' },
+                    { key: 'service-cost', label: '服务与云成本', icon: 'fas fa-cloud', feature: 'serviceCost', group: 'governance' },
+                    { key: 'delivery-gates', label: 'CI 发布门禁', icon: 'fas fa-code-branch', feature: 'deliveryGates', group: 'delivery' },
+                    { key: 'integration-readiness', label: '集成就绪度', icon: 'fas fa-heart-pulse', feature: 'integrationReadiness', group: 'delivery' },
+                    { key: 'files', label: '文件', icon: 'fas fa-file-arrow-up', permission: 'file', group: 'delivery' },
+                    { key: 'notifications', label: '通知', icon: 'fas fa-bullhorn', permission: 'notification', group: 'governance' },
+                    { key: 'audit', label: '审计', icon: 'fas fa-clipboard-list', permission: 'audit', group: 'governance' },
                 ],
             };
         },
@@ -157,6 +161,25 @@
                     return total + (items || []).filter((item) => activeStates.indexOf(item.status) !== -1).length;
                 }, 0);
             },
+            commandCenterCounts() {
+                return this.commandCenter.counts || {};
+            },
+            commandCenterRisk() {
+                const counts = this.commandCenterCounts;
+                if (counts.critical_incidents || counts.open_incidents || counts.failed_ci_deliveries || this.commandCenterActionSummary.overdue) return 'critical';
+                if (counts.unhealthy_releases || counts.exhausted_slos || counts.pending_approvals || counts.active_alerts) return 'warning';
+                return 'healthy';
+            },
+            commandCenterRiskLabel() {
+                const labels = {
+                    critical: '高风险', high: '高风险', warning: '需关注', medium: '需关注',
+                    healthy: '稳定', low: '稳定', unknown: '待评估',
+                };
+                return labels[this.commandCenterRisk] || this.commandCenterRisk;
+            },
+            commandCenterActionSummary() {
+                return this.commandCenter.actionSummary || {};
+            },
             hostMetrics() {
                 return (this.dashboard && this.dashboard.host_metrics) || [];
             },
@@ -175,6 +198,16 @@
                     if (tab.permission && !permissions[tab.permission]) return false;
                     return !tab.feature || this.featureAccess[tab.feature];
                 });
+            },
+            tabGroups() {
+                const definitions = [
+                    { key: 'execution', label: '执行中心', hint: '主机、命令与运行任务', icon: 'fas fa-bolt' },
+                    { key: 'delivery', label: '发布交付', hint: '发布、门禁与集成状态', icon: 'fas fa-truck-fast' },
+                    { key: 'governance', label: '运维治理', hint: '审批、事件与审计', icon: 'fas fa-compass' },
+                ];
+                return definitions.map((group) => Object.assign({}, group, {
+                    tabs: this.visibleTabs.filter((tab) => tab.group === group.key),
+                })).filter((group) => group.tabs.length);
             },
             hasRunningWork() {
                 const activeStates = ['pending', 'running'];
@@ -242,6 +275,8 @@
                         await this.loadAuditLogs();
                     }
                     await this.loadWorkflowSummaries();
+                    await this.loadCommandCenter();
+                    await this.loadIntegrationReadiness();
                     if (!this.visibleTabs.some((tab) => tab.key === this.activeTab)) this.activeTab = 'dashboard';
                     if (!this.commandForm.host_id && this.hosts.length) this.commandForm.host_id = this.hosts[0].id;
                     if (!this.taskForm.host_ids.length && this.hosts.length) this.taskForm.host_ids = [this.hosts[0].id];
@@ -301,7 +336,73 @@
                     incidents: incidents.available || inspections.available,
                     serviceCost: services.available || resources.available || costs.available,
                     deliveryGates: deliveries.available,
+                    integrationReadiness: false,
                 };
+            },
+            async loadCommandCenter() {
+                const state = this.commandCenter;
+                state.loading = true;
+                state.error = '';
+                try {
+                    const payload = await apiFetch('/devops/api/incident-command-center/');
+                    state.counts = payload.counts || {};
+                    state.timeline = Array.isArray(payload.timeline) ? payload.timeline.slice(0, 12) : [];
+                    state.actionSummary = payload.action_items || {};
+                    state.updatedAt = new Date().toLocaleTimeString('zh-CN', {
+                        hour: '2-digit', minute: '2-digit', second: '2-digit', hour12: false,
+                    });
+                    this.featureAccess.commandCenter = true;
+                } catch (error) {
+                    state.counts = {};
+                    state.timeline = [];
+                    state.actionSummary = {};
+                    state.error = error.message || '事件指挥中心加载失败';
+                    this.featureAccess.commandCenter = false;
+                } finally {
+                    state.loading = false;
+                }
+            },
+            async loadIntegrationReadiness() {
+                const state = this.integrationReadiness;
+                state.loading = true; state.error = '';
+                try {
+                    const [readiness, connectors, blueprints, worker] = await Promise.all([
+                        apiFetch('/devops/api/integration-readiness/'),
+                        apiFetch('/devops/api/integration-connectors/'),
+                        apiFetch('/devops/api/infrastructure-blueprints/'),
+                        apiFetch('/devops/api/worker/'),
+                    ]);
+                    state.worker = readiness.worker || worker.worker || null;
+                    state.connectors = connectors.results || readiness.connectors || [];
+                    state.collections = readiness.collections || [];
+                    state.blueprints = blueprints.results || [];
+                    state.plans = readiness.blueprint_plans || [];
+                    this.featureAccess.integrationReadiness = true;
+                } catch (error) {
+                    state.error = error.message || '集成就绪度加载失败';
+                    this.featureAccess.integrationReadiness = false;
+                } finally { state.loading = false; }
+            },
+            async collectIntegration(connector) {
+                if (!connector || !connector.enabled || !connector.read_only || this.integrationReadiness.collecting) return;
+                this.integrationReadiness.collecting = connector.id; this.error = '';
+                try {
+                    const result = await apiFetch('/devops/api/integration-connectors/' + encodeURIComponent(connector.id) + '/collect/', { method: 'POST', body: '{}' });
+                    this.notice = '连接器采集请求已提交';
+                    Object.assign(connector, { status: result.run && result.run.status || 'pending' });
+                    await this.loadIntegrationReadiness();
+                } catch (error) { this.error = error.message || '连接器采集失败'; }
+                finally { this.integrationReadiness.collecting = null; }
+            },
+            async planIntegration(blueprint) {
+                if (!blueprint || !blueprint.enabled || !blueprint.read_only || this.integrationReadiness.planning) return;
+                this.integrationReadiness.planning = blueprint.id; this.error = '';
+                try {
+                    await apiFetch('/devops/api/infrastructure-blueprints/' + encodeURIComponent(blueprint.id) + '/plans/', { method: 'POST', body: '{}' });
+                    this.notice = '基础设施计划已创建';
+                    await this.loadIntegrationReadiness();
+                } catch (error) { this.error = error.message || '创建计划失败'; }
+                finally { this.integrationReadiness.planning = null; }
             },
             scheduleStatusRefresh() {
                 if (this.refreshTimer) {
@@ -459,6 +560,7 @@
                     approvals: this.approvals.length,
                     deployments: this.deployments.length,
                     incidents: this.incidents.length,
+                    'command-center': this.commandCenter.timeline.length + (this.commandCenterActionSummary.open || 0) + (this.commandCenterActionSummary.in_progress || 0),
                     'service-cost': this.serviceCatalog.length,
                     'delivery-gates': this.ciDeliveries.length,
                     files: this.files.length,
@@ -531,11 +633,20 @@
                 <div v-if="notice" class="alert alert-info py-2 mb-0">[[ notice ]]</div>
 
                 <div class="vue-tabs" role="tablist" aria-label="DevOps 工作区">
-                    <button v-for="(tab, index) in visibleTabs" :key="tab.key" class="vue-tab" type="button" role="tab" :id="'devops-tab-' + tab.key" :aria-selected="activeTab === tab.key" :tabindex="activeTab === tab.key ? 0 : -1" :class="{active: activeTab === tab.key}" @click="setActiveTab(tab.key, $event)" @keydown="onTabKeydown($event, index)">
-                        <i :class="tab.icon" aria-hidden="true"></i>
-                        <span>[[ tab.label ]]</span>
-                        <em v-if="tabCount(tab.key)">[[ tabCount(tab.key) ]]</em>
-                    </button>
+                    <div v-for="group in tabGroups" :key="group.key" class="vue-tab-group">
+                        <div class="vue-tab-group-label">
+                            <i :class="group.icon" aria-hidden="true"></i>
+                            <span>[[ group.label ]]</span>
+                            <small>[[ group.hint ]]</small>
+                        </div>
+                        <div class="vue-tab-group-items">
+                            <button v-for="tab in group.tabs" :key="tab.key" class="vue-tab" type="button" role="tab" :id="'devops-tab-' + tab.key" :aria-selected="activeTab === tab.key" :tabindex="activeTab === tab.key ? 0 : -1" :class="{active: activeTab === tab.key}" @click="setActiveTab(tab.key, $event)" @keydown="onTabKeydown($event, visibleTabs.indexOf(tab))">
+                                <i :class="tab.icon" aria-hidden="true"></i>
+                                <span>[[ tab.label ]]</span>
+                                <em v-if="tabCount(tab.key)">[[ tabCount(tab.key) ]]</em>
+                            </button>
+                        </div>
+                    </div>
                 </div>
 
                 <section v-if="activeTab === 'dashboard'" class="ops-workbench-dashboard" aria-label="DevOps 概览">
@@ -727,6 +838,57 @@
                     </div>
                 </section>
 
+                <section v-if="activeTab === 'command-center'" class="ops-command-center" aria-label="统一事件指挥中心">
+                    <div class="ops-command-center-heading">
+                        <div>
+                            <div class="ops-command-center-kicker">统一事件指挥中心</div>
+                            <h2>风险与协同状态</h2>
+                            <p>汇总当前授权范围内的告警、事件、发布、SLO、CI、审批与行动项。</p>
+                        </div>
+                        <div class="ops-command-center-actions">
+                            <small v-if="commandCenter.updatedAt" class="vue-row-meta">更新于 [[ commandCenter.updatedAt ]]</small>
+                            <button class="btn btn-sm btn-outline-primary" type="button" :disabled="commandCenter.loading" @click="loadCommandCenter">[[ commandCenter.loading ? '刷新中' : '刷新摘要' ]]</button>
+                            <span class="vue-status ops-command-center-risk" :class="statusClass(commandCenterRisk)"><i :class="statusIcon(commandCenterRisk)"></i>[[ commandCenterRiskLabel ]]</span>
+                        </div>
+                    </div>
+                    <div v-if="commandCenter.loading" class="vue-panel"><div class="vue-empty">正在加载事件指挥摘要...</div></div>
+                    <div v-else-if="commandCenter.error" class="vue-error" role="alert">[[ commandCenter.error ]]</div>
+                    <template v-else>
+                        <div class="ops-command-center-counts" aria-label="风险计数">
+                            <div class="ops-command-center-count" :class="{'is-danger': commandCenterCounts.critical_incidents}"><span>紧急事件</span><strong>[[ commandCenterCounts.critical_incidents || 0 ]]</strong></div>
+                            <div class="ops-command-center-count" :class="{'is-danger': commandCenterCounts.open_incidents}"><span>开放事件</span><strong>[[ commandCenterCounts.open_incidents || 0 ]]</strong></div>
+                            <div class="ops-command-center-count" :class="{'is-warning': commandCenterCounts.unhealthy_releases}"><span>异常发布</span><strong>[[ commandCenterCounts.unhealthy_releases || 0 ]]</strong></div>
+                            <div class="ops-command-center-count" :class="{'is-warning': commandCenterCounts.exhausted_slos}"><span>SLO 耗尽</span><strong>[[ commandCenterCounts.exhausted_slos || 0 ]]</strong></div>
+                            <div class="ops-command-center-count" :class="{'is-danger': commandCenterCounts.failed_ci_deliveries}"><span>失败 CI</span><strong>[[ commandCenterCounts.failed_ci_deliveries || 0 ]]</strong></div>
+                            <div class="ops-command-center-count" :class="{'is-warning': commandCenterCounts.pending_approvals}"><span>待审批</span><strong>[[ commandCenterCounts.pending_approvals || 0 ]]</strong></div>
+                            <div class="ops-command-center-count"><span>活跃告警</span><strong>[[ commandCenterCounts.active_alerts || 0 ]]</strong></div>
+                        </div>
+                        <div class="ops-command-center-grid">
+                            <section class="vue-panel" aria-labelledby="command-center-timeline-title">
+                                <div class="vue-panel-header"><h3 id="command-center-timeline-title" class="vue-panel-title"><i class="fas fa-stream"></i>事件时间线</h3><span class="vue-panel-count">[[ commandCenter.timeline.length ]] 条</span></div>
+                                <div class="vue-panel-body">
+                                    <div class="ops-command-timeline" v-if="commandCenter.timeline.length">
+                                        <div v-for="(item, index) in commandCenter.timeline" :key="item.kind + '-' + item.id + '-' + index" class="ops-command-timeline-item">
+                                            <span class="ops-command-timeline-dot" :class="statusClass(item.severity || item.status)"></span>
+                                            <div><div class="vue-row-title">[[ item.kind || '事件' ]] <span v-if="item.id"># [[ item.id ]]</span></div><div class="vue-row-meta"><span>[[ item.occurred_at || '-' ]]</span><span v-if="item.status">[[ item.status ]]</span></div></div>
+                                        </div>
+                                    </div>
+                                    <div class="vue-empty" v-else>当前授权范围内没有需要展示的事件记录。</div>
+                                </div>
+                            </section>
+                            <section class="vue-panel" aria-labelledby="command-center-actions-title">
+                                <div class="vue-panel-header"><h3 id="command-center-actions-title" class="vue-panel-title"><i class="fas fa-list-check"></i>行动项</h3><span class="vue-panel-count">[[ (commandCenterActionSummary.open || 0) + (commandCenterActionSummary.in_progress || 0) ]] 项</span></div>
+                                <div class="vue-panel-body">
+                                    <div class="ops-command-action-summary" v-if="commandCenterActionSummary.open || commandCenterActionSummary.in_progress || commandCenterActionSummary.overdue">
+                                        <div><span>待处理</span><strong>[[ commandCenterActionSummary.open || 0 ]]</strong></div><div><span>处理中</span><strong>[[ commandCenterActionSummary.in_progress || 0 ]]</strong></div><div><span>已逾期</span><strong>[[ commandCenterActionSummary.overdue || 0 ]]</strong></div>
+                                    </div>
+                                    <div class="vue-empty" v-else>当前没有待跟进的行动项。</div>
+                                </div>
+                            </section>
+                        </div>
+                    </template>
+                </section>
+
                 <section v-if="activeTab === 'incidents'" class="vue-grid">
                     <div class="vue-panel">
                         <div class="vue-panel-header"><h2 class="vue-panel-title"><i class="fas fa-triangle-exclamation"></i>事件工单</h2><span class="vue-panel-count">[[ incidents.length ]] 条</span></div>
@@ -752,6 +914,24 @@
                 <section v-if="activeTab === 'delivery-gates'" class="vue-panel">
                     <div class="vue-panel-header"><h2 class="vue-panel-title"><i class="fas fa-code-branch"></i>CI 发布门禁</h2><span class="vue-panel-count">[[ ciDeliveries.length ]] 条</span></div>
                     <div class="vue-panel-body"><div class="vue-command-list" v-if="ciDeliveries.length"><div class="vue-command-row" v-for="item in ciDeliveries" :key="item.id"><div class="vue-row-main"><div class="vue-row-title">[[ item.provider_label || item.provider ]] · [[ item.repository ]]</div><div class="vue-row-meta"><span>修订 [[ item.revision || '-' ]]</span><span>发布 # [[ item.release_id || '-' ]]</span><span>[[ item.received_at || '-' ]]</span></div><div class="vue-row-note">[[ item.summary || '-' ]]</div></div><span class="vue-status" :class="statusClass(item.status)"><i :class="statusIcon(item.status)"></i>[[ item.status_label || item.status ]]</span></div></div><div class="vue-empty" v-else>CI 摘要接口尚未启用或当前账号无访问权限。</div></div>
+                </section>
+
+                <section v-if="activeTab === 'integration-readiness'" class="vue-grid">
+                    <div class="vue-panel vue-grid-span-2">
+                        <div class="vue-panel-header"><h2 class="vue-panel-title"><i class="fas fa-heart-pulse"></i>集成就绪度</h2><button class="btn btn-sm btn-outline-primary" type="button" :disabled="integrationReadiness.loading" @click="loadIntegrationReadiness">刷新</button></div>
+                        <div class="vue-panel-body">
+                            <div v-if="integrationReadiness.error" class="vue-empty vue-error">[[ integrationReadiness.error ]]</div>
+                            <div v-else-if="integrationReadiness.loading" class="vue-empty">正在加载集成状态...</div>
+                            <div v-else class="ops-readiness-grid">
+                                <div class="vue-command-row"><div class="vue-row-main"><div class="vue-row-title">Worker / Scheduler</div><div class="vue-row-meta"><span>待处理 [[ integrationReadiness.worker && integrationReadiness.worker.summary ? integrationReadiness.worker.summary.pending : 0 ]]</span><span>超时 [[ integrationReadiness.worker && integrationReadiness.worker.summary ? integrationReadiness.worker.summary.timed_out : 0 ]]</span></div></div><span class="vue-status success">状态摘要</span></div>
+                                <div class="vue-command-row" v-for="connector in integrationReadiness.connectors" :key="'connector-' + connector.id"><div class="vue-row-main"><div class="vue-row-title">连接器 · [[ connector.name ]]</div><div class="vue-row-meta"><span>[[ connector.connector_type ]]</span><span>[[ connector.status || 'blocked' ]]</span></div></div><button class="btn btn-sm btn-outline-primary" type="button" :disabled="!connector.enabled || !connector.read_only || integrationReadiness.collecting === connector.id" @click="collectIntegration(connector)">[[ integrationReadiness.collecting === connector.id ? '提交中' : (connector.enabled && connector.read_only ? '触发采集' : '不可触发') ]]</button></div>
+                                <div class="vue-command-row" v-for="blueprint in integrationReadiness.blueprints" :key="'blueprint-' + blueprint.id"><div class="vue-row-main"><div class="vue-row-title">蓝图 · [[ blueprint.name ]]</div><div class="vue-row-meta"><span>[[ blueprint.provider_type ]]</span><span>[[ blueprint.enabled ? '启用' : '停用' ]] · [[ blueprint.read_only ? '只读' : '受控' ]]</span></div><div class="vue-row-note">[[ blueprint.summary || '无摘要' ]]</div></div><button class="btn btn-sm btn-outline-primary" type="button" :disabled="!blueprint.enabled || !blueprint.read_only || integrationReadiness.planning === blueprint.id" @click="planIntegration(blueprint)">[[ integrationReadiness.planning === blueprint.id ? '创建中' : (blueprint.enabled && blueprint.read_only ? '创建计划' : '不可计划') ]]</button></div>
+                                <div class="vue-command-row" v-for="run in integrationReadiness.collections" :key="'collection-' + run.id"><div class="vue-row-main"><div class="vue-row-title">采集运行 # [[ run.id ]]</div><div class="vue-row-meta"><span>连接器 # [[ run.connector_id ]]</span><span>[[ run.status ]]</span><span>发现 [[ run.finding_count ]]</span><span>[[ run.finished_at || run.started_at || '-' ]]</span></div></div></div>
+                                <div class="vue-command-row" v-for="plan in integrationReadiness.plans" :key="'plan-' + plan.id"><div class="vue-row-main"><div class="vue-row-title">基础设施计划 # [[ plan.id ]]</div><div class="vue-row-meta"><span>蓝图 # [[ plan.blueprint_id ]]</span><span>[[ plan.status ]]</span><span>资源 [[ plan.resource_count ]]</span><span>[[ plan.created_at || '-' ]]</span></div><div class="vue-row-note">[[ plan.summary || '无摘要' ]]</div></div></div>
+                                <div v-if="!integrationReadiness.connectors.length && !integrationReadiness.blueprints.length && !integrationReadiness.collections.length && !integrationReadiness.plans.length" class="vue-empty">暂无集成就绪记录</div>
+                            </div>
+                        </div>
+                    </div>
                 </section>
 
                 <section v-if="activeTab === 'files'" class="vue-panel">

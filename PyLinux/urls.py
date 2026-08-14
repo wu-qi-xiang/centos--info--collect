@@ -25,6 +25,7 @@ from RemoteLinux import views
 
 
 import monitor
+from devops import views as devops_views
 
 urlpatterns = [
     path('health/live/', health.liveness, name='health_liveness'),
@@ -48,11 +49,19 @@ urlpatterns = [
     path('linux_delete/<int:id>/', views.linux_delete, name='linux_delete'),
     path('connect_test/', views.connect_test, name='connect_test'),
     path('api/server/<int:id>/status/', views.server_status, name='server_status'),
+    path('agents/', views.agent_fleet, name='agent_fleet'),
+    path('agents/<int:id>/', views.agent_management, name='agent_management'),
+    path('api/agents/bulk-revoke/', views.agent_fleet_bulk_revoke, name='agent_fleet_bulk_revoke'),
+    path('api/agents/<int:id>/register/', views.agent_register, name='agent_register'),
+    path('api/agents/<int:id>/revoke/', views.agent_revoke, name='agent_revoke'),
+    path('api/agents/<int:id>/rotate/', views.agent_rotate_credential, name='agent_rotate_credential'),
+    path('api/agent/heartbeat/', views.agent_heartbeat, name='agent_heartbeat'),
     path('linux_copy/', views.linux_copy, name='copy_form'),
     path('userprofile/', include('userprofile.urls', namespace='userprofile')),
     path('monitor/', include('monitor.urls', namespace='monitor')),
     path('password/', include('password.urls', namespace='password')),
     path('devops/', include('devops.urls', namespace='devops')),
+    path('status/', devops_views.public_status_page, name='public_status'),
     path('integrations/github/', include('devops.github_urls')),
     path('aiops/', include('aiops.urls', namespace='aiops')),
     path('favicon.ico', lambda request: HttpResponse(status=204), name='favicon'),

@@ -1,0 +1,69 @@
+{% extends 'base.html' %}
+
+{% block title %}Agent 机群 | 运维管理控制台{% endblock %}
+
+{% block content %}
+<section class="geist-classic-page" aria-labelledby="agent-fleet-title">
+    <div class="geist-classic-page__heading">
+        <p class="geist-classic-page__eyebrow">HOST AGENT</p>
+        <h1 id="agent-fleet-title">Agent 机群</h1>
+        <p>仅显示当前授权主机的心跳状态与受限运行元数据。</p>
+    </div>
+
+    <form method="get" class="geist-classic-toolbar">
+        <label for="agent-state">状态</label>
+        <select id="agent-state" name="state">
+            <option value="">全部</option>
+            {% for state in state_choices %}
+                <option value="{{ state }}"{% if selected_state == state %} selected{% endif %}>{{ state }}</option>
+            {% endfor %}
+        </select>
+        <button type="submit" class="btn btn-default">筛选</button>
+    </form>
+
+    <form id="agent-bulk-revoke" method="post" action="{% url 'agent_fleet_bulk_revoke' %}">
+        {% csrf_token %}
+    </form>
+    <div class="geist-classic-card">
+        <div class="geist-classic-table-wrap">
+            <table class="geist-classic-table">
+                <thead>
+                    <tr>
+                        <th scope="col"><span class="sr-only">选择</span></th>
+                        <th scope="col">主机</th>
+                        <th scope="col">健康状态</th>
+                        <th scope="col">最后心跳</th>
+                        <th scope="col">采集延迟</th>
+                        <th scope="col">Agent 版本</th>
+                        <th scope="col">操作</th>
+                    </tr>
+                </thead>
+                <tbody>
+                    {% for row in fleet_rows %}
+                        <tr>
+                            <td><input type="checkbox" form="agent-bulk-revoke" name="host_ids" value="{{ row.host_id }}" aria-label="选择 {{ row.host_name }}"></td>
+                            <td>{{ row.host_name }}</td>
+                            <td><span class="geist-classic-status state-{{ row.state }}">{{ row.state }}</span></td>
+                            <td>{{ row.last_heartbeat_at|default:'尚未收到' }}</td>
+                            <td>{{ row.collection_delay_seconds }} 秒</td>
+                            <td>{{ row.agent_version|default:'-' }}</td>
+                            <td>
+                                <a class="btn btn-default" href="{% url 'agent_management' row.host_id %}">查看</a>
+                                <form method="post" action="{% url 'agent_rotate_credential' row.host_id %}" class="geist-classic-inline-form">
+                                    {% csrf_token %}
+                                    <button type="submit" class="btn btn-default">轮换凭据</button>
+                                </form>
+                            </td>
+                        </tr>
+                    {% empty %}
+                        <tr><td colspan="7">当前筛选条件下没有可见 Agent。</td></tr>
+                    {% endfor %}
+                </tbody>
+            </table>
+        </div>
+        <div class="geist-classic-actions">
+            <button type="submit" form="agent-bulk-revoke" class="btn btn-danger">吊销已选 Agent</button>
+        </div>
+    </div>
+</section>
+{% endblock %}

@@ -35,21 +35,27 @@ from django.shortcuts import redirect, render
 from django.urls import reverse
 from django.views.decorators.csrf import csrf_exempt
 from django.utils import timezone
+from django.utils.dateparse import parse_datetime
 
-from devops.models import AlertEvent, AuditLog, CommandExecution, DevOpsModulePermission, DevOpsRole, MetricSample, NotificationLog, RunbookTemplate
-from devops.api import visible_catalog_services
+from devops.models import AlertEvent, AuditLog, CommandExecution, DevOpsModulePermission, DevOpsRole, MetricSample, NotificationLog, RunbookTemplate, K8sCluster, K8sWorkloadServiceMapping, ApprovalRequest, RunbookHealthVerification, RunbookEffectivenessFeedback
+from devops.api import alert_quality_governance_payload, visible_catalog_services
 from devops.services import has_role, visible_hosts_for_request
 from userprofile.decorators import session_login_required
-from .change_impact import build_change_impacts
-from .alert_groups import build_alert_groups
-from .evidence_pack import build_evidence_pack
-from .alert_quality import build_alert_quality_suggestions
-from .investigation_timeline import build_investigation_timelines
+from .analysis.change_impact import build_change_impacts
+from .analysis.alert_groups import build_alert_groups
+from .investigation.evidence_pack import build_evidence_pack
+from .analysis.alert_quality import build_alert_quality_suggestions
+from .investigation.investigation_timeline import build_investigation_timelines
 from .runbook_effectiveness import build_runbook_effectiveness_suggestions
-from .signal_freshness import build_signal_freshness
-from .service_impact import build_service_impacts
-from .service_workbench import build_service_workbench
-from .models import AiopsAlertAnalysis, AiopsIntegration
+from .analysis.signal_freshness import build_signal_freshness
+from .analysis.service_impact import build_service_impacts
+from .analysis.service_workbench import build_service_workbench
+from .analysis.reliability_score import build_service_reliability
+from .models import AiopsAlertAnalysis, AiopsIntegration, AiopsRunbookRecommendation, AiopsInvestigation, AiopsInvestigationFeedback
+from .investigation.investigations import build_investigation_result
+from .investigation.k8s_analyzer import analyze_k8s_detail, safe_namespace
+from .investigation.operator_mode import build_operator_scan
+from .investigation.runbook_recommendations import create_runbook_recommendation, initiate_runbook_recommendation
 
 
 SAFE_ALERT_LABELS = ('alertname', 'severity', 'instance', 'host', 'service', 'job', 'environment')
@@ -95,6 +101,341 @@ DIAGNOSTIC_WINDOWS = {
 	'6h': timezone.timedelta(hours=6),
 	'24h': timezone.timedelta(hours=24),
 }
+
+INVESTIGATION_MODULES = (
+	DevOpsModulePermission.MODULE_ALERT,
+	DevOpsModulePermission.MODULE_METRIC,
+	DevOpsModulePermission.MODULE_DEPLOYMENT,
+	DevOpsModulePermission.MODULE_SERVICE,
+)
+
+
+def _investigation_permission_error(request):
+	if not request.session.get('is_login') or not request.session.get('user_id'):
+		return _diagnostic_api_error('未登录', 401, 'unauthorized')
+	if not all(has_role(request, DevOpsRole.ROLE_VIEWER, module) for module in INVESTIGATION_MODULES):
+		return _diagnostic_api_error('没有调查证据查看权限', 403, 'forbidden')
+	return None
+
+
+def k8s_analyzer(request, cluster_id):
+	if not request.session.get('is_login') or not request.session.get('user_id'):
+		return _diagnostic_api_error('未登录', 401, 'unauthorized')
+	if not (has_role(request, DevOpsRole.ROLE_VIEWER, DevOpsModulePermission.MODULE_CLUSTER)
+			and has_role(request, DevOpsRole.ROLE_VIEWER, DevOpsModulePermission.MODULE_SERVICE)):
+		return _diagnostic_api_error('没有 Kubernetes 分析查看权限', 403, 'forbidden')
+	cluster = K8sCluster.objects.filter(id=cluster_id).first()
+	visible_services = visible_catalog_services(request)
+	mappings = list(K8sWorkloadServiceMapping.objects.filter(cluster=cluster, service__in=visible_services)) if cluster else []
+	if not cluster or not mappings:
+		return _diagnostic_api_error('集群不存在或无权访问', 404, 'not_found')
+	namespace = safe_namespace(request.GET.get('namespace'), cluster.default_namespace or 'default')
+	if not namespace:
+		return _diagnostic_api_error('命名空间无效', 400, 'validation_error')
+	mappings = [mapping for mapping in mappings if mapping.namespace == namespace]
+	if not mappings:
+		return _diagnostic_api_error('集群不存在或无权访问', 404, 'not_found')
+	refresh = request.GET.get('refresh') == '1'
+	if refresh and not has_role(request, DevOpsRole.ROLE_ADMIN, DevOpsModulePermission.MODULE_CLUSTER):
+		return _diagnostic_api_error('只有 Kubernetes 集群管理员可以刷新数据', 403, 'forbidden')
+	try:
+		result = analyze_k8s_detail(cluster, namespace, mappings=mappings, refresh=refresh)
+	except (TimeoutError, ConnectionError):
+		return _diagnostic_api_error('Kubernetes 数据源暂不可用', 503, 'source_unavailable')
+	except Exception:
+		return _diagnostic_api_error('Kubernetes 分析失败', 503, 'source_unavailable')
+	return JsonResponse({'ok': True, 'result': result})
+
+
+def operator_scan(request):
+	if not request.session.get('is_login') or not request.session.get('user_id'):
+		return _diagnostic_api_error('未登录', 401, 'unauthorized')
+	modules = (DevOpsModulePermission.MODULE_ALERT, DevOpsModulePermission.MODULE_METRIC,
+		DevOpsModulePermission.MODULE_DEPLOYMENT, DevOpsModulePermission.MODULE_SERVICE)
+	if not all(has_role(request, DevOpsRole.ROLE_VIEWER, module) for module in modules):
+		return _diagnostic_api_error('没有主动巡检查看权限', 403, 'forbidden')
+	window = request.GET.get('window', '24h')
+	if window not in ('6h', '24h', '7d'):
+		return _diagnostic_api_error('时间窗口无效', 400, 'validation_error')
+	hosts = list(visible_hosts_for_request(request))
+	if not hosts:
+		return _diagnostic_api_error('没有可见主机', 403, 'forbidden')
+	return JsonResponse({'ok': True, 'result': build_operator_scan(hosts, list(visible_catalog_services(request)), window)})
+
+
+def runbook_recommendation_outcome(request, recommendation_id):
+	if not request.session.get('is_login') or not request.session.get('user_id'):
+		return _diagnostic_api_error('未登录', 401, 'unauthorized')
+	if not has_role(request, DevOpsRole.ROLE_VIEWER, DevOpsModulePermission.MODULE_COMMAND):
+		return _diagnostic_api_error('没有运行手册查看权限', 403, 'forbidden')
+	item = AiopsRunbookRecommendation.objects.select_related('initiated_approval', 'host', 'alert').filter(
+		id=recommendation_id, host__in=visible_hosts_for_request(request)).first()
+	if not item:
+		return _diagnostic_api_error('运行手册建议不存在', 404, 'not_found')
+	approval = item.initiated_approval
+	payload = {'recommendation': {'id': item.id, 'status': item.status,
+		'approval_id': approval.id if approval else None}, 'approval': None, 'execution': None,
+		'health_verification': None, 'effectiveness_feedback': []}
+	if approval:
+		payload['approval'] = {'status': approval.status, 'created_at': approval.created_at.isoformat(),
+			'decided_at': approval.decided_at.isoformat() if approval.decided_at else None}
+		execution = approval.command_execution
+		if execution:
+			payload['execution'] = {'id': execution.id, 'status': execution.status,
+				'created_at': execution.created_at.isoformat(), 'finished_at': execution.finished_at.isoformat() if execution.finished_at else None}
+			verification = RunbookHealthVerification.objects.filter(command_execution=execution).first()
+			if verification:
+				payload['health_verification'] = {'status': verification.status, 'active_critical_alert_count': verification.active_critical_alert_count,
+					'summary': verification.summary, 'verified_at': verification.verified_at.isoformat()}
+		payload['effectiveness_feedback'] = [{'classification': feedback.classification, 'created_at': feedback.created_at.isoformat(),
+				'author': feedback.created_by} for feedback in RunbookEffectivenessFeedback.objects.filter(command_execution=execution)[:20]]
+	return JsonResponse({'ok': True, 'outcome': payload})
+
+
+def _investigation_payload(item, result=None, include_detail=False):
+	result = result or {}
+	data = {
+		'id': item.id,
+		'title': item.title,
+		'status': item.status,
+		'window': {
+			'key': item.window_key,
+			'start': timezone.localtime(item.window_start).isoformat(),
+			'end': timezone.localtime(item.window_end).isoformat(),
+		},
+		'scope': result.get('scope', {
+			'host_count': item.hosts.count(), 'service_count': item.services.count(),
+			'window_start': timezone.localtime(item.window_start).isoformat(),
+			'window_end': timezone.localtime(item.window_end).isoformat(),
+		}),
+		'risk': item.risk,
+		'confidence': item.confidence,
+		'summary': item.summary,
+		'root_cause_summary': item.root_cause_summary,
+	}
+	if include_detail:
+		data.update({
+			'root_causes': result.get('root_causes', []),
+			'timeline': result.get('timeline', []),
+			'partial': bool(result.get('partial', False)),
+			'errors': result.get('errors', []),
+		})
+	return data
+
+
+def _visible_investigation_queryset(request):
+	visible_hosts = visible_hosts_for_request(request)
+	visible_host_ids = set(visible_hosts.values_list('id', flat=True))
+	visible_services = visible_catalog_services(request)
+	visible_service_ids = set(visible_services.values_list('id', flat=True))
+	items = []
+	for item in list(AiopsInvestigation.objects.prefetch_related('hosts', 'services')[:200]):
+		host_ids = {host.id for host in item._prefetched_objects_cache.get('hosts', ())}
+		service_ids = {service.id for service in item._prefetched_objects_cache.get('services', ())}
+		if not host_ids or not host_ids.issubset(visible_host_ids):
+			continue
+		if service_ids and not service_ids.issubset(visible_service_ids):
+			continue
+		items.append(item)
+	return items, visible_hosts, visible_services
+
+
+def _visible_investigation_detail(request, investigation_id):
+	visible_hosts = visible_hosts_for_request(request)
+	visible_services = visible_catalog_services(request)
+	item = (AiopsInvestigation.objects.prefetch_related('hosts', 'services')
+			.filter(id=investigation_id).first())
+	if not item:
+		return None, visible_hosts, visible_services
+	hosts = list(item._prefetched_objects_cache.get('hosts', ()))
+	services = list(item._prefetched_objects_cache.get('services', ()))
+	visible_host_ids = set(visible_hosts.values_list('id', flat=True))
+	visible_service_ids = set(visible_services.values_list('id', flat=True))
+	if not hosts or not {host.id for host in hosts}.issubset(visible_host_ids):
+		return None, visible_hosts, visible_services
+	if not {service.id for service in services}.issubset(visible_service_ids):
+		return None, visible_hosts, visible_services
+	return item, visible_hosts, visible_services
+
+
+def _parse_investigation_datetime(value):
+	if not isinstance(value, str):
+		return None
+	parsed = parse_datetime(value)
+	if parsed and timezone.is_naive(parsed):
+		parsed = timezone.make_aware(parsed, timezone.get_current_timezone())
+	return parsed
+
+
+def investigation_feedback(request, investigation_id):
+	err = _investigation_permission_error(request)
+	if err: return err
+	item, _hosts, _services = _visible_investigation_detail(request, investigation_id)
+	if not item: return _diagnostic_api_error('调查不存在', 404, 'not_found')
+	if request.method == 'GET':
+		return JsonResponse({'ok': True, 'results': [{'classification': f.classification, 'note_present': bool(f.note), 'created_by': f.created_by, 'created_at': f.created_at.isoformat()} for f in item.feedback.all()[:20]]})
+	if request.method != 'POST': return HttpResponseNotAllowed(['GET', 'POST'])
+	try: payload = json.loads(request.body.decode('utf-8') or '{}')
+	except (TypeError, ValueError, json.JSONDecodeError): return _diagnostic_api_error('JSON 格式错误', 400, 'invalid_json')
+	classification = payload.get('classification'); note = payload.get('note', '')
+	if classification not in dict(AiopsInvestigationFeedback.CLASSIFICATION_CHOICES) or not isinstance(note, str) or len(note) > 300:
+		return _diagnostic_api_error('反馈无效', 400, 'validation_error')
+	feedback = AiopsInvestigationFeedback.objects.create(investigation=item, classification=classification, note=note, created_by=str(request.session.get('user_name') or request.session.get('user_id') or ''))
+	return JsonResponse({'ok': True, 'feedback': {'classification': feedback.classification, 'note_present': bool(feedback.note), 'created_by': feedback.created_by, 'created_at': feedback.created_at.isoformat()}}, status=201)
+
+
+def investigations(request, investigation_id=None):
+	permission_error = _investigation_permission_error(request)
+	if permission_error:
+		return permission_error
+	if investigation_id is not None:
+		if request.method != 'GET':
+			return HttpResponseNotAllowed(['GET'])
+		item, visible_hosts, visible_services = _visible_investigation_detail(request, investigation_id)
+		if not item:
+			return _diagnostic_api_error('调查不存在', 404, 'not_found')
+		hosts = list(item._prefetched_objects_cache.get('hosts', ()))
+		services = list(item._prefetched_objects_cache.get('services', ()))
+		result = build_investigation_result(item, hosts, services)
+		return JsonResponse({'ok': True, 'investigation': _investigation_payload(item, result, True)})
+	if request.method == 'GET':
+		items, _visible_hosts, _visible_services = _visible_investigation_queryset(request)
+		return JsonResponse({'ok': True, 'results': [_investigation_payload(item) for item in items]})
+	if request.method != 'POST':
+		return HttpResponseNotAllowed(['GET', 'POST'])
+	try:
+		payload = json.loads(request.body.decode('utf-8') or '{}')
+	except (TypeError, ValueError, json.JSONDecodeError):
+		return _diagnostic_api_error('JSON 格式错误', 400, 'invalid_json')
+	if not isinstance(payload, dict):
+		return _diagnostic_api_error('JSON 格式错误', 400, 'invalid_json')
+	title = payload.get('title')
+	window_key = payload.get('window_key', '24h')
+	host_ids = payload.get('host_ids')
+	service_ids = payload.get('service_ids', [])
+	start = _parse_investigation_datetime(payload.get('window_start'))
+	end = _parse_investigation_datetime(payload.get('window_end'))
+	if not isinstance(title, str) or not title.strip() or len(title.strip()) > 200:
+		return _diagnostic_api_error('调查标题无效', 400, 'validation_error')
+	if window_key not in dict(AiopsInvestigation.WINDOW_CHOICES):
+		return _diagnostic_api_error('时间窗口无效', 400, 'validation_error')
+	if not isinstance(host_ids, list) or not host_ids:
+		return _diagnostic_api_error('至少选择一台主机', 400, 'validation_error')
+	if not isinstance(service_ids, list):
+		return _diagnostic_api_error('服务范围无效', 400, 'validation_error')
+	try:
+		host_ids = [int(value) for value in host_ids]
+		service_ids = [int(value) for value in service_ids]
+	except (TypeError, ValueError):
+		return _diagnostic_api_error('主机或服务范围无效', 400, 'validation_error')
+	if not start or not end or start >= end:
+		return _diagnostic_api_error('时间窗口无效', 400, 'validation_error')
+	now = timezone.now()
+	if end > now + timezone.timedelta(minutes=5):
+		return _diagnostic_api_error('时间窗口无效', 400, 'validation_error')
+	window_limit = {
+		'1h': timezone.timedelta(hours=1), '6h': timezone.timedelta(hours=6),
+		'24h': timezone.timedelta(hours=24), '7d': timezone.timedelta(days=7),
+	}[window_key]
+	if end - start > window_limit + timezone.timedelta(minutes=5):
+		return _diagnostic_api_error('时间窗口无效', 400, 'validation_error')
+	visible_hosts = visible_hosts_for_request(request)
+	hosts = list(visible_hosts.filter(id__in=host_ids))
+	if len(hosts) != len(set(host_ids)):
+		return _diagnostic_api_error('主机不存在或无权访问', 404, 'not_found')
+	visible_services = visible_catalog_services(request)
+	services = list(visible_services.filter(id__in=service_ids))
+	if len(services) != len(set(service_ids)):
+		return _diagnostic_api_error('服务不存在或无权访问', 404, 'not_found')
+	item = AiopsInvestigation.objects.create(
+		created_by=str(request.session.get('user_name') or request.session.get('user_id') or ''),
+		title=title.strip(), window_key=window_key, window_start=start, window_end=end,
+		status=AiopsInvestigation.STATUS_ANALYZING,
+	)
+	item.hosts.set(hosts)
+	item.services.set(services)
+	result = build_investigation_result(item, hosts, services, now=end)
+	causes = result.get('root_causes', [])
+	confidence = max([int(cause.get('confidence', 0)) for cause in causes] or [0])
+	risk = (AiopsInvestigation.RISK_CRITICAL if confidence >= 85 else
+		AiopsInvestigation.RISK_HIGH if confidence >= 70 else
+		AiopsInvestigation.RISK_MEDIUM if confidence >= 45 else AiopsInvestigation.RISK_LOW)
+	item.status = AiopsInvestigation.STATUS_PARTIAL if result.get('partial') else AiopsInvestigation.STATUS_COMPLETED
+	item.confidence = confidence
+	item.risk = risk
+	item.summary = str(result.get('summary', ''))[:1000]
+	item.root_cause_summary = '; '.join(str(cause.get('summary', '')) for cause in causes)[:2000]
+	item.save(update_fields=['status', 'confidence', 'risk', 'summary', 'root_cause_summary', 'updated_at'])
+	return JsonResponse({'ok': True, 'investigation': _investigation_payload(item, result, True)}, status=201)
+
+
+def _runbook_recommendation_payload(item):
+	return {
+		'id': item.id,
+		'alert_id': item.alert_id,
+		'host_id': item.host_id,
+		'runbook_id': item.runbook_id,
+		'summary': item.summary,
+		'status': item.status,
+		'approval_id': item.initiated_approval_id,
+		'created_by': item.created_by,
+		'created_at': timezone.localtime(item.created_at).isoformat(),
+	}
+
+
+@session_login_required
+def runbook_recommendations(request):
+	if not has_role(request, DevOpsRole.ROLE_VIEWER, DevOpsModulePermission.MODULE_COMMAND):
+		return _diagnostic_api_error('没有运行手册建议查看权限', 403, 'forbidden')
+	hosts = visible_hosts_for_request(request)
+	queryset = AiopsRunbookRecommendation.objects.select_related('alert', 'host', 'runbook').filter(host__in=hosts)
+	if request.method == 'GET':
+		return JsonResponse({'ok': True, 'results': [_runbook_recommendation_payload(item) for item in queryset[:100]]})
+	if request.method != 'POST':
+		return HttpResponseNotAllowed(['GET', 'POST'])
+	if not has_role(request, DevOpsRole.ROLE_OPERATOR, DevOpsModulePermission.MODULE_COMMAND):
+		return _diagnostic_api_error('没有运行手册建议操作权限', 403, 'forbidden')
+	try:
+		payload = json.loads(request.body.decode('utf-8') or '{}')
+		alert = AlertEvent.objects.select_related('host').get(id=int(payload.get('alert_id')))
+		runbook = RunbookTemplate.objects.get(id=int(payload.get('runbook_id')))
+	except (ValueError, TypeError, json.JSONDecodeError, AlertEvent.DoesNotExist, RunbookTemplate.DoesNotExist):
+		return _diagnostic_api_error('告警或运行手册无效', 400, 'validation_error')
+	if alert.host_id not in set(hosts.values_list('id', flat=True)):
+		return _diagnostic_api_error('目标主机不在当前用户授权范围内', 403, 'host_forbidden')
+	summary = payload.get('summary', '')
+	if not isinstance(summary, str) or len(summary) > 300:
+		return _diagnostic_api_error('建议摘要无效', 400, 'validation_error')
+	try:
+		item = create_runbook_recommendation(request, alert, runbook, summary.strip())
+	except PermissionError as exc:
+		return _diagnostic_api_error(str(exc), 403, 'host_forbidden')
+	except ValueError as exc:
+		return _diagnostic_api_error(str(exc), 400, 'validation_error')
+	return JsonResponse({'ok': True, 'recommendation': _runbook_recommendation_payload(item)}, status=201)
+
+
+@session_login_required
+def runbook_recommendation_initiate(request, recommendation_id):
+	if request.method != 'POST':
+		return HttpResponseNotAllowed(['POST'])
+	if not has_role(request, DevOpsRole.ROLE_OPERATOR, DevOpsModulePermission.MODULE_COMMAND):
+		return _diagnostic_api_error('没有运行手册建议操作权限', 403, 'forbidden')
+	item = AiopsRunbookRecommendation.objects.select_related('host', 'runbook').filter(
+		host__in=visible_hosts_for_request(request), id=recommendation_id,
+	).first()
+	if not item:
+		return _diagnostic_api_error('运行手册建议不存在', 404, 'not_found')
+	try:
+		record, approval = initiate_runbook_recommendation(request, item)
+	except PermissionError as exc:
+		return _diagnostic_api_error(str(exc), 403, 'host_forbidden')
+	except ValueError as exc:
+		return _diagnostic_api_error(str(exc), 400, 'validation_error')
+	except Exception:
+		# Keep command/SSH details out of the AIOps response.
+		return _diagnostic_api_error('运行手册建议提交失败', 400, 'initiation_failed')
+	return JsonResponse({'ok': True, 'requires_approval': True, 'recommendation': _runbook_recommendation_payload(item), 'command_execution_id': record.id, 'approval_id': approval.id}, status=202)
 
 
 def _diagnostic_api_error(message, status, code):
@@ -235,6 +576,26 @@ def service_workbench(request, service_id):
 		'window_end': timezone.localtime(window_end).strftime('%Y-%m-%d %H:%M:%S'),
 		**result,
 	})
+
+
+def service_reliability(request):
+	"""Return scoped, read-only reliability scores for catalog services."""
+	if request.method != 'GET':
+		return _diagnostic_api_error('仅支持 GET 请求', 405, 'method_not_allowed')
+	if not request.session.get('is_login') or not request.session.get('user_id'):
+		return _diagnostic_api_error('未登录', 401, 'unauthorized')
+	if not has_role(request, DevOpsRole.ROLE_VIEWER, DevOpsModulePermission.MODULE_SERVICE):
+		return _diagnostic_api_error('没有服务可靠性查看权限', 403, 'forbidden')
+	windows = {'24h': timezone.timedelta(hours=24), '7d': timezone.timedelta(days=7), '30d': timezone.timedelta(days=30)}
+	window_key = request.GET.get('window', '24h')
+	if window_key not in windows:
+		return _diagnostic_api_error('时间窗口无效', 400, 'validation_error')
+	window_end = timezone.now()
+	return JsonResponse({'ok': True, 'window': window_key, 'results': build_service_reliability(
+		visible_catalog_services(request).prefetch_related('hosts'),
+		list(visible_hosts_for_request(request)), window_end - windows[window_key], window_end,
+		now=window_end,
+	)})
 
 
 def _normalize_identifier(value, limit):
@@ -613,6 +974,20 @@ def dashboard(request):
 	)
 	config = AiopsIntegration.current()
 	alert_analyses = _analysis_queryset_for_hosts(hosts)[:20]
+	investigation_access = all(
+		has_role(request, DevOpsRole.ROLE_VIEWER, module) for module in INVESTIGATION_MODULES
+	)
+	investigation_services = list(visible_catalog_services(request)) if investigation_access else []
+	k8s_access = (has_role(request, DevOpsRole.ROLE_VIEWER, DevOpsModulePermission.MODULE_CLUSTER)
+		and has_role(request, DevOpsRole.ROLE_VIEWER, DevOpsModulePermission.MODULE_SERVICE))
+	k8s_clusters = []
+	if k8s_access:
+		k8s_clusters = list(K8sCluster.objects.filter(
+			service_workload_mappings__service__in=visible_catalog_services(request)
+		).distinct())
+	operator_access = all(has_role(request, DevOpsRole.ROLE_VIEWER, module) for module in (
+		DevOpsModulePermission.MODULE_ALERT, DevOpsModulePermission.MODULE_METRIC,
+		DevOpsModulePermission.MODULE_DEPLOYMENT, DevOpsModulePermission.MODULE_SERVICE))
 	payload = {
 		'updated_at': timezone.localtime(timezone.now()).strftime('%Y-%m-%d %H:%M:%S'),
 		'counts': {
@@ -642,7 +1017,38 @@ def dashboard(request):
 		'change_impacts': change_impacts,
 		'alert_quality_suggestions': alert_quality_suggestions,
 		'investigation_timelines': investigation_timelines,
-		'runbook_effectiveness_suggestions': runbook_effectiveness_suggestions,
+		'investigations_endpoint': (
+			reverse('aiops:api_investigations') if investigation_access else None
+		),
+		'investigation_feedback_endpoint_template': (
+			reverse('aiops:api_investigation_feedback', args=[999999]).replace('999999', '{investigation_id}')
+			if investigation_access else None
+		),
+		'investigation_scope': {
+			'hosts': [{'id': host.id, 'name': _host_name(host)} for host in hosts],
+			'services': [{'id': service.id, 'name': service.name} for service in investigation_services],
+		},
+		'k8s_analyzer_endpoint_template': (
+			reverse('aiops:api_k8s_analyzer', args=[999999]).replace('999999', '{cluster_id}')
+			if k8s_access else None
+		),
+		'k8s_analyzer_can_refresh': has_role(
+			request, DevOpsRole.ROLE_ADMIN, DevOpsModulePermission.MODULE_CLUSTER,
+		),
+		'k8s_clusters': [{'id': cluster.id, 'name': cluster.name, 'default_namespace': cluster.default_namespace}
+			for cluster in k8s_clusters],
+		'operator_scan_endpoint': reverse('aiops:api_operator_scan') if operator_access else None,
+		'runbook_recommendations_endpoint': (
+			reverse('aiops:api_runbook_recommendations')
+			if has_role(request, DevOpsRole.ROLE_VIEWER, DevOpsModulePermission.MODULE_COMMAND) else None
+		),
+		'runbook_recommendation_initiate_endpoint_template': (
+			reverse('aiops:api_runbook_recommendation_initiate', args=[999999]).replace(
+				'999999', '{recommendation_id}'
+			)
+			if has_role(request, DevOpsRole.ROLE_OPERATOR, DevOpsModulePermission.MODULE_COMMAND) else None
+		),
+	'runbook_effectiveness_suggestions': runbook_effectiveness_suggestions,
 		'runbooks': _runbooks(request, hosts),
 		'diagnostic_evidence': {
 			'endpoint': reverse('aiops:api_diagnostic_evidence'),
@@ -656,6 +1062,18 @@ def dashboard(request):
 			if has_role(request, DevOpsRole.ROLE_VIEWER, DevOpsModulePermission.MODULE_ALERT)
 			else None
 		),
+		'alert_quality_governance_endpoint': (
+			reverse('aiops:api_alert_quality_governance')
+			if has_role(request, DevOpsRole.ROLE_VIEWER, DevOpsModulePermission.MODULE_ALERT)
+			else None
+		),
+		'alert_quality_governance_review_endpoint_template': (
+			reverse('devops:api_alert_quality_governance_review', args=['__suggestion_key__']).replace(
+				'__suggestion_key__', '{suggestion_key}'
+			)
+			if has_role(request, DevOpsRole.ROLE_OPERATOR, DevOpsModulePermission.MODULE_ALERT)
+			else None
+		),
 		'signal_freshness_endpoint': (
 			reverse('aiops:api_signal_freshness')
 			if has_role(request, DevOpsRole.ROLE_VIEWER, DevOpsModulePermission.MODULE_METRIC)
@@ -666,9 +1084,20 @@ def dashboard(request):
 			if has_role(request, DevOpsRole.ROLE_VIEWER, DevOpsModulePermission.MODULE_SERVICE)
 			else None
 		),
+		'service_reliability_endpoint': (
+			reverse('aiops:api_service_reliability')
+			if has_role(request, DevOpsRole.ROLE_VIEWER, DevOpsModulePermission.MODULE_SERVICE)
+			else None
+		),
 		'service_workbench_endpoint_template': (
 			reverse('aiops:api_service_workbench', args=[999999]).replace('999999', '{service_id}')
 			if has_role(request, DevOpsRole.ROLE_VIEWER, DevOpsModulePermission.MODULE_SERVICE)
+			else None
+		),
+		'capacity_cost_simulation_endpoint': (
+			reverse('devops:api_capacity_cost_simulation')
+			if (has_role(request, DevOpsRole.ROLE_OPERATOR, DevOpsModulePermission.MODULE_METRIC)
+				and has_role(request, DevOpsRole.ROLE_OPERATOR, DevOpsModulePermission.MODULE_SERVICE))
 			else None
 		),
 		'integration': {
@@ -676,6 +1105,9 @@ def dashboard(request):
 			'llm_configured': bool(config.llm_url),
 			'llm_api_key_set': bool(config.llm_api_key),
 			'enabled': config.enabled,
+			'can_manage': has_role(
+				request, DevOpsRole.ROLE_ADMIN, DevOpsModulePermission.MODULE_ALERT,
+			),
 			'csrf': get_token(request),
 		},
 		'alert_analyses': [_analysis_payload(item) for item in alert_analyses],
@@ -688,9 +1120,21 @@ def dashboard(request):
 
 
 @session_login_required
+def alert_quality_governance(request):
+	"""Return scoped, read-only alert-quality governance aggregates."""
+	if request.method != 'GET':
+		return JsonResponse({'ok': False, 'code': 'method_not_allowed', 'message': '仅支持 GET 请求'}, status=405)
+	if not has_role(request, DevOpsRole.ROLE_VIEWER, DevOpsModulePermission.MODULE_ALERT):
+		return JsonResponse({'ok': False, 'code': 'forbidden', 'message': '没有告警查看权限'}, status=403)
+	return JsonResponse({'ok': True, **alert_quality_governance_payload(request)})
+
+
+@session_login_required
 def save_config(request):
 	if request.method != 'POST':
 		return HttpResponseNotAllowed(['POST'])
+	if not has_role(request, DevOpsRole.ROLE_ADMIN, DevOpsModulePermission.MODULE_ALERT):
+		return JsonResponse({'ok': False, 'code': 'forbidden', 'message': '没有 AIOps 配置管理权限'}, status=403)
 	config = AiopsIntegration.current()
 	alertmanager_url = (request.POST.get('alertmanager_url') or '').strip()
 	llm_url = (request.POST.get('llm_url') or '').strip()

@@ -157,6 +157,19 @@ body {
     font-size: 11px;
 }
 
+.navbar-custom .sidebar-subnav-heading {
+    padding: 9px 10px 3px 10px;
+    color: var(--ops-muted, #64748b);
+    font-size: 10px;
+    font-weight: 800;
+    letter-spacing: .08em;
+    text-transform: uppercase;
+}
+
+.navbar-custom .sidebar-subnav-heading + li .sidebar-subnav-link {
+    padding-top: 5px !important;
+}
+
 .navbar-custom .nav-link {
     display: flex;
     align-items: center;

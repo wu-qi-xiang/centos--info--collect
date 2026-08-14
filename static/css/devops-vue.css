@@ -65,6 +65,11 @@ body.ops-console .devops-vue-shell:not(.ops-geist-console) .vue-stat-icon { back
 .ops-geist-console .vue-stat-note,
 .ops-geist-console .vue-row-meta { color: var(--ops-geist-muted); }
 .ops-geist-console .vue-tabs { gap: 2px; padding: 4px; }
+.ops-geist-console .vue-tab-group { padding: 2px 6px 3px; border-color: var(--ops-geist-line); }
+.ops-geist-console .vue-tab-group-label { min-height: 19px; color: var(--ops-geist-muted); font-size: 9px; }
+.ops-geist-console .vue-tab-group-label i { color: var(--ops-geist-blue); }
+.ops-geist-console .vue-tab-group-label small { display: none; }
+.ops-geist-console .vue-tab-group-items { gap: 2px; }
 .ops-geist-console .vue-tab { min-height: 32px; border-radius: 4px; padding: 6px 9px; color: #525252; font-size: 13px; font-weight: 600; }
 .ops-geist-console .vue-tab.active,
 .ops-geist-console .vue-tab:hover { color: var(--ops-geist-blue); background: #eef6ff; }
@@ -192,14 +197,58 @@ body.ops-console .devops-vue-shell:not(.ops-geist-console) .vue-stat-icon { back
 
 .vue-tabs {
     display: flex;
-    flex-wrap: nowrap;
-    gap: 6px;
+    flex-wrap: wrap;
+    align-items: stretch;
+    gap: 0;
     background: var(--ops-surface);
     border: 1px solid var(--ops-border);
     border-radius: var(--ops-radius);
     padding: 8px;
     overflow-x: auto;
     scrollbar-width: none;
+}
+
+.vue-tab-group {
+    display: flex;
+    flex-direction: column;
+    min-width: 0;
+    padding: 3px 10px 4px;
+    border-inline-start: 1px solid var(--ops-border);
+}
+
+.vue-tab-group:first-child { border-inline-start: 0; }
+
+.vue-tab-group-label {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    min-height: 22px;
+    color: var(--ops-muted);
+    font-size: 10px;
+    font-weight: 800;
+    letter-spacing: .04em;
+    text-transform: uppercase;
+    white-space: nowrap;
+}
+
+.vue-tab-group-label i {
+    width: 14px;
+    color: var(--ops-primary);
+    text-align: center;
+}
+
+.vue-tab-group-label small {
+    color: var(--ops-muted);
+    font-size: 10px;
+    font-weight: 500;
+    letter-spacing: 0;
+    text-transform: none;
+}
+
+.vue-tab-group-items {
+    display: flex;
+    flex-wrap: nowrap;
+    gap: 3px;
 }
 
 .vue-tabs::-webkit-scrollbar {
@@ -692,6 +741,18 @@ body.ops-console .devops-vue-shell:not(.ops-geist-console) .vue-stat-icon { back
         scroll-snap-type: x proximity;
     }
 
+    .vue-tab-group {
+        flex: 1 1 100%;
+        padding: 4px 0;
+        border-inline-start: 0;
+        border-block-start: 1px solid var(--ops-border);
+    }
+
+    .vue-tab-group:first-child { border-block-start: 0; }
+    .vue-tab-group-label { padding-inline: 4px; }
+    .vue-tab-group-items { overflow-x: auto; scrollbar-width: none; }
+    .vue-tab-group-items::-webkit-scrollbar { display: none; }
+
     .vue-tab {
         flex: 0 0 auto;
         justify-content: center;
@@ -883,4 +944,69 @@ body.ops-console .ops-bright-workbench .vue-tab:hover { background: #edf5ff; col
     .ops-bright-workbench .ops-workbench-queues { grid-template-columns: minmax(0, 1fr); }
     .ops-bright-workbench .ops-work-item { grid-template-columns: minmax(0, 1fr); gap: 7px; }
     .ops-bright-workbench .ops-work-item .vue-status { justify-self: start; }
+}
+.ops-readiness-grid { display: grid; gap: 8px; }
+.ops-readiness-grid .vue-command-row { align-items: center; }
+.vue-grid-span-2 { grid-column: 1 / -1; }
+
+/* Read-only incident command center: safe aggregate signal, bounded timelines. */
+.ops-command-center { display: grid; gap: 10px; min-width: 0; }
+.ops-command-center-heading {
+    display: flex; align-items: flex-start; justify-content: space-between; gap: 16px;
+    padding: 13px 14px; border: 1px solid var(--ops-geist-line); border-radius: 6px;
+    background: var(--ops-geist-surface);
+}
+.ops-command-center-kicker { color: var(--ops-geist-muted); font-size: 11px; font-weight: 750; }
+.ops-command-center-heading h2 { margin: 2px 0 3px; color: var(--ops-geist-text); font-size: 16px; font-weight: 700; }
+.ops-command-center-heading p { margin: 0; color: var(--ops-geist-muted); font-size: 12px; }
+.ops-command-center-risk { flex: 0 0 auto; }
+.ops-command-center-actions { display: flex; align-items: center; justify-content: flex-end; gap: 8px; flex-wrap: wrap; }
+.ops-command-center-actions .vue-row-meta { white-space: nowrap; }
+.ops-command-center-counts { display: grid; grid-template-columns: repeat(8, minmax(0, 1fr)); gap: 8px; min-width: 0; }
+.ops-command-center-count {
+    display: grid; gap: 4px; min-width: 0; padding: 10px; border: 1px solid var(--ops-geist-line);
+    border-radius: 5px; background: var(--ops-geist-surface);
+}
+.ops-command-center-count span { color: var(--ops-geist-muted); font-size: 11px; font-weight: 650; overflow-wrap: anywhere; }
+.ops-command-center-count strong { color: var(--ops-geist-text); font-size: 20px; line-height: 1; }
+.ops-command-center-count.is-danger { border-color: #fecaca; background: #fffafa; }
+.ops-command-center-count.is-danger strong { color: var(--ops-geist-red); }
+.ops-command-center-count.is-warning { border-color: #fde68a; background: #fffdf7; }
+.ops-command-center-count.is-warning strong { color: var(--ops-geist-amber); }
+.ops-command-center-grid { display: grid; grid-template-columns: minmax(0, 1.1fr) minmax(0, .9fr); gap: 10px; min-width: 0; }
+.ops-command-timeline, .ops-command-actions { display: grid; gap: 0; }
+.ops-command-timeline-item {
+    display: grid; grid-template-columns: 15px minmax(0, 1fr); gap: 9px; min-width: 0;
+    padding: 9px 0; border-bottom: 1px solid var(--ops-geist-line);
+}
+.ops-command-timeline-item:last-child { border-bottom: 0; }
+.ops-command-timeline-dot { width: 8px; height: 8px; margin-top: 5px; border-radius: 50%; background: #a3a3a3; }
+.ops-command-timeline-dot.critical, .ops-command-timeline-dot.failed { background: var(--ops-geist-red); }
+.ops-command-timeline-dot.high, .ops-command-timeline-dot.warning, .ops-command-timeline-dot.pending { background: var(--ops-geist-amber); }
+.ops-command-timeline-dot.success, .ops-command-timeline-dot.resolved, .ops-command-timeline-dot.completed { background: var(--ops-geist-green); }
+.ops-command-timeline-dot.running, .ops-command-timeline-dot.processing { background: var(--ops-geist-blue); }
+.ops-command-action {
+    display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 10px; align-items: center;
+    padding: 9px 0; border-bottom: 1px solid var(--ops-geist-line);
+}
+.ops-command-action:last-child { border-bottom: 0; }
+.ops-command-action.is-overdue { border-inline-start: 3px solid var(--ops-geist-red); padding-inline-start: 8px; }
+.ops-command-action-main { min-width: 0; }
+.ops-command-action-main .vue-row-title { overflow-wrap: anywhere; }
+.ops-command-action-status { display: grid; justify-items: end; gap: 4px; }
+.ops-command-priority { color: var(--ops-geist-muted); font-size: 11px; font-weight: 650; }
+.ops-command-action-summary { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 8px; }
+.ops-command-action-summary div { display: grid; gap: 4px; padding: 10px; border: 1px solid var(--ops-geist-line); border-radius: 5px; }
+.ops-command-action-summary span { color: var(--ops-geist-muted); font-size: 11px; font-weight: 650; }
+.ops-command-action-summary strong { color: var(--ops-geist-text); font-size: 18px; line-height: 1; }
+@media (max-width: 760px) {
+    .vue-grid-span-2 { grid-column: auto; }
+    .ops-readiness-grid .vue-command-row { align-items: flex-start; flex-direction: column; }
+    .ops-command-center-heading { flex-direction: column; }
+    .ops-command-center-actions { width: 100%; justify-content: flex-start; }
+    .ops-command-center-counts { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+    .ops-command-center-grid { grid-template-columns: minmax(0, 1fr); }
+    .ops-command-action { grid-template-columns: minmax(0, 1fr); gap: 6px; }
+    .ops-command-action-status { justify-items: start; grid-auto-flow: column; justify-content: start; align-items: center; }
+    .ops-command-action-summary { grid-template-columns: repeat(3, minmax(0, 1fr)); }
 }

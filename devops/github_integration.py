@@ -13,6 +13,7 @@ from .services import (
     enqueue_background_job,
     execute_deployment_release,
     record_integration_health_event,
+    require_deployment_risk_approval,
     require_deployment_slo_approval,
 )
 
@@ -20,6 +21,7 @@ from .services import (
 MAX_WEBHOOK_BODY_BYTES = 1024 * 1024
 DELIVERY_ID_RE = re.compile(r'^[A-Za-z0-9-]{1,100}$')
 SHA_RE = re.compile(r'^[0-9a-f]{40,64}$')
+QUEUE_AUDIT_ACTION = 'GitHub deployment queued'
 
 
 def record_github_delivery_health(status, category, summary):
@@ -216,8 +218,9 @@ def github_workflow_run(request):
             status=ApprovalRequest.STATUS_PENDING,
         ).exists()
         slo_approval = require_deployment_slo_approval(release, requester='github')
+        risk_approval = require_deployment_risk_approval(release, requester='github')
         approval_required = (
-            approval_pending or slo_approval or DevOpsSetting.current().force_deploy_approval
+            approval_pending or slo_approval or risk_approval or DevOpsSetting.current().force_deploy_approval
         )
         AuditLog.objects.create(
             user='github',
@@ -237,6 +240,28 @@ def github_workflow_run(request):
                 'Accepted GitHub delivery; deployment is awaiting approval.',
             )
             return webhook_response(True, 202, 'awaiting_approval', release_id=release.id)
+
+        # A release row lock serializes deliveries.  Keep a safe per-release
+        # marker so distinct GitHub delivery IDs cannot enqueue the same pending
+        # release more than once.
+        if AuditLog.objects.filter(
+                action=QUEUE_AUDIT_ACTION,
+                target_type='DeploymentRelease',
+                target_id=str(release.id)).exists():
+            record_github_delivery_health(
+                IntegrationHealthEvent.STATUS_SUCCESS,
+                IntegrationHealthEvent.CATEGORY_DUPLICATE,
+                'Ignored duplicate deployment queue request.',
+            )
+            return webhook_response(True, 202, 'duplicate_delivery', release_id=release.id)
+        AuditLog.objects.create(
+            user='github',
+            action=QUEUE_AUDIT_ACTION,
+            target_type='DeploymentRelease',
+            target_id=str(release.id),
+            detail='Deployment queue claimed for GitHub workflow delivery.',
+            ip_address='',
+        )
 
     enqueue_background_job(execute_deployment_release, release)
     record_github_delivery_health(

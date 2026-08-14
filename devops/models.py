@@ -76,6 +76,22 @@ class DevOpsModulePermission(models.Model):
         return '%s:%s:%s' % (self.user.user, self.module, self.role)
 
 
+class ChatOpsIdentity(models.Model):
+    """A revocable WeCom identity binding; no incoming message data is stored."""
+    user = models.OneToOneField(User, on_delete=models.CASCADE, related_name='chatops_identity')
+    wecom_user_id = models.CharField(max_length=128, unique=True)
+    enabled = models.BooleanField(default=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        db_table = 'devops_chatops_identity'
+        ordering = ['wecom_user_id']
+
+    def __str__(self):
+        return '%s:%s' % (self.wecom_user_id, self.user.user)
+
+
 class DevOpsHostScope(models.Model):
     user = models.ForeignKey(User, on_delete=models.CASCADE)
     groups = models.ManyToManyField('HostGroup', blank=True)
@@ -361,6 +377,10 @@ class RunbookTemplate(models.Model):
     trigger_kind = models.CharField(max_length=20, choices=TRIGGER_CHOICES, default=TRIGGER_MANUAL)
     command_template = models.TextField()
     service = models.ForeignKey(ServiceCatalog, null=True, blank=True, on_delete=models.SET_NULL, related_name='runbook_templates')
+    rollback_runbook = models.ForeignKey(
+        'self', null=True, blank=True, on_delete=models.PROTECT,
+        related_name='primary_runbooks',
+    )
     allowed_hosts = models.ManyToManyField(NewLinux, blank=True, related_name='runbook_templates')
     enabled = models.BooleanField(default=True)
     requires_approval = models.BooleanField(default=True)
@@ -393,6 +413,11 @@ class RunbookTemplate(models.Model):
             raise ValidationError({'command_template': '运行手册命令必须是固定的单行命令，不能包含插值、替换或调用方参数'})
         if not self.requires_approval:
             raise ValidationError({'requires_approval': '受控运行手册必须经过审批'})
+        if self.rollback_runbook_id:
+            if self.rollback_runbook_id == self.id:
+                raise ValidationError({'rollback_runbook': '回滚运行手册不能关联自身'})
+            if not self.rollback_runbook.enabled or not self.rollback_runbook.requires_approval:
+                raise ValidationError({'rollback_runbook': '回滚运行手册必须启用且需要审批'})
 
     def __str__(self):
         return '%s v%s' % (self.name, self.version)
@@ -609,6 +634,35 @@ class CommandExecution(models.Model):
         ordering = ['-created_at']
 
 
+class RunbookHealthVerification(models.Model):
+    """Safe local health evidence for one approved, terminal runbook execution."""
+    STATUS_HEALTHY = 'healthy'
+    STATUS_UNHEALTHY = 'unhealthy'
+    STATUS_CHOICES = (
+        (STATUS_HEALTHY, '健康'),
+        (STATUS_UNHEALTHY, '不健康'),
+    )
+
+    command_execution = models.OneToOneField(
+        CommandExecution, on_delete=models.CASCADE, related_name='health_verification',
+    )
+    status = models.CharField(max_length=20, choices=STATUS_CHOICES)
+    active_critical_alert_count = models.PositiveIntegerField(default=0)
+    summary = models.CharField(max_length=200)
+    rollback_approval = models.ForeignKey(
+        'ApprovalRequest', null=True, blank=True, on_delete=models.SET_NULL,
+        related_name='runbook_health_verifications',
+    )
+    verified_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        db_table = 'devops_runbook_health_verification'
+        ordering = ['-verified_at', '-id']
+        indexes = [
+            models.Index(fields=['status', '-verified_at'], name='devops_runbook_health_idx'),
+        ]
+
+
 class RunbookEffectivenessFeedback(models.Model):
     """Append-only, safe operator feedback for an approved runbook execution."""
     CLASSIFICATION_EFFECTIVE = 'effective'
@@ -819,6 +873,55 @@ class AlertQualityFeedback(models.Model):
         indexes = [models.Index(fields=['alert', '-created_at'], name='devops_alert_quality_idx')]
 
 
+class AlertQualityGovernanceReview(models.Model):
+    """Auditable review state for a deterministic alert-quality suggestion."""
+    STATUS_OPEN = 'open'
+    STATUS_ACCEPTED = 'accepted'
+    STATUS_REJECTED = 'rejected'
+    STATUS_IMPLEMENTED = 'implemented'
+    STATUS_CHOICES = (
+        (STATUS_OPEN, '待审核'),
+        (STATUS_ACCEPTED, '已接受'),
+        (STATUS_REJECTED, '已拒绝'),
+        (STATUS_IMPLEMENTED, '已实施'),
+    )
+
+    suggestion_key = models.CharField(max_length=96, unique=True)
+    metric = models.CharField(max_length=50)
+    classification = models.CharField(max_length=20, choices=AlertQualityFeedback.CLASSIFICATION_CHOICES)
+    action = models.CharField(max_length=50)
+    status = models.CharField(max_length=20, choices=STATUS_CHOICES, default=STATUS_OPEN)
+    review_note = models.CharField(max_length=500, blank=True)
+    reviewed_by = models.ForeignKey(User, null=True, blank=True, on_delete=models.SET_NULL,
+                                    related_name='alert_quality_governance_reviews')
+    rule_revision = models.ForeignKey(PrometheusRuleRevision, null=True, blank=True,
+                                      on_delete=models.SET_NULL,
+                                      related_name='alert_quality_governance_reviews')
+    first_seen_at = models.DateTimeField(auto_now_add=True)
+    last_seen_at = models.DateTimeField(auto_now=True)
+    reviewed_at = models.DateTimeField(null=True, blank=True)
+    implemented_at = models.DateTimeField(null=True, blank=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        db_table = 'devops_alert_quality_governance_review'
+        ordering = ['status', '-last_seen_at', '-id']
+        indexes = [
+            models.Index(fields=['status', '-last_seen_at'], name='devops_aqgr_status_seen_idx'),
+            models.Index(fields=['metric', 'classification'], name='devops_aqgr_metric_class_idx'),
+        ]
+
+    def clean(self):
+        if not self.pk:
+            return
+        original = AlertQualityGovernanceReview.objects.get(pk=self.pk)
+        immutable_fields = ('suggestion_key', 'metric', 'classification', 'action')
+        for field in immutable_fields:
+            if getattr(original, field) != getattr(self, field):
+                raise ValidationError('告警质量建议身份创建后不可修改。')
+
+
 class Incident(models.Model):
     SEVERITY_LOW = 'low'
     SEVERITY_MEDIUM = 'medium'
@@ -879,6 +982,55 @@ class IncidentTimeline(models.Model):
     class Meta:
         db_table = 'devops_incident_timeline'
         ordering = ['created_at', 'id']
+
+
+class IncidentActionItem(models.Model):
+    STATUS_OPEN = 'open'
+    STATUS_IN_PROGRESS = 'in_progress'
+    STATUS_COMPLETED = 'completed'
+    STATUS_CANCELLED = 'cancelled'
+    STATUS_CHOICES = (
+        (STATUS_OPEN, '待处理'),
+        (STATUS_IN_PROGRESS, '处理中'),
+        (STATUS_COMPLETED, '已完成'),
+        (STATUS_CANCELLED, '已取消'),
+    )
+    PRIORITY_LOW = 'low'
+    PRIORITY_MEDIUM = 'medium'
+    PRIORITY_HIGH = 'high'
+    PRIORITY_CRITICAL = 'critical'
+    PRIORITY_CHOICES = (
+        (PRIORITY_LOW, '低'),
+        (PRIORITY_MEDIUM, '中'),
+        (PRIORITY_HIGH, '高'),
+        (PRIORITY_CRITICAL, '紧急'),
+    )
+
+    incident = models.ForeignKey(Incident, on_delete=models.CASCADE, related_name='action_items')
+    title = models.CharField(max_length=300)
+    description = models.TextField(blank=True)
+    assignee = models.ForeignKey(
+        'RemoteLinux.User', null=True, blank=True, on_delete=models.SET_NULL,
+        related_name='incident_action_items',
+    )
+    status = models.CharField(max_length=20, choices=STATUS_CHOICES, default=STATUS_OPEN)
+    priority = models.CharField(max_length=20, choices=PRIORITY_CHOICES, default=PRIORITY_MEDIUM)
+    due_at = models.DateTimeField(null=True, blank=True)
+    completed_at = models.DateTimeField(null=True, blank=True)
+    created_by = models.CharField(max_length=100, blank=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        db_table = 'devops_incident_action_item'
+        ordering = ['status', 'due_at', '-created_at', '-id']
+        indexes = [
+            models.Index(fields=['incident', 'status'], name='devops_ia_incident_status_idx'),
+            models.Index(fields=['status', 'due_at'], name='devops_ia_status_due_idx'),
+        ]
+
+    def __str__(self):
+        return self.title
 
 
 class InspectionRecommendation(models.Model):
@@ -980,12 +1132,14 @@ class NotificationLog(models.Model):
     EVENT_APPROVAL = 'approval'
     EVENT_DEPLOYMENT = 'deployment'
     EVENT_TEST = 'test'
+    EVENT_INTEGRATION_HEALTH = 'integration_health'
 
     EVENT_CHOICES = (
         (EVENT_ALERT, '告警'),
         (EVENT_APPROVAL, '审批'),
         (EVENT_DEPLOYMENT, '发布'),
         (EVENT_TEST, '测试'),
+        (EVENT_INTEGRATION_HEALTH, '集成健康'),
     )
 
     STATUS_SUCCESS = 'success'
@@ -1052,6 +1206,27 @@ class AlertNotificationEscalation(models.Model):
     @classmethod
     def current(cls):
         return cls.objects.first() or cls()
+
+
+class IntegrationHealthEscalationPolicy(models.Model):
+    """Opt-in notification policy for repeated external integration failures."""
+    enabled = models.BooleanField(default=False)
+    consecutive_failures = models.PositiveSmallIntegerField(default=3)
+    cooldown_minutes = models.PositiveIntegerField(default=60)
+    notify_recovery = models.BooleanField(default=True)
+    channel = models.ForeignKey(
+        NotificationChannel, null=True, blank=True, on_delete=models.SET_NULL,
+        related_name='integration_health_policies',
+    )
+    updated_by = models.CharField(max_length=100, blank=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        db_table = 'devops_integration_health_escalation'
+
+    @classmethod
+    def current(cls):
+        return cls.objects.select_related('channel').first() or cls()
 
 
 class ServiceOnCallPolicy(models.Model):

@@ -1,5 +1,9 @@
-from django.test import TestCase
-from django.urls import reverse
+import json
+from datetime import timedelta
+
+from django.test import Client, RequestFactory, TestCase
+from django.urls import resolve, reverse
+from django.utils import timezone
 from unittest import mock
 import socket
 from django.core.files.uploadedfile import SimpleUploadedFile
@@ -7,9 +11,14 @@ from django.core.files.uploadedfile import SimpleUploadedFile
 from PyLinux.crypto import decrypt_text, encrypt_text
 from devops.models import AuditLog, DevOpsHostScope, DevOpsRole, HostGroup
 from .collectors import collect_remote_detail, collect_remote_usage
-from .models import NewLinux, User
+from .models import HostAgent, NewLinux, User
+from .agent import create_host_agent, ingest_heartbeat, revoke_host_agent
 from .ssh_utils import create_host_ssh_client, describe_ssh_error
-from .views import _encrypt_host_credentials, _update_host_credentials
+from .views import (
+    _encrypt_host_credentials, _update_host_credentials, agent_heartbeat,
+    agent_fleet, agent_fleet_bulk_revoke, agent_register, agent_revoke,
+    agent_rotate_credential, agent_management,
+)
 
 
 class FakeSSHResponse(object):
@@ -149,6 +158,285 @@ class HostCredentialTests(TestCase):
 
     def test_describe_ssh_error_classifies_timeout(self):
         self.assertIn('超时', describe_ssh_error(socket.timeout('timed out')))
+
+
+class HostAgentTests(TestCase):
+    def setUp(self):
+        self.host = NewLinux.objects.create(
+            linux_name='agent-host',
+            linux_ip='127.0.0.9',
+            linux_port='22',
+            linux_user='root',
+        )
+
+    def test_registration_returns_opaque_credential_once_and_stores_only_hash(self):
+        agent, credential = create_host_agent(self.host)
+
+        self.assertTrue(credential)
+        self.assertNotEqual(agent.credential_hash, credential)
+        self.assertNotIn(credential, agent.credential_hash)
+        self.assertEqual(HostAgent.objects.get(host=self.host).registration_id, agent.registration_id)
+
+    def test_heartbeat_accepts_only_bounded_safe_summary(self):
+        agent, credential = create_host_agent(self.host)
+
+        accepted = ingest_heartbeat(
+            'Bearer %s.%s' % (agent.registration_id, credential),
+            {
+                'agent_version': '1.2.3',
+                'collection_delay_seconds': 12,
+                'system_summary': {
+                    'os_family': 'linux',
+                    'cpu_count': 4,
+                    'memory_total_mb': 8192,
+                    'disk_total_gb': 80,
+                },
+            },
+        )
+
+        self.assertTrue(accepted.ok)
+        agent.refresh_from_db()
+        self.assertEqual(agent.agent_version, '1.2.3')
+        self.assertEqual(agent.system_summary['cpu_count'], 4)
+        self.assertIsNotNone(agent.last_heartbeat_at)
+
+    def test_heartbeat_rejects_unsafe_or_unknown_payload_and_revoked_credential(self):
+        agent, credential = create_host_agent(self.host)
+        header = 'Bearer %s.%s' % (agent.registration_id, credential)
+
+        unsafe = ingest_heartbeat(header, {
+            'agent_version': '1.2.3',
+            'collection_delay_seconds': 0,
+            'system_summary': {'os_family': {'command_output': 'not-allowed'}},
+        })
+        unknown = ingest_heartbeat(header, {
+            'agent_version': '1.2.3',
+            'collection_delay_seconds': 0,
+            'system_summary': {'os_family': 'linux'},
+            'command_output': 'not-allowed',
+        })
+        revoke_host_agent(agent)
+        revoked = ingest_heartbeat(header, {
+            'agent_version': '1.2.3',
+            'collection_delay_seconds': 0,
+            'system_summary': {'os_family': 'linux'},
+        })
+
+        self.assertFalse(unsafe.ok)
+        self.assertFalse(unknown.ok)
+        self.assertFalse(revoked.ok)
+        self.assertEqual(revoked.code, 'unauthorized')
+
+
+class HostAgentViewTests(TestCase):
+    def setUp(self):
+        self.factory = RequestFactory()
+        self.user = User.objects.create(
+            user='agent-operator', email='agent-operator@example.com',
+            password='plain-password', confirm_pwd='plain-password',
+        )
+        self.host = NewLinux.objects.create(
+            linux_name='agent-allowed', linux_ip='127.0.0.21',
+            linux_port='22', linux_user='root',
+        )
+        self.blocked_host = NewLinux.objects.create(
+            linux_name='agent-blocked', linux_ip='127.0.0.22',
+            linux_port='22', linux_user='root',
+        )
+        DevOpsRole.objects.create(user=self.user, role=DevOpsRole.ROLE_OPERATOR)
+        group = HostGroup.objects.create(name='agent-allowed-group')
+        group.hosts.add(self.host)
+        scope = DevOpsHostScope.objects.create(user=self.user)
+        scope.groups.add(group)
+        self.session = self.client.session
+        self.session['is_login'] = True
+        self.session['user_id'] = self.user.id
+        self.session['user_name'] = self.user.user
+        self.session.save()
+
+    def _authenticated_request(self, path='/agent/'):
+        request = self.factory.post(path)
+        request.session = self.session
+        return request
+
+    def test_registration_view_enforces_host_scope_and_returns_credential_once(self):
+        denied = agent_register(self._authenticated_request(), self.blocked_host.id)
+        accepted = agent_register(self._authenticated_request(), self.host.id)
+        revoked = agent_revoke(self._authenticated_request(), self.host.id)
+
+        self.assertEqual(denied.status_code, 403)
+        self.assertEqual(accepted.status_code, 201)
+        self.assertEqual(revoked.status_code, 200)
+        self.assertEqual(set(json.loads(accepted.content)), {
+            'registration_id', 'credential', 'authorization_format',
+        })
+        self.assertTrue(AuditLog.objects.filter(action='注册主机Agent').exists())
+        self.assertTrue(AuditLog.objects.filter(action='吊销主机Agent').exists())
+
+    def test_heartbeat_view_rejects_unknown_json_fields(self):
+        agent, credential = create_host_agent(self.host)
+        request = self.factory.post(
+            '/agent/heartbeat/',
+            data=b'{"agent_version":"1.0","collection_delay_seconds":0,"system_summary":{},"private_key":"x"}',
+            content_type='application/json',
+            HTTP_AUTHORIZATION='Bearer %s.%s' % (agent.registration_id, credential),
+        )
+
+        response = agent_heartbeat(request)
+
+        self.assertEqual(response.status_code, 400)
+        self.assertEqual(json.loads(response.content)['status'], 'invalid_payload')
+
+    def test_agent_urls_resolve_to_the_expected_views(self):
+        self.assertEqual(resolve('/agents/%s/' % self.host.id).func, agent_management)
+        self.assertEqual(resolve('/api/agents/%s/register/' % self.host.id).func, agent_register)
+        self.assertEqual(resolve('/api/agents/%s/revoke/' % self.host.id).func, agent_revoke)
+        self.assertEqual(resolve('/api/agent/heartbeat/').func, agent_heartbeat)
+
+
+class HostAgentFleetViewTests(TestCase):
+    def setUp(self):
+        self.user = User.objects.create(
+            user='fleet-operator', email='fleet-operator@example.com',
+            password='plain-password', confirm_pwd='plain-password',
+        )
+        self.allowed_host = NewLinux.objects.create(
+            linux_name='fleet-allowed', linux_ip='127.0.0.31',
+            linux_port='22', linux_user='root',
+        )
+        self.offline_host = NewLinux.objects.create(
+            linux_name='fleet-offline', linux_ip='127.0.0.32',
+            linux_port='22', linux_user='root',
+        )
+        self.blocked_host = NewLinux.objects.create(
+            linux_name='fleet-blocked', linux_ip='127.0.0.33',
+            linux_port='22', linux_user='root',
+        )
+        self.allowed_agent, _ = create_host_agent(self.allowed_host)
+        self.offline_agent, _ = create_host_agent(self.offline_host)
+        self.blocked_agent, _ = create_host_agent(self.blocked_host)
+        self.allowed_agent.last_heartbeat_at = timezone.now()
+        self.allowed_agent.save(update_fields=['last_heartbeat_at'])
+        self.offline_agent.last_heartbeat_at = timezone.now() - timedelta(hours=1)
+        self.offline_agent.save(update_fields=['last_heartbeat_at'])
+        DevOpsRole.objects.create(user=self.user, role=DevOpsRole.ROLE_OPERATOR)
+        group = HostGroup.objects.create(name='fleet-visible')
+        group.hosts.add(self.allowed_host, self.offline_host)
+        scope = DevOpsHostScope.objects.create(user=self.user)
+        scope.groups.add(group)
+        session = self.client.session
+        session['is_login'] = True
+        session['user_id'] = self.user.id
+        session['user_name'] = self.user.user
+        session.save()
+
+    def test_fleet_requires_login_and_security_operator_role(self):
+        self.assertEqual(Client().get(reverse('agent_fleet')).status_code, 302)
+        DevOpsRole.objects.filter(user=self.user).update(role=DevOpsRole.ROLE_VIEWER)
+        self.assertEqual(self.client.get(reverse('agent_fleet')).status_code, 403)
+
+    def test_fleet_lists_only_visible_hosts_and_filters_state(self):
+        response = self.client.get(reverse('agent_fleet'))
+        filtered = self.client.get(reverse('agent_fleet'), {'state': 'healthy'})
+
+        self.assertContains(response, 'fleet-allowed')
+        self.assertContains(response, 'fleet-offline')
+        self.assertNotContains(response, 'fleet-blocked')
+        self.assertContains(filtered, 'fleet-allowed')
+        self.assertEqual([row['host_name'] for row in filtered.context['fleet_rows']], ['fleet-allowed'])
+        self.assertNotContains(response, self.allowed_agent.credential_hash)
+
+    def test_fleet_marks_registered_agent_without_heartbeat_offline(self):
+        self.offline_agent.last_heartbeat_at = None
+        self.offline_agent.save(update_fields=['last_heartbeat_at'])
+
+        response = self.client.get(reverse('agent_fleet'), {'state': 'offline'})
+
+        self.assertEqual([row['host_name'] for row in response.context['fleet_rows']], ['fleet-offline'])
+
+    def test_bulk_revoke_requires_every_host_to_be_visible_before_changes(self):
+        response = self.client.post(reverse('agent_fleet_bulk_revoke'), {
+            'host_ids': [str(self.allowed_host.id), str(self.blocked_host.id)],
+        })
+
+        self.assertEqual(response.status_code, 403)
+        self.allowed_agent.refresh_from_db()
+        self.blocked_agent.refresh_from_db()
+        self.assertFalse(self.allowed_agent.is_revoked)
+        self.assertFalse(self.blocked_agent.is_revoked)
+
+    def test_bulk_revoke_and_single_host_rotation_are_post_only_and_audited(self):
+        self.assertEqual(self.client.get(reverse('agent_fleet_bulk_revoke')).status_code, 405)
+        self.assertEqual(self.client.get(reverse('agent_rotate_credential', args=[self.allowed_host.id])).status_code, 405)
+        original_hash = self.allowed_agent.credential_hash
+        rotated = self.client.post(reverse('agent_rotate_credential', args=[self.allowed_host.id]))
+        revoked = self.client.post(reverse('agent_fleet_bulk_revoke'), {
+            'host_ids': [str(self.offline_host.id)],
+        })
+
+        self.assertEqual(rotated.status_code, 201)
+        self.assertEqual(set(rotated.json()), {'registration_id', 'credential', 'authorization_format'})
+        self.allowed_agent.refresh_from_db()
+        self.offline_agent.refresh_from_db()
+        self.assertNotEqual(self.allowed_agent.credential_hash, original_hash)
+        self.assertTrue(self.offline_agent.is_revoked)
+        self.assertEqual(revoked.status_code, 200)
+        self.assertTrue(AuditLog.objects.filter(action='轮换主机Agent凭据').exists())
+        self.assertTrue(AuditLog.objects.filter(action='批量吊销主机Agent').exists())
+
+    def test_fleet_urls_resolve_to_expected_views(self):
+        self.assertEqual(resolve('/agents/').func, agent_fleet)
+        self.assertEqual(resolve('/api/agents/bulk-revoke/').func, agent_fleet_bulk_revoke)
+        self.assertEqual(resolve('/api/agents/%s/rotate/' % self.allowed_host.id).func, agent_rotate_credential)
+
+
+class HostAgentHealthTests(TestCase):
+    def setUp(self):
+        self.host = NewLinux.objects.create(
+            linux_name='agent-health-host', linux_ip='127.0.0.31',
+            linux_port='22', linux_user='root',
+        )
+        self.agent, self.credential = create_host_agent(self.host)
+
+    def test_evaluator_opens_and_resolves_agent_heartbeat_alerts(self):
+        from devops.models import AlertEvent
+        from .agent_health import evaluate_host_agent_health
+
+        now = timezone.now()
+        self.agent.last_heartbeat_at = now - timedelta(seconds=601)
+        self.agent.save(update_fields=['last_heartbeat_at'])
+
+        unhealthy = evaluate_host_agent_health(now=now, timeout_seconds=600)
+        alert = AlertEvent.objects.get(host=self.host, metric='agent_heartbeat')
+        self.assertEqual(unhealthy['offline'], 1)
+        self.assertEqual(alert.status, AlertEvent.STATUS_OPEN)
+
+        self.agent.last_heartbeat_at = now
+        self.agent.collection_delay_seconds = 0
+        self.agent.save(update_fields=['last_heartbeat_at', 'collection_delay_seconds'])
+        healthy = evaluate_host_agent_health(now=now, timeout_seconds=600)
+        alert.refresh_from_db()
+        self.assertEqual(healthy['recovered'], 1)
+        self.assertEqual(alert.status, AlertEvent.STATUS_RESOLVED)
+
+    def test_evaluator_marks_excessive_collection_delay_stale_and_skips_revoked_agents(self):
+        from devops.models import AlertEvent
+        from .agent_health import evaluate_host_agent_health
+
+        now = timezone.now()
+        self.agent.last_heartbeat_at = now
+        self.agent.collection_delay_seconds = 601
+        self.agent.save(update_fields=['last_heartbeat_at', 'collection_delay_seconds'])
+
+        stale = evaluate_host_agent_health(now=now, timeout_seconds=600)
+        self.assertEqual(stale['stale'], 1)
+        self.assertTrue(AlertEvent.objects.filter(host=self.host, metric='agent_heartbeat').exists())
+
+        revoke_host_agent(self.agent)
+        excluded = evaluate_host_agent_health(now=now, timeout_seconds=600)
+        self.assertEqual(excluded['revoked'], 1)
+        self.assertEqual(excluded['offline'], 0)
+        self.assertEqual(excluded['stale'], 0)
 
 
 class HostSecurityTests(TestCase):

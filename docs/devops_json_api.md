@@ -80,13 +80,14 @@
   - 返回服务 ID/名称、公开关键等级、漂移工作负载数量、依赖数量、风险与固定建议；不返回集群地址、清单、命名空间、资源名、哈希、kubeconfig 或凭据。接口只读取本地记录，不连接 Kubernetes 或执行修复。
 - `GET /devops/api/runbooks/`
   - 返回当前用户主机范围内、已明确绑定主机的运行手册安全摘要。需要命令模块只读权限。
-  - 返回 ID、名称、版本、触发类型、关联服务、启用和审批标记；不返回固定命令、命令输出、主机凭据或审批命令正文。
+  - 返回 ID、名称、版本、触发类型、关联服务、固定回滚运行手册的 ID/名称/版本、启用和审批标记；不返回固定命令、命令输出、主机凭据或审批命令正文。
 - `POST /devops/api/runbooks/` 和 `POST /devops/api/runbooks/<id>/update/`
   - 创建或更新版本化运行手册。需要安全策略模块管理员权限，关联服务和允许主机必须在当前主机范围内。
-  - 命令只接受固定单行文本，拒绝花括号插值、Shell 替换、反引号、换行和调用方参数；运行手册始终要求审批。创建和更新写入摘要审计。
+  - 可选 `rollback_runbook` 必须为启用且强制审批的固定运行手册，并覆盖主运行手册的全部允许主机；不允许关联自身。命令只接受固定单行文本，拒绝花括号插值、Shell 替换、反引号、换行和调用方参数；运行手册始终要求审批。创建和更新写入摘要审计。
 - `POST /devops/api/runbooks/<id>/initiate/`
   - JSON：`{"host_id": 1}`。需要命令模块运维操作权限，目标主机必须同时位于当前主机范围、运行手册允许主机和关联服务范围内。
   - 成功返回 `202`，创建待执行 `CommandExecution` 和 `ApprovalRequest.TYPE_COMMAND`；审批前不连接 SSH。批准后仅复用既有命令 Worker，不创建新的作业类型。AIOps 只提供运行手册 ID 和管理页链接，不能调用此接口或排队执行。
+  - 已批准的运行手册到达终态后，系统只根据同主机的本地活动严重告警写入脱敏健康验证。验证不健康且已配置合格的固定回滚运行手册时，系统只创建新的待审批回滚命令；不会执行 SSH、自动回滚或推断命令。
 - `GET /devops/api/runbook-executions/<id>/effectiveness-feedback/`
   - 读取已批准运行手册执行记录的效果反馈。需要命令模块只读权限，执行记录主机必须在当前用户授权范围内。
   - 仅返回反馈 ID、运行手册 ID/名称/版本、分类（`effective`、`partial`、`ineffective`）、安全备注、提交人和时间；不返回命令模板、执行命令、输出或错误。
@@ -98,6 +99,37 @@
   - `recent_commands`、`recent_alerts`、`host_metrics` 和相关统计均按当前用户可见主机范围过滤。
 
 ## 命令和任务
+
+### 平台可靠性
+
+#### 告警质量治理
+
+- `GET /aiops/api/alert-quality-governance/`
+  - 需要告警模块只读权限；按当前用户主机范围返回指标级告警质量建议及审核状态。
+  - 建议使用稳定 `suggestion_key` 关联审核记录；仅返回指标、分类、动作、反馈/主机计数和状态元数据，不返回告警正文、反馈备注、Webhook、命令或凭据。
+- `GET /devops/api/alert-quality-governance/reviews/`
+  - 需要告警模块只读权限；返回当前用户可见建议对应的安全审核摘要。审核备注只返回 `review_note_present`，不返回备注正文。
+- `POST /devops/api/alert-quality-governance/reviews/<suggestion_key>/`
+  - JSON：`{"status":"accepted|rejected|implemented","review_note":"可选，最多 500 字符"}`。需要告警模块运维操作权限，并且建议必须在当前用户主机范围内。
+  - 状态转换由服务端校验；重复提交目标状态返回 `200` 和 `code: "idempotent"`。该接口只记录人工审核和可选备注，不修改 Prometheus 规则、告警生命周期、通知或远程资源；状态变更写入审计日志。
+
+#### 受控 AIOps 运行手册建议
+
+- `GET /aiops/api/runbook-recommendations/`
+  - 需要命令模块只读权限；只返回当前用户主机范围内的建议 ID、告警/主机/运行手册 ID、摘要、状态和审批 ID。
+  - 不返回运行手册命令、SSH 输出、凭据、Webhook、Token 或远端响应。
+- `POST /aiops/api/runbook-recommendations/`
+  - JSON：`{"alert_id":1,"runbook_id":2,"summary":"可选，最多 300 字符"}`。需要命令模块运维权限，并校验告警主机范围、运行手册启用状态、必须审批、允许主机和关联服务范围。
+  - 建议按 `alert + runbook` 幂等；创建建议不会创建命令或连接远程主机。
+- `POST /aiops/api/runbook-recommendations/<id>/initiate/`
+  - 需要命令模块运维权限和主机范围；只创建既有 `CommandExecution` 与待审批 `ApprovalRequest`，返回 `202`。
+  - 审批前不会执行 SSH；批准后仍由既有审批和 Worker 流程执行。接口不会返回命令模板或执行详情。
+
+- `GET /devops/api/platform-reliability/`
+  - 只读平台自身的调度与通知投递健康摘要，需要登录并具备安全策略模块管理员权限。
+  - `reliability.scheduler[]` 仅返回内置任务名、当前状态、新鲜度、最后成功/完成时间、下次运行时间和当前可计算的失败次数；没有运行记录标记为 `absent`，过期标记为 `stale`，当前失败标记为 `failed`。
+  - `reliability.notifications[]` 按渠道类型聚合，仅返回渠道类型、配置数、投递总数/成功数/失败数、连续失败次数、最近成功/失败/尝试时间和健康状态。
+  - 不返回通知名称、Webhook URL、消息标题/正文、响应正文、命令、告警原文、密钥或其他敏感字段。接口只读，不重试、不发送通知、不执行任务。
 
 - `GET /devops/api/commands/?limit=50`
   - 命令执行记录，仅返回当前用户可见主机上的记录。
@@ -144,6 +176,12 @@
 
 ## 监控、告警、审批
 
+- `GET /devops/api/incident-command-center/`
+  - 统一事件指挥中心的只读本地聚合，需要告警模块只读权限，并严格应用当前用户的主机范围。
+  - 返回固定计数 `active_alerts/open_incidents/critical_incidents/unhealthy_releases/exhausted_slos/pending_approvals/failed_ci_deliveries`、行动项 `open/in_progress/overdue` 计数，以及最多 12 条元数据时间线。时间线仅含来源类型、ID、状态、严重度和时间。
+  - 发布仅在全部目标主机位于授权范围内时计入；事件复用 `scoped_incidents` 访问校验；服务 SLO 仅来自可见服务。接口只读取本地数据库，不调用网络，也不创建或更新任何记录。
+  - 不返回告警正文、事件标题/描述/时间线备注、行动项标题/描述、命令、输出、凭据、URL、发布脚本/版本/摘要或 CI 仓库、版本和摘要。
+
 - `GET /devops/api/metrics/?host=1&range=24h`
   - `range` 支持 `6h`、`24h`、`7d`、`30d`。
   - 返回 `labels` 和 `series.cpu/memory/disk`。
@@ -181,6 +219,12 @@
   - 更新状态，JSON：`{"status": "open|processing|resolved|closed"}`。解决时记录解决时间。
 - `POST /devops/api/incidents/<id>/postmortem/`
   - 为已解决或已关闭事件记录复盘，JSON：`root_cause`、`resolution`、`follow_up`。创建、时间线、状态和复盘变更均写入审计日志。
+- `GET|POST /devops/api/incidents/<id>/action-items/`
+  - 查看或创建复盘行动项，需要事件查看或运维权限。创建 JSON：`title`、可选 `description`、`priority`（`low`/`medium`/`high`/`critical`）、`due_at`（ISO 时间）、`assignee_id`（本地用户 ID，可为空）。负责人只返回用户 ID 和用户名，不返回认证字段。
+- `GET|PATCH|DELETE /devops/api/incidents/<id>/action-items/<action_id>/`
+  - 查看、更新或删除行动项；更新支持上述字段的部分提交，负责人可通过空值清除。事件必须在当前主机授权范围内。
+- `POST /devops/api/incidents/<id>/action-items/<action_id>/status/`
+  - 更新行动项状态，JSON：`{"status":"open|in_progress|completed|cancelled"}`。完成时记录 `completed_at`；`overdue` 仅按截止时间实时计算，不自动改变状态。所有写操作记录审计日志。
 - `GET /devops/api/approvals/?limit=100`
   - 审批列表，遵守主机组授权范围；命令审批按审批主机过滤，发布审批按发布目标主机过滤，无主机和无发布关联的全局审批仍可见。
 - `POST /devops/api/approvals/<id>/decide/`
@@ -195,6 +239,16 @@
   - 安全：返回字段沿用审批列表序列化，不包含主机密码、私钥、通知 webhook 或密钥。
 
 ## 发布、文件和通知
+
+### 企业微信 ChatOps 入站入口
+
+- `POST /devops/api/chatops/wecom/`
+  - 未使用 session 或 CSRF；入口只接受已签名的部署侧请求。请求必须使用 `WECOM_CHATOPS_WEBHOOK_SECRET` 对原始 HTTP 请求体计算 `X-WeCom-Signature: sha256=<hex-hmac>`。密钥留空时入口保持拒绝状态，配置的值至少为 32 个字符且不得写入仓库、日志或机器人消息。
+  - 请求 JSON 严格限制为 `wecom_user_id`、`action`，以及仅在 `acknowledge_alert`、`approval_link`、`runbook_link` 中允许的正整数 `target_id`。签名在 JSON 解码前用常量时间比较校验。
+  - `wecom_user_id` 必须映射到已启用的 `ChatOpsIdentity` 本地账号绑定。绑定停用后立即拒绝；每个本地账号和企业微信用户 ID 都只能有一个绑定。
+  - 动作白名单：`service_status` 需要服务模块只读权限，`pending_approvals` 与 `approval_link` 需要审批模块只读权限，`acknowledge_alert` 需要告警模块运维权限，`runbook_link` 需要命令模块只读权限。所有查询和目标均继续使用该本地账号的既有主机范围。
+  - `service_status` 仅返回服务 ID、名称和生命周期；`pending_approvals` 仅返回待审批 ID、类型、状态和时间；告警确认仅将可见的未处理告警转为 `processing`；两个链接动作只返回既有登录页面的相对地址，页面仍会重新执行 session、模块权限和主机范围检查。
+  - 明确拒绝命令、批量任务、部署、回滚、运行手册执行及任何不在白名单中的动作。响应和审计不回显、不保存原始消息、签名、密钥、消息正文、审批标题/原因、告警正文、主机信息或凭据；审计只记录 `action`、目标标识和 `outcome`。
 
 ### CI 发布门禁
 
@@ -232,8 +286,12 @@
   - GitHub 入站投递与通知渠道的只读健康汇总。
   - 认证：需要 session 登录；未登录返回 `401` 和 `code: "unauthorized"`。
   - 权限：当前没有独立的集成模块，使用安全策略模块管理员权限，即 `DevOpsRole.ROLE_ADMIN` + `DevOpsModulePermission.MODULE_SECURITY`；权限不足返回 `403` 和 `code: "forbidden"`。
-  - 成功返回 `github_inbound`（当前状态、最近检查、连续失败和近期计数）、`prometheus[]`、`alertmanager[]`（配置 ID、名称、启用状态和安全健康摘要）及 `notifications[]`（渠道 ID、名称、类型、成功/失败计数、最近时间和失败分类）。
+  - 成功返回 `github_inbound`（当前状态、最近检查、连续失败和近期计数）、`prometheus[]`、`alertmanager[]`（配置 ID、名称、启用状态和安全健康摘要）、`notifications[]`（渠道投递汇总）及 `monitor_notifications[]`（监控模块企业微信传输巡检）。
+  - 内置 `integration_health` 调度任务默认每 300 秒执行，可通过 `DEVOPS_SCHEDULER_INTEGRATION_HEALTH_INTERVAL_SECONDS` 调整为正整数间隔。企业微信巡检只发送 HEAD 请求验证网络/TLS/HTTP 传输，不发送群消息；消息投递请使用通知配置中的人工测试。
   - 安全：不返回 GitHub payload、签名、投递 ID、仓库或提交信息；不返回 Prometheus/Alertmanager URL；通知汇总不返回 webhook URL、密钥、内容或响应文本。
+- `GET|POST /devops/api/integrations/health/policy/`
+  - 需要安全模块管理员权限。策略默认关闭；POST JSON 支持 `enabled`、`channel_id`、`consecutive_failures`（1-20）、`cooldown_minutes`（1-1440）和 `notify_recovery`。
+  - 连续失败达到阈值后按冷却时间发送固定摘要，恢复时最多发送一次恢复通知；复用现有通知渠道和去重机制。不会执行重试、修改远端配置或发送敏感字段。
 - `GET /devops/api/worker/`
   - Worker 队列的只读观测汇总。需要 session 登录和安全策略模块管理员权限；未登录返回 `401`，权限不足返回 `403`。
   - 成功返回 `worker.summary`（等待、执行中、累计成功/失败、超时、近一小时完成/失败及失败率）和 `worker.thresholds`（待处理、失败率、超时三个阈值的当前值、启用阈值与触发状态）。
@@ -295,6 +353,32 @@
   - 安全：不返回主机凭据、通知密钥或 webhook 配置字段；`detail` 输出前会遮蔽 `http(s)` URL、`enc:` 密文片段，以及包含 `secret`、`password`、`token`、`key` 等关键词的键值片段。
 
 ## Vue 接入建议
+
+### AIOps Operator Scan
+
+### AIOps Service Reliability
+
+- `GET /aiops/api/service-reliability/?window=24h|7d|30d`
+  - 需要 session 登录及服务模块 viewer 权限（`DevOpsRole.ROLE_VIEWER` + `DevOpsModulePermission.MODULE_SERVICE`）。
+  - 仅统计当前用户可见主机范围内的服务；绑定了不可见主机的服务会被排除，未绑定主机的服务遵循现有服务目录可见性规则。
+  - 返回 `ok`、`window` 和最多 32 条 `results[]`。每行只包含 `service.id/name`、`score`（0-100）、`state`（`healthy`、`degraded`、`critical`）、五类 `evidence_counts`、`incident_review` 四类复盘计数和固定 `recommendation`。
+  - 证据包括活动告警、进行中事件、耗尽 SLO、不健康发布、失败 CI 投递；复盘计数包括开放事件、无复盘的已关闭事件、未完成行动项和逾期行动项。
+  - 安全：不返回主机身份、告警/事件正文、复盘文本、发布脚本、CI 仓库/版本、原始指标、URL 或凭据；接口只读，不触发外部网络、LLM、通知或任何状态变更。
+
+### AIOps Runbook Recommendation Outcome
+
+- `GET /aiops/api/runbook-recommendations/<id>/outcome/`
+  - Requires session login and Command viewer permission; recommendation host must be visible or returns `404`.
+  - Returns only recommendation/approval status, execution status/timestamps, safe health verification, and effectiveness classification/author/timestamp. Commands, output, errors, approval text and feedback notes are omitted.
+  - An unsubmitted recommendation returns empty approval, execution, verification, and feedback values. The endpoint is read-only.
+
+- `GET /aiops/api/operator-scan/?window=24h`
+  - 认证：需要 session 登录；未登录返回 `401`。
+  - 权限：需要 Alert、Metric、Deployment、Service 四个模块的 viewer 权限；权限不足返回 `403`。
+  - 范围：仅分析 `visible_hosts_for_request` 主机及 `visible_catalog_services` 服务。
+  - `window` 支持 `6h`、`24h`、`7d`，结果有界，包含 `findings`、`counts`、`partial`、固定错误分类和建议摘要。
+  - 安全：仅返回 kind/resource/severity/status/summary/occurred_at 等安全字段，不返回告警原文、命令、凭据、URL 或 Secret 数据；接口只读，不创建任务、审批、审计或通知。
+  - Scheduler：固定 `operator_scan` 任务按 `DEVOPS_SCHEDULER_OPERATOR_SCAN_INTERVAL_SECONDS`（默认 300 秒）运行本地只读聚合，仅记录 scanned/findings/partial/errors 摘要，不持久化 finding、不发送通知。
 
 1. 先用 `bootstrap` 初始化当前用户、权限和菜单可见性。
 2. 页面列表优先使用 `GET` 接口替换模板数据。

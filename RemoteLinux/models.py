@@ -1,4 +1,5 @@
 from django.db import models
+from django.utils import timezone
 
 # Create your models here.
 
@@ -27,6 +28,30 @@ class NewLinux(models.Model):
 
 	def __str__(self):
 		return self.linux_name or self.linux_ip
+
+
+class HostAgent(models.Model):
+	"""Outbound-only heartbeat registration for a managed host."""
+
+	host = models.OneToOneField(NewLinux, on_delete=models.CASCADE, related_name='agent')
+	registration_id = models.CharField(max_length=64, unique=True)
+	credential_hash = models.CharField(max_length=128)
+	is_revoked = models.BooleanField(default=False)
+	agent_version = models.CharField(max_length=64, blank=True)
+	collection_delay_seconds = models.PositiveIntegerField(default=0)
+	system_summary = models.JSONField(default=dict, blank=True)
+	created_at = models.DateTimeField(auto_now_add=True)
+	updated_at = models.DateTimeField(auto_now=True)
+	last_heartbeat_at = models.DateTimeField(null=True, blank=True, db_index=True)
+	revoked_at = models.DateTimeField(null=True, blank=True)
+
+	class Meta:
+		db_table = 'host_agent'
+
+	def revoke(self):
+		self.is_revoked = True
+		self.revoked_at = timezone.now()
+		self.save(update_fields=['is_revoked', 'revoked_at', 'updated_at'])
 
 
 class User(models.Model):

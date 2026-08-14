@@ -15,11 +15,12 @@ from django.utils.dateparse import parse_datetime
 from django.views.decorators.http import require_http_methods
 from django.views.decorators.csrf import csrf_exempt
 
-from RemoteLinux.models import NewLinux
+from RemoteLinux.models import NewLinux, User
 from .forms import ServiceSloForm, RunbookTemplateForm
 from .models import (
     AlertEvent,
     AlertQualityFeedback,
+    AlertQualityGovernanceReview,
     ComplianceResult,
     ApprovalRequest,
     AuditLog,
@@ -32,8 +33,10 @@ from .models import (
     FileDistribution,
     HostGroup,
     Incident,
+    IncidentActionItem,
     InspectionRecommendation,
     IntegrationHealthEvent,
+    IntegrationHealthEscalationPolicy,
     MetricSample,
     MaintenanceWindow,
     K8sCluster,
@@ -51,18 +54,27 @@ from .models import (
     InfrastructureBlueprint,
     IntegrationConnector,
 )
-from .ci_orchestration import CIValidationError, parse_ci_delivery
-from .gitops_service_impact import build_gitops_service_impacts
-from .postmortem_draft import build_incident_postmortem_draft
-from .release_impact import build_release_impact_preview
-from .slo_burn import build_slo_burn_summary
+from .delivery.ci import CIValidationError, parse_ci_delivery
+from .delivery.gitops import build_gitops_service_impacts
+from .delivery.releases import build_release_impact_preview
+from .governance.audit import build_incident_postmortem_draft
+from .governance.incidents import build_incident_command_center, is_overdue
+from .governance.reliability import build_slo_burn_summary, platform_reliability_summary
 from .config_governance import (
     create_prometheus_rule_draft,
     publish_revision,
     restore_revision,
     review_revision,
-    serialize_revision,
     submit_revision,
+)
+
+from .chatops import handle_wecom_chatops
+from aiops.alert_quality import (
+    alert_quality_suggestion_key,
+    build_alert_quality_governance,
+    serialize_alert_quality_governance_review,
+    synchronize_alert_quality_governance_reviews,
+    transition_alert_quality_governance_review,
 )
 from .services import (
     COMMAND_ALLOWED,
@@ -107,6 +119,12 @@ from .services import (
     request_controlled_infrastructure_plan,
     safe_collection_run_summary,
     safe_infrastructure_plan_summary,
+)
+from .incident_actions import (
+    create_action_item,
+    delete_action_item,
+    update_action_item,
+    update_action_status,
 )
 
 
@@ -163,6 +181,12 @@ def valid_ci_signature(secret, body, signature):
         return False
     expected = hmac.new(secret.encode('utf-8'), body, hashlib.sha256).hexdigest()
     return hmac.compare_digest(expected, provided.lower())
+
+
+@csrf_exempt
+@require_http_methods(['POST'])
+def wecom_chatops(request):
+    return handle_wecom_chatops(request)
 
 
 @csrf_exempt
@@ -238,6 +262,15 @@ def ci_delivery_summaries(request):
         'ok': True,
         'results': [serialize_ci_delivery(item) for item in limit_queryset(request, deliveries)],
     })
+
+
+@api_login_required
+@require_http_methods(['GET'])
+def platform_reliability(request):
+    """Return safe scheduler/notification health for security administrators."""
+    if not has_role(request, DevOpsRole.ROLE_ADMIN, MODULE_SECURITY):
+        return api_error('没有平台可靠性管理权限', status=403, code='forbidden')
+    return JsonResponse({'ok': True, 'reliability': platform_reliability_summary()})
 
 
 def iso(dt):
@@ -326,10 +359,16 @@ def scoped_alert_queryset(visible_hosts):
 
 
 def scoped_approval_queryset(visible_hosts):
+    visible_host_ids = visible_hosts.values_list('id', flat=True)
+    hidden_release_hosts = NewLinux.objects.exclude(id__in=visible_host_ids).values_list('id', flat=True)
     return ApprovalRequest.objects.select_related('host', 'deployment_release', 'command_execution').filter(
         models.Q(host__in=visible_hosts) |
         models.Q(host__isnull=True, deployment_release__hosts__in=visible_hosts) |
         models.Q(host__isnull=True, deployment_release__isnull=True)
+    ).exclude(
+        host__isnull=True,
+        deployment_release__isnull=False,
+        deployment_release__hosts__id__in=hidden_release_hosts,
     ).distinct()
 
 
@@ -375,6 +414,31 @@ def serialize_alert_quality_feedback(feedback):
         'created_by': feedback.created_by,
         'created_at': iso(feedback.created_at),
     }
+
+
+def alert_quality_governance_payload(request):
+    """Return current scoped suggestions with safe review state only."""
+    governance = build_alert_quality_governance(visible_hosts_for_request(request))
+    keys = [
+        alert_quality_suggestion_key(
+            item.get('metric'), item.get('classification'), item.get('action'),
+        )
+        for item in governance['suggestions']
+    ]
+    reviews_by_key = {
+        review.suggestion_key: serialize_alert_quality_governance_review(review)
+        for review in AlertQualityGovernanceReview.objects.filter(suggestion_key__in=keys)
+    }
+    suggestions = []
+    for suggestion in governance['suggestions']:
+        item = dict(suggestion)
+        key = alert_quality_suggestion_key(
+            item.get('metric'), item.get('classification'), item.get('action'),
+        )
+        item['suggestion_key'] = key
+        item['review'] = reviews_by_key.get(key)
+        suggestions.append(item)
+    return {'summary': governance['summary'], 'suggestions': suggestions}
 
 
 def serialize_incident_reference(incident):
@@ -431,14 +495,61 @@ def serialize_incident(incident, include_timeline=False):
             'created_by': entry.created_by,
             'created_at': iso(entry.created_at),
         } for entry in incident.timeline.all()]
+        item['action_items'] = [serialize_incident_action_item(action)
+                                for action in incident.action_items.select_related('assignee').all()]
     return item
+
+
+def serialize_incident_action_item(item):
+    return {
+        'id': item.id,
+        'incident_id': item.incident_id,
+        'title': item.title,
+        'description': item.description,
+        'assignee': {
+            'id': item.assignee_id,
+            'username': item.assignee.user,
+        } if item.assignee_id else None,
+        'status': item.status,
+        'status_label': label(item, 'status'),
+        'priority': item.priority,
+        'priority_label': label(item, 'priority'),
+        'due_at': iso(item.due_at),
+        'completed_at': iso(item.completed_at),
+        'overdue': is_overdue(item),
+        'created_by': item.created_by,
+        'created_at': iso(item.created_at),
+        'updated_at': iso(item.updated_at),
+    }
 
 
 def scoped_incidents(request):
     incidents = Incident.objects.select_related(
         'host', 'alert__host', 'deployment_release__app', 'command_execution__host'
-    ).prefetch_related('deployment_release__hosts', 'timeline')
+    ).prefetch_related('deployment_release__hosts', 'timeline', 'action_items__assignee')
     return [incident for incident in incidents if can_access_incident(request, incident)]
+
+
+@api_login_required
+@require_http_methods(['GET'])
+def incident_command_center(request):
+    """Metadata-only incident command-center aggregation for alert viewers."""
+    if not has_role(request, DevOpsRole.ROLE_VIEWER, MODULE_ALERT):
+        return api_error('没有事件查看权限', status=403, code='forbidden')
+    result = build_incident_command_center(
+        visible_hosts_for_request(request),
+        visible_catalog_services(request),
+        scoped_incidents(request),
+    )
+    return JsonResponse({
+        'ok': True,
+        'counts': result['counts'],
+        'action_items': result['action_items'],
+        'timeline': [{
+            **item,
+            'occurred_at': iso(item['occurred_at']),
+        } for item in result['timeline']],
+    })
 
 
 def limit_items(request, items, default=50, maximum=200):
@@ -596,11 +707,16 @@ def notification_health_summary():
     return channels
 
 
-def configured_integration_health(configs, integration_type):
+def configured_integration_health(configs, integration_type, source_name_prefix=''):
     """Serialize configured monitor integrations without their endpoint fields."""
     results = []
     for config in configs:
-        summary = summarize_integration_health(integration_type, source=config)
+        source_name = ('%s%s' % (source_name_prefix, config.name)) if source_name_prefix else ''
+        summary = summarize_integration_health(
+            integration_type,
+            source_id=config.id,
+            source_name=source_name,
+        )
         results.append({
             'id': config.id,
             'name': config.name,
@@ -1126,10 +1242,16 @@ def release_impact_preview(request, id):
     if (not has_role(request, DevOpsRole.ROLE_VIEWER, MODULE_DEPLOYMENT) or
             not has_role(request, DevOpsRole.ROLE_VIEWER, MODULE_SERVICE)):
         return api_error('没有发布影响查看权限', status=403, code='forbidden')
-    release = get_object_or_404(DeploymentRelease.objects.prefetch_related('hosts'), id=id)
-    release_hosts = list(release.hosts.all())
-    if not can_access_hosts(request, release_hosts):
-        return api_error('发布范围不在当前用户授权范围内', status=403, code='host_forbidden')
+    # Scope the queryset before resolving the identifier so inaccessible release
+    # IDs have the same 404 response as unknown IDs and cannot be enumerated.
+    visible_hosts = visible_hosts_for_request(request)
+    release = DeploymentRelease.objects.prefetch_related('hosts').filter(
+        hosts__in=visible_hosts,
+    ).distinct().filter(id=id).first()
+    if not release:
+        return api_error('发布不存在或无权访问', status=404, code='not_found')
+    visible_host_ids = set(visible_hosts.values_list('id', flat=True))
+    release_hosts = list(release.hosts.filter(id__in=visible_host_ids))
     batch_size = request.GET.get('batch_size', '')
     if batch_size and not batch_size.isdigit():
         return api_error('批次大小无效', status=400, code='validation_error')
@@ -1202,6 +1324,11 @@ def serialize_runbook(runbook):
         'trigger_kind': runbook.trigger_kind,
         'trigger_kind_label': label(runbook, 'trigger_kind'),
         'service': {'id': runbook.service_id, 'name': runbook.service.name} if runbook.service_id else None,
+        'rollback_runbook': (
+            {'id': runbook.rollback_runbook_id, 'name': runbook.rollback_runbook.name,
+             'version': runbook.rollback_runbook.version}
+            if runbook.rollback_runbook_id else None
+        ),
         'enabled': runbook.enabled,
         'requires_approval': runbook.requires_approval,
         'updated_at': iso(runbook.updated_at),
@@ -1209,17 +1336,25 @@ def serialize_runbook(runbook):
 
 
 def scoped_runbook_queryset(request):
-    return RunbookTemplate.objects.select_related('service').filter(
+    return RunbookTemplate.objects.select_related('service', 'rollback_runbook').filter(
         allowed_hosts__in=visible_hosts_for_request(request)
     ).distinct()
 
 
 def runbook_form(request, data, instance=None):
     form = RunbookTemplateForm(data, instance=instance)
-    form.fields['allowed_hosts'].queryset = visible_hosts_for_request(request)
+    visible_hosts = visible_hosts_for_request(request)
+    form.fields['allowed_hosts'].queryset = visible_hosts
     form.fields['service'].queryset = ServiceCatalog.objects.filter(
         models.Q(hosts__in=visible_hosts_for_request(request)) | models.Q(hosts__isnull=True)
     ).distinct()
+    form.fields['rollback_runbook'].queryset = RunbookTemplate.objects.filter(
+        allowed_hosts__in=visible_hosts,
+        enabled=True,
+        requires_approval=True,
+    ).distinct()
+    if instance and instance.pk:
+        form.fields['rollback_runbook'].queryset = form.fields['rollback_runbook'].queryset.exclude(id=instance.id)
     return form
 
 
@@ -1593,6 +1728,62 @@ def alert_quality_feedback(request, id):
 
 
 @api_login_required
+@require_http_methods(['GET'])
+def alert_quality_governance_reviews(request):
+    if not has_role(request, DevOpsRole.ROLE_VIEWER, MODULE_ALERT):
+        return api_error('没有告警查看权限', status=403, code='forbidden')
+    payload = alert_quality_governance_payload(request)
+    return JsonResponse({
+        'ok': True,
+        'summary': payload['summary'],
+        'results': payload['suggestions'],
+        'suggestions': payload['suggestions'],
+    })
+
+
+@api_login_required
+@require_http_methods(['POST'])
+def alert_quality_governance_review(request, suggestion_key):
+    if not has_role(request, DevOpsRole.ROLE_OPERATOR, MODULE_ALERT):
+        return api_error('没有告警操作权限', status=403, code='forbidden')
+    payload = request_json(request)
+    if payload is None:
+        return invalid_json_error()
+    status = (payload.get('status') or '').strip()
+    review_note = payload.get('review_note', '')
+    if not isinstance(review_note, str):
+        return api_error('审核备注无效', status=400, code='validation_error')
+
+    governance = alert_quality_governance_payload(request)
+    visible_keys = {item['suggestion_key'] for item in governance['suggestions']}
+    if suggestion_key not in visible_keys:
+        return api_error('告警质量建议不存在或不可访问', status=404, code='not_found')
+    suggestion = next(item for item in governance['suggestions'] if item['suggestion_key'] == suggestion_key)
+    review, _created = AlertQualityGovernanceReview.objects.get_or_create(
+        suggestion_key=suggestion_key,
+        defaults={
+            'metric': suggestion.get('metric') or 'unknown',
+            'classification': suggestion.get('classification') or '',
+            'action': suggestion.get('action') or '',
+        },
+    )
+    actor = User.objects.filter(id=request.session.get('user_id')).first()
+    result = transition_alert_quality_governance_review(
+        review, status, actor, note=review_note,
+    )
+    if not result['ok']:
+        return api_error(result['message'], status=400, code=result['code'])
+    if result['code'] != 'idempotent':
+        audit(request, '审核告警质量建议', 'AlertQualityGovernanceReview', review.id, status)
+    return JsonResponse({
+        'ok': True,
+        'code': result['code'],
+        'message': result['message'],
+        'review': result['review'],
+    })
+
+
+@api_login_required
 @require_http_methods(['GET', 'POST'])
 def incidents(request):
     if request.method == 'GET':
@@ -1840,6 +2031,131 @@ def incident_postmortem(request, id):
     return JsonResponse({'ok': True, 'incident': serialize_incident(incident)})
 
 
+def incident_action_operator(request, id):
+    if not has_role(request, DevOpsRole.ROLE_OPERATOR, MODULE_ALERT):
+        return None, api_error('没有事件操作权限', status=403, code='forbidden')
+    return get_scoped_incident_or_error(request, id)
+
+
+def parse_action_due_at(payload):
+    if 'due_at' not in payload or payload.get('due_at') in (None, ''):
+        return None, None
+    value = payload.get('due_at')
+    parsed = parse_datetime(value) if isinstance(value, str) else None
+    if not parsed:
+        return None, '截止时间无效'
+    if timezone.is_naive(parsed):
+        parsed = timezone.make_aware(parsed, timezone.get_current_timezone())
+    return parsed, None
+
+
+def validate_action_payload(payload, partial=False):
+    if not isinstance(payload, dict):
+        return None, '请求参数无效'
+    values = {}
+    if not partial or 'title' in payload:
+        title = payload.get('title')
+        if not isinstance(title, str) or not title.strip() or len(title.strip()) > 300:
+            return None, '行动项标题不能为空且不能超过 300 字符'
+        values['title'] = title.strip()
+    for field, maximum in (('description', 10000),):
+        if field in payload:
+            value = payload.get(field, '')
+            if not isinstance(value, str) or len(value) > maximum:
+                return None, '%s 无效' % field
+            values[field] = value.strip()
+    if not partial or 'priority' in payload:
+        priority = payload.get('priority', IncidentActionItem.PRIORITY_MEDIUM)
+        if priority not in dict(IncidentActionItem.PRIORITY_CHOICES):
+            return None, '行动项优先级无效'
+        values['priority'] = priority
+    if 'due_at' in payload:
+        due_at, error = parse_action_due_at(payload)
+        if error:
+            return None, error
+        values['due_at'] = due_at
+    if 'assignee_id' in payload:
+        value = payload.get('assignee_id')
+        if value in (None, ''):
+            values['assignee'] = None
+        else:
+            try:
+                values['assignee'] = User.objects.get(id=int(value))
+            except (TypeError, ValueError, User.DoesNotExist):
+                return None, '负责人无效或不存在'
+    return values, None
+
+
+@api_login_required
+@require_http_methods(['GET', 'POST'])
+def incident_action_items(request, id):
+    incident, error = incident_action_operator(request, id) if request.method == 'POST' else get_scoped_incident_or_error(request, id)
+    if error:
+        return error
+    if request.method == 'GET':
+        if not has_role(request, DevOpsRole.ROLE_VIEWER, MODULE_ALERT):
+            return api_error('没有事件查看权限', status=403, code='forbidden')
+        items = IncidentActionItem.objects.select_related('assignee').filter(incident=incident)
+        return JsonResponse({'ok': True, 'results': [serialize_incident_action_item(item) for item in limit_queryset(request, items)]})
+    payload = request_json(request)
+    if payload is None:
+        return invalid_json_error()
+    values, message = validate_action_payload(payload)
+    if message:
+        return api_error(message, status=400, code='validation_error')
+    item = create_action_item(request, incident, values.pop('title'), **values)
+    return JsonResponse({'ok': True, 'action_item': serialize_incident_action_item(item)}, status=201)
+
+
+@api_login_required
+@require_http_methods(['GET', 'PATCH', 'DELETE'])
+def incident_action_item_detail(request, id, action_id):
+    incident, error = get_scoped_incident_or_error(request, id)
+    if error:
+        return error
+    try:
+        item = IncidentActionItem.objects.select_related('assignee').get(id=action_id, incident=incident)
+    except IncidentActionItem.DoesNotExist:
+        return api_error('行动项不存在', status=404, code='not_found')
+    if request.method == 'GET':
+        if not has_role(request, DevOpsRole.ROLE_VIEWER, MODULE_ALERT):
+            return api_error('没有事件查看权限', status=403, code='forbidden')
+        return JsonResponse({'ok': True, 'action_item': serialize_incident_action_item(item)})
+    if not has_role(request, DevOpsRole.ROLE_OPERATOR, MODULE_ALERT):
+        return api_error('没有事件操作权限', status=403, code='forbidden')
+    if request.method == 'DELETE':
+        delete_action_item(request, item)
+        return JsonResponse({'ok': True})
+    payload = request_json(request)
+    if payload is None:
+        return invalid_json_error()
+    values, message = validate_action_payload(payload, partial=True)
+    if message:
+        return api_error(message, status=400, code='validation_error')
+    item = update_action_item(request, item, values)
+    return JsonResponse({'ok': True, 'action_item': serialize_incident_action_item(item)})
+
+
+@api_login_required
+@require_http_methods(['POST'])
+def incident_action_item_status(request, id, action_id):
+    incident, error = incident_action_operator(request, id)
+    if error:
+        return error
+    try:
+        item = IncidentActionItem.objects.select_related('assignee').get(id=action_id, incident=incident)
+    except IncidentActionItem.DoesNotExist:
+        return api_error('行动项不存在', status=404, code='not_found')
+    payload = request_json(request)
+    if payload is None:
+        return invalid_json_error()
+    status = payload.get('status') if isinstance(payload, dict) else None
+    if status not in dict(IncidentActionItem.STATUS_CHOICES):
+        return api_error('行动项状态无效', status=400, code='validation_error')
+    item = update_action_status(request, item, status)
+    return JsonResponse({'ok': True, 'action_item': serialize_incident_action_item(item)})
+
+
 @api_login_required
 @require_http_methods(['GET'])
 def approvals(request):
@@ -1990,7 +2306,7 @@ def integration_health(request):
     """Admin-only health summaries for configured inbound and notification integrations."""
     if not has_role(request, DevOpsRole.ROLE_ADMIN, MODULE_SECURITY):
         return api_error('没有集成健康管理权限', status=403, code='forbidden')
-    from monitor.models import AlertmanagerConfig, PrometheusConfig
+    from monitor.models import AlertmanagerConfig, AlertNotificationConfig, PrometheusConfig
     github = summarize_integration_health(
         IntegrationHealthEvent.TYPE_GITHUB_INBOUND,
         source_name=IntegrationHealthEvent.SOURCE_GITHUB_INBOUND,
@@ -2009,7 +2325,61 @@ def integration_health(request):
             IntegrationHealthEvent.TYPE_ALERTMANAGER,
         ),
         'notifications': notification_health_summary(),
+        'monitor_notifications': [
+            dict(
+                configured_integration_health(
+                    [config], IntegrationHealthEvent.TYPE_NOTIFICATION,
+                    source_name_prefix='monitor-',
+                )[0],
+                provider=config.provider,
+            )
+            for config in AlertNotificationConfig.objects.filter(
+                enabled=True, provider=AlertNotificationConfig.PROVIDER_WECOM,
+            ).only('id', 'name', 'enabled', 'provider').order_by('id')
+        ],
     })
+
+
+@api_login_required
+@require_http_methods(['GET', 'POST'])
+def integration_health_policy(request):
+    if not has_role(request, DevOpsRole.ROLE_ADMIN, MODULE_SECURITY):
+        return api_error('没有集成健康策略管理权限', status=403, code='forbidden')
+    policy = IntegrationHealthEscalationPolicy.current()
+    if request.method == 'GET':
+        return JsonResponse({'ok': True, 'policy': {
+            'enabled': policy.enabled,
+            'consecutive_failures': policy.consecutive_failures,
+            'cooldown_minutes': policy.cooldown_minutes,
+            'notify_recovery': policy.notify_recovery,
+            'channel_id': policy.channel_id,
+        }})
+    payload = request_json(request)
+    if not isinstance(payload, dict):
+        return invalid_json_error()
+    try:
+        threshold = int(payload.get('consecutive_failures', 3))
+        cooldown = int(payload.get('cooldown_minutes', 60))
+    except (TypeError, ValueError):
+        return api_error('策略参数无效', status=400, code='validation_error')
+    if not 1 <= threshold <= 20 or not 1 <= cooldown <= 1440:
+        return api_error('策略参数超出范围', status=400, code='validation_error')
+    channel = None
+    channel_id = payload.get('channel_id')
+    if channel_id not in (None, ''):
+        try:
+            channel = NotificationChannel.objects.get(id=int(channel_id), enabled=True)
+        except (TypeError, ValueError, NotificationChannel.DoesNotExist):
+            return api_error('通知渠道无效', status=400, code='validation_error')
+    policy.enabled = bool(payload.get('enabled'))
+    policy.consecutive_failures = threshold
+    policy.cooldown_minutes = cooldown
+    policy.notify_recovery = bool(payload.get('notify_recovery', True))
+    policy.channel = channel
+    policy.updated_by = request.session.get('user_name', '')
+    policy.save()
+    audit(request, '更新集成健康升级策略', 'IntegrationHealthEscalationPolicy', policy.id, 'enabled=%s' % policy.enabled)
+    return JsonResponse({'ok': True, 'message': '集成健康升级策略已保存'})
 
 
 @api_login_required

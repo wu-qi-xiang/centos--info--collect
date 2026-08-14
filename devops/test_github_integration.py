@@ -11,9 +11,10 @@ except ImportError:
 from django.test import TestCase, override_settings
 from django.urls import reverse
 
+from RemoteLinux.models import NewLinux
 from .models import (
-    ApprovalRequest, AuditLog, DeploymentApp, DeploymentRelease, DevOpsSetting,
-    IntegrationHealthEvent,
+    AlertEvent, ApprovalRequest, AuditLog, DeploymentApp, DeploymentRelease,
+    DevOpsSetting, IntegrationHealthEvent, ServiceCatalog,
 )
 
 
@@ -81,6 +82,15 @@ class GitHubWorkflowRunWebhookTests(TestCase):
 
         self.assertEqual(response.status_code, 202)
         self.assertEqual(response.json()['code'], 'duplicate_delivery')
+        self.assertEqual(enqueue.call_count, 1)
+
+    @mock.patch('devops.github_integration.enqueue_background_job')
+    def test_distinct_deliveries_for_same_release_are_not_queued_twice(self, enqueue):
+        first = self.post_webhook(HTTP_X_GITHUB_DELIVERY='delivery-first')
+        second = self.post_webhook(HTTP_X_GITHUB_DELIVERY='delivery-second')
+
+        self.assertEqual(first.json()['code'], 'deployment_queued')
+        self.assertEqual(second.json()['code'], 'duplicate_delivery')
         self.assertEqual(enqueue.call_count, 1)
 
     @mock.patch('devops.github_integration.enqueue_background_job')
@@ -170,3 +180,30 @@ class GitHubWorkflowRunWebhookTests(TestCase):
         self.assertEqual(response.json()['code'], 'awaiting_approval')
         self.assertFalse(enqueue.called)
         slo_gate.assert_called_once_with(self.release, requester='github')
+
+    @mock.patch('devops.github_integration.enqueue_background_job')
+    def test_risk_gate_prevents_webhook_queueing(self, enqueue):
+        host = NewLinux.objects.create(
+            linux_name='github-risk-host', linux_ip='127.0.0.240',
+            linux_hostname='github-risk-host',
+        )
+        service = ServiceCatalog.objects.create(name='github-risk-service')
+        service.hosts.add(host)
+        self.release.hosts.add(host)
+        AlertEvent.objects.create(
+            host=host,
+            level=AlertEvent.LEVEL_CRITICAL,
+            status=AlertEvent.STATUS_OPEN,
+            metric='availability',
+            message='private critical signal',
+        )
+
+        response = self.post_webhook(HTTP_X_GITHUB_DELIVERY='delivery-awaiting-risk')
+
+        self.assertEqual(response.status_code, 202)
+        self.assertEqual(response.json()['code'], 'awaiting_approval')
+        self.assertFalse(enqueue.called)
+        approval = ApprovalRequest.objects.get(deployment_release=self.release)
+        self.assertEqual(approval.request_type, ApprovalRequest.TYPE_DEPLOYMENT)
+        self.assertIn('高风险信号', approval.reason)
+        self.assertNotIn('private critical signal', approval.reason)

@@ -20,7 +20,7 @@ from django.db.models import Q
 
 from devops.models import AlertEvent
 from RemoteLinux.models import NewLinux
-from .models import AlertmanagerConfig, AlertNotificationConfig
+from .models import AlertmanagerConfig, AlertNotificationConfig, PrometheusConfig
 
 try:
     from urllib import error as urlerror
@@ -45,6 +45,7 @@ except ImportError:
 PROMETHEUS_TIMEOUT_SECONDS = 5
 PROMETHEUS_TABLE_MAX_ROWS = 500
 ALERTMANAGER_TIMEOUT_SECONDS = 5
+INTEGRATION_PROBE_TIMEOUT_SECONDS = 5
 ALERTMANAGER_POLL_MAX_ALERTS = int(os.environ.get('ALERTMANAGER_POLL_MAX_ALERTS', '1'))
 PROMETHEUS_INVALID_QUERY_MESSAGE = 'PromQL 查询语句无效，请检查语法后重试'
 PROMETHEUS_QUERY_TIMEOUT_MESSAGE = 'Prometheus 查询超时，请简化查询后重试'
@@ -347,6 +348,81 @@ def test_prometheus_connection(config):
     if body.get('status') == 'success':
         return {'ok': True, 'message': 'Prometheus 连接正常'}
     return {'ok': False, 'message': 'Prometheus 返回状态异常'}
+
+
+def _integration_probe_category(result):
+    if result.get('ok'):
+        return 'ok'
+    message = result.get('message') or ''
+    if '超时' in message:
+        return 'timeout'
+    if 'HTTP' in message or '状态异常' in message:
+        return 'http_error'
+    if '配置' in message or '地址' in message:
+        return 'configuration'
+    return 'request_error'
+
+
+def _monitor_probe_result(config, result):
+    return {
+        'source_id': config.id,
+        'source_name': config.name,
+        'ok': bool(result.get('ok')),
+        'category': _integration_probe_category(result),
+    }
+
+
+def probe_wecom_notification_transport(config, timeout=5):
+    """Probe WeCom transport without sending a message or reading its body."""
+    url = getattr(config, 'decrypted_webhook_url', '') or ''
+    result = {
+        'source_id': config.id,
+        'source_name': 'monitor-%s' % (config.name or 'wecom'),
+        'ok': False,
+        'category': 'configuration',
+    }
+    if not url:
+        return result
+    request = urlrequest.Request(url, headers={'Accept': 'application/json'}, method='HEAD')
+    response = None
+    try:
+        response = urlrequest.urlopen(request, timeout=timeout)
+        status = getattr(response, 'status', None) or getattr(response, 'code', 0)
+        result['ok'] = 200 <= status < 500
+        result['category'] = 'ok' if result['ok'] else 'http_error'
+    except urlerror.HTTPError as error:
+        result['ok'] = 100 <= error.code < 500
+        result['category'] = 'ok' if result['ok'] else 'http_error'
+    except socket.timeout:
+        result['category'] = 'timeout'
+    except ssl.SSLError:
+        result['category'] = 'request_error'
+    except urlerror.URLError:
+        result['category'] = 'request_error'
+    except Exception:
+        result['category'] = 'request_error'
+    finally:
+        if response is not None:
+            response.close()
+    return result
+
+
+def probe_monitor_integrations():
+    """Return safe reachability outcomes for configured monitor integrations."""
+    from .models import AlertmanagerConfig, AlertNotificationConfig, PrometheusConfig
+    prometheus = []
+    for config in PrometheusConfig.objects.filter(enabled=True).order_by('id'):
+        prometheus.append(_monitor_probe_result(config, test_prometheus_connection(config)))
+    alertmanager = []
+    for config in AlertmanagerConfig.objects.filter(enabled=True).order_by('id'):
+        alertmanager.append(_monitor_probe_result(config, test_alertmanager_connection(config)))
+    wecom = [
+        probe_wecom_notification_transport(config)
+        for config in AlertNotificationConfig.objects.filter(
+            enabled=True, provider=AlertNotificationConfig.PROVIDER_WECOM,
+        ).order_by('id')
+    ]
+    return {'prometheus': prometheus, 'alertmanager': alertmanager, 'wecom': wecom}
 
 
 def query_prometheus(config, query):

@@ -18,7 +18,11 @@
     </div></div>
     {% endif %}
     <div class="card"><div class="card-body table-responsive">
-        <table class="table table-hover align-middle mb-0"><thead><tr><th>标题</th><th>级别</th><th>状态</th><th>关联资源</th><th>创建人</th><th>更新时间</th></tr></thead><tbody id="incident-results"><tr><td colspan="6" class="text-muted">加载中...</td></tr></tbody></table>
+        <table class="table table-hover align-middle mb-0"><thead><tr><th>标题</th><th>级别</th><th>状态</th><th>关联资源</th><th>创建人</th><th>更新时间</th><th>行动项</th></tr></thead><tbody id="incident-results"><tr><td colspan="7" class="text-muted">加载中...</td></tr></tbody></table>
+    </div></div>
+    <div id="incident-actions-panel" class="card mt-3 d-none"><div class="card-header">事件行动项 <span id="incident-actions-title" class="text-muted"></span></div><div class="card-body">
+        {% if can_operate_incidents %}<form id="incident-action-create" class="row g-2 mb-3"><div class="col-md-4"><input class="form-control" name="title" maxlength="300" placeholder="行动项标题" required></div><div class="col-md-2"><select class="form-select" name="priority"><option value="medium">中</option><option value="high">高</option><option value="critical">严重</option><option value="low">低</option></select></div><div class="col-md-3"><input class="form-control" name="due_at" type="datetime-local"></div><div class="col-md-2"><input class="form-control" name="assignee_id" type="number" min="1" placeholder="负责人 ID"></div><div class="col-md-1"><button class="btn btn-primary w-100" type="submit">新增</button></div></form>{% endif %}
+        <div id="incident-actions-message" class="small mb-2"></div><div id="incident-actions-results" class="list-group"></div>
     </div></div>
 </div>
 {% endblock %}
@@ -34,7 +38,7 @@
     }
     function display(items) {
         results.innerHTML = '';
-        if (!items.length) { results.innerHTML = '<tr><td colspan="6" class="text-muted">暂无事件</td></tr>'; return; }
+        if (!items.length) { results.innerHTML = '<tr><td colspan="7" class="text-muted">暂无事件</td></tr>'; return; }
         items.forEach(function (item) {
             var refs = item.references || {};
             var names = [];
@@ -46,13 +50,28 @@
             [item.title, item.severity_label, item.status_label, names.join('，') || '-', item.created_by || '-', item.updated_at || '-'].forEach(function (value) {
                 var cell = document.createElement('td'); cell.textContent = value; row.appendChild(cell);
             });
+            var actionCell = document.createElement('td'); var actionButton = document.createElement('button'); actionButton.type = 'button'; actionButton.className = 'btn btn-sm btn-outline-primary'; actionButton.textContent = '行动项'; actionButton.addEventListener('click', function () { loadActions(item); }); actionCell.appendChild(actionButton); row.appendChild(actionCell);
             results.appendChild(row);
         });
     }
+    var actionsPanel = document.getElementById('incident-actions-panel');
+    var actionsResults = document.getElementById('incident-actions-results');
+    var actionsTitle = document.getElementById('incident-actions-title');
+    var actionForm = document.getElementById('incident-action-create');
+    var actionMessage = document.getElementById('incident-actions-message');
+    var selectedIncident = null;
+    function loadActions(item) {
+        selectedIncident = item; actionsPanel.classList.remove('d-none'); actionsTitle.textContent = '：' + item.title;
+        fetch('/devops/api/incidents/' + item.id + '/action-items/', {credentials: 'same-origin'}).then(function (response) { return response.json(); }).then(function (data) {
+            actionsResults.innerHTML = ''; (data.results || []).forEach(function (action) { var row = document.createElement('div'); row.className = 'list-group-item d-flex justify-content-between align-items-center'; var text = document.createElement('span'); text.textContent = action.title + ' · ' + action.status_label + (action.overdue ? ' · 已逾期' : ''); row.appendChild(text); {% if can_operate_incidents %}var button = document.createElement('button'); button.type = 'button'; button.className = 'btn btn-sm btn-outline-success'; button.textContent = action.status === 'completed' ? '重开' : '完成'; button.addEventListener('click', function () { updateActionStatus(action); }); row.appendChild(button);{% endif %} actionsResults.appendChild(row); });
+        }).catch(function () { actionMessage.textContent = '行动项加载失败'; actionMessage.className = 'small mb-2 text-danger'; });
+    }
+    function updateActionStatus(action) { var status = action.status === 'completed' ? 'open' : 'completed'; fetch('/devops/api/incidents/' + selectedIncident.id + '/action-items/' + action.id + '/status/', {method: 'POST', credentials: 'same-origin', headers: {'Content-Type': 'application/json', 'X-CSRFToken': csrf()}, body: JSON.stringify({status: status})}).then(function () { loadActions(selectedIncident); }); }
+    if (actionForm) actionForm.addEventListener('submit', function (event) { event.preventDefault(); if (!selectedIncident) return; var payload = {title: actionForm.elements.title.value, priority: actionForm.elements.priority.value, due_at: actionForm.elements.due_at.value ? new Date(actionForm.elements.due_at.value).toISOString() : null, assignee_id: actionForm.elements.assignee_id.value || null}; fetch('/devops/api/incidents/' + selectedIncident.id + '/action-items/', {method: 'POST', credentials: 'same-origin', headers: {'Content-Type': 'application/json', 'X-CSRFToken': csrf()}, body: JSON.stringify(payload)}).then(function (response) { return response.json(); }).then(function (data) { if (!data.ok) throw new Error(data.message || '创建失败'); actionForm.reset(); loadActions(selectedIncident); }).catch(function (error) { actionMessage.textContent = error.message; actionMessage.className = 'small mb-2 text-danger'; }); });
     function load() {
         fetch('/devops/api/incidents/', {credentials: 'same-origin'}).then(function (response) { return response.json(); }).then(function (data) {
             display(data.results || []);
-        }).catch(function () { results.innerHTML = '<tr><td colspan="6" class="text-danger">事件加载失败</td></tr>'; });
+        }).catch(function () { results.innerHTML = '<tr><td colspan="7" class="text-danger">事件加载失败</td></tr>'; });
     }
     var form = document.getElementById('incident-create');
     if (form) { form.addEventListener('submit', function (event) {

@@ -1,0 +1,40 @@
+{% extends 'base.html' %}
+
+{% block title %}Host Agent | 运维管理控制台{% endblock %}
+
+{% block content %}
+<section class="geist-classic-page" aria-labelledby="agent-title">
+    <div class="geist-classic-page__heading">
+        <p class="geist-classic-page__eyebrow">HOST AGENT</p>
+        <h1 id="agent-title">{{ host.linux_name|default:host.linux_ip }} 的 Agent</h1>
+        <p>仅接收出站心跳和受限系统摘要；不提供远程命令、凭据或文件传输能力。</p>
+    </div>
+    <div class="geist-classic-grid">
+        <article class="geist-classic-card">
+            <h2>注册状态</h2>
+            {% if agent %}
+                <dl>
+                    <dt>状态</dt><dd>{% if agent.is_revoked %}已吊销{% else %}已注册{% endif %}</dd>
+                    <dt>最后心跳</dt><dd>{{ agent.last_heartbeat_at|default:'尚未收到' }}</dd>
+                    <dt>Agent 版本</dt><dd>{{ agent.agent_version|default:'-' }}</dd>
+                    <dt>采集延迟</dt><dd>{{ agent.collection_delay_seconds }} 秒</dd>
+                </dl>
+            {% else %}
+                <p>尚未注册 Agent。</p>
+            {% endif %}
+        </article>
+        <article class="geist-classic-card">
+            <h2>安全系统摘要</h2>
+            {% if agent_summary %}
+                <dl>
+                    {% for key, value in agent_summary.items %}
+                        <dt>{{ key }}</dt><dd>{{ value }}</dd>
+                    {% endfor %}
+                </dl>
+            {% else %}
+                <p>尚无已验证的摘要。</p>
+            {% endif %}
+        </article>
+    </div>
+</section>
+{% endblock %}

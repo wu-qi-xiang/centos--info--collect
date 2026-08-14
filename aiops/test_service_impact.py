@@ -186,3 +186,27 @@ class ServiceImpactTests(TestCase):
             'unhealthy_deployments': 0,
             'failed_ci_deliveries': 0,
         })
+
+    def test_counts_hostless_incident_linked_to_visible_release(self):
+        app = DeploymentApp.objects.create(name='context-app')
+        project = DevOpsProject.objects.create(name='context-project')
+        project.services.add(self.service)
+        project.deployment_apps.add(app)
+        release = DeploymentRelease.objects.create(
+            app=app, version='v-context', deploy_script='deploy',
+        )
+        release.hosts.add(self.visible_host)
+        Incident.objects.create(
+            deployment_release=release, status=Incident.STATUS_OPEN,
+            title='private release incident',
+        )
+
+        impact = build_service_impacts(
+            [self.service], [self.visible_host], now=self.now,
+            window_start=self.now - timedelta(hours=1), window_end=self.now + timedelta(minutes=1),
+        )[0]
+
+        self.assertEqual(impact['evidence_counts']['open_incidents'], 1)
+        self.assertEqual(impact['affected_host_count'], 0)
+        self.assertEqual(impact['state'], 'degraded')
+        self.assertNotIn('private release incident', repr(impact))

@@ -67,6 +67,7 @@ from .models import (
     RunbookTemplate,
     ComplianceBaseline,
     ComplianceResult,
+    ChatOpsIdentity,
 )
 from .services import active_maintenance_windows_for_host, active_maintenance_windows_for_release, cleanup_audit_logs, cleanup_metric_samples, deployment_risk_preview, enqueue_background_job, evaluate_worker_alert_thresholds, forecast_host_capacity, latest_metric_map, notify_alert, record_alert, record_metric_sample, run_background_job, send_notification_channel, validate_remote_path, scan_compliance_baseline, create_project_onboarding, claim_next_background_job, process_next_background_job, background_job_spec, fail_timed_out_background_jobs, require_deployment_maintenance_approval, summarize_background_jobs
 from .services import cleanup_service_slo_evaluations, execute_batch_task, execute_command_record, execute_deployment_release, execute_deployment_rollback, execute_file_distribution, evaluate_enabled_service_slos, evaluate_service_slo, require_deployment_slo_approval
@@ -2758,7 +2759,7 @@ class DevOpsViewTests(TestCase):
         self.assertContains(response, 'DevOps控制台')
         self.assertContains(response, '加载 DevOps 控制台')
         self.assertContains(response, 'ops-geist-console')
-        self.assertContains(response, '20260801-geist-control-plane-01')
+        self.assertContains(response, '20260812-incident-command-center-01')
 
     def test_vue_static_includes_approval_decision_controls(self):
         with open('static/js/devops-vue.js', 'r') as handle:
@@ -2778,6 +2779,10 @@ class DevOpsViewTests(TestCase):
             '主机健康概览', '/devops/api/dashboard/', 'X-CSRFToken',
             "['resolved', 'closed', 'silenced']", 'lastLoadedAt',
             '/devops/audit/', '查看运行记录',
+            'integration-readiness', '/devops/api/integration-readiness/',
+            '/devops/api/integration-connectors/', 'collectIntegration(connector)',
+            'planIntegration(blueprint)', '不可触发', '不可计划',
+            '刷新摘要', 'commandCenter.updatedAt', 'loadCommandCenter',
         ):
             self.assertIn(value, content)
 
@@ -2788,7 +2793,7 @@ class DevOpsViewTests(TestCase):
         self.assertContains(response, 'devops-vue-root')
         self.assertContains(response, 'DevOps 控制台')
         self.assertContains(response, 'devops-vue.js')
-        self.assertContains(response, 'devops-vue.js?v=20260801-geist-control-plane-01')
+        self.assertContains(response, 'devops-vue.js?v=20260812-incident-command-center-01')
 
     def test_legacy_dashboard_still_available(self):
         response = self.client.get(reverse('devops:legacy_dashboard'))
@@ -4367,6 +4372,93 @@ class DevOpsViewTests(TestCase):
         self.assertEqual(AlertEvent.objects.count(), 1)
         notify.assert_called_once_with(first)
 
+    def test_critical_alerts_on_same_host_are_correlated_into_one_incident(self):
+        with mock.patch('devops.services.notify_alert'):
+            first, _ = record_alert(self.host, 'cpu', 'cpu high', level=AlertEvent.LEVEL_CRITICAL)
+            second, _ = record_alert(self.host, 'memory', 'memory high', level=AlertEvent.LEVEL_CRITICAL)
+
+        self.assertEqual(Incident.objects.filter(host=self.host, status=Incident.STATUS_OPEN).count(), 1)
+        incident = Incident.objects.get(alert=first)
+        self.assertFalse(Incident.objects.filter(alert=second).exists())
+        self.assertTrue(incident.timeline.filter(note__contains='关联严重告警 #%s' % second.id).exists())
+
+    @override_settings(ALERT_INCIDENT_CORRELATION_WINDOW_SECONDS=0)
+    def test_critical_alerts_outside_correlation_window_create_separate_incidents(self):
+        with mock.patch('devops.services.notify_alert'):
+            first, _ = record_alert(self.host, 'cpu', 'cpu high', level=AlertEvent.LEVEL_CRITICAL)
+            second, _ = record_alert(self.host, 'memory', 'memory high', level=AlertEvent.LEVEL_CRITICAL)
+
+        self.assertNotEqual(Incident.objects.get(alert=first).id, Incident.objects.get(alert=second).id)
+
+    def test_critical_alert_during_direct_maintenance_keeps_alert_without_incident(self):
+        window = MaintenanceWindow.objects.create(
+            name='host maintenance', starts_at=timezone.now() - timedelta(minutes=1),
+            ends_at=timezone.now() + timedelta(minutes=10), enabled=True,
+        )
+        window.hosts.add(self.host)
+
+        with mock.patch('devops.services.notify_alert'):
+            alert, created = record_alert(self.host, 'cpu', 'cpu high', level=AlertEvent.LEVEL_CRITICAL)
+
+        self.assertTrue(created)
+        self.assertEqual(alert.status, AlertEvent.STATUS_OPEN)
+        self.assertFalse(Incident.objects.filter(alert=alert).exists())
+
+    def test_critical_alert_during_service_maintenance_keeps_alert_without_incident(self):
+        service = ServiceCatalog.objects.create(name='maintenance-api')
+        service.hosts.add(self.host)
+        window = MaintenanceWindow.objects.create(
+            name='service maintenance', starts_at=timezone.now() - timedelta(minutes=1),
+            ends_at=timezone.now() + timedelta(minutes=10), enabled=True,
+        )
+        window.services.add(service)
+
+        with mock.patch('devops.services.notify_alert'):
+            alert, created = record_alert(self.host, 'cpu', 'cpu high', level=AlertEvent.LEVEL_CRITICAL)
+
+        self.assertTrue(created)
+        self.assertEqual(alert.status, AlertEvent.STATUS_OPEN)
+        self.assertFalse(Incident.objects.filter(alert=alert).exists())
+
+    def test_critical_alerts_on_connected_service_hosts_are_correlated(self):
+        upstream_host = NewLinux.objects.create(
+            linux_name='dependency-upstream-host', linux_ip='127.0.0.61', linux_hostname='dependency-upstream',
+        )
+        service = ServiceCatalog.objects.create(name='dependency-api')
+        upstream = ServiceCatalog.objects.create(name='dependency-db')
+        service.hosts.add(self.host)
+        upstream.hosts.add(upstream_host)
+        ServiceDependency.objects.create(service=service, upstream_service=upstream)
+
+        with mock.patch('devops.services.notify_alert'):
+            first, _ = record_alert(self.host, 'cpu', 'private body one', level=AlertEvent.LEVEL_CRITICAL)
+            second, _ = record_alert(upstream_host, 'connections', 'private body two', level=AlertEvent.LEVEL_CRITICAL)
+
+        incident = Incident.objects.get(alert=first)
+        self.assertEqual(Incident.objects.filter(severity=Incident.SEVERITY_CRITICAL).count(), 1)
+        marker = incident.timeline.get()
+        self.assertEqual(marker.note, '关联严重告警 #%s（指标：connections）' % second.id)
+        self.assertNotIn('private body two', marker.note)
+
+    def test_critical_alerts_on_unrelated_or_hostless_services_are_not_correlated(self):
+        unrelated_host = NewLinux.objects.create(
+            linux_name='unrelated-host', linux_ip='127.0.0.62', linux_hostname='unrelated-host',
+        )
+        primary = ServiceCatalog.objects.create(name='primary-api')
+        unrelated = ServiceCatalog.objects.create(name='unrelated-api')
+        primary.hosts.add(self.host)
+        unrelated.hosts.add(unrelated_host)
+
+        with mock.patch('devops.services.notify_alert'):
+            first, _ = record_alert(self.host, 'cpu', 'cpu high', level=AlertEvent.LEVEL_CRITICAL)
+            second, _ = record_alert(unrelated_host, 'cpu', 'cpu high', level=AlertEvent.LEVEL_CRITICAL)
+            hostless, _ = record_alert(None, 'cluster-a', 'cluster high', level=AlertEvent.LEVEL_CRITICAL)
+
+        self.assertEqual(Incident.objects.filter(severity=Incident.SEVERITY_CRITICAL).count(), 3)
+        self.assertTrue(Incident.objects.filter(alert=first).exists())
+        self.assertTrue(Incident.objects.filter(alert=second).exists())
+        self.assertTrue(Incident.objects.filter(alert=hostless).exists())
+
     def test_alert_silence_marks_matching_alert(self):
         now = timezone.now()
         AlertSilence.objects.create(
@@ -4747,7 +4839,19 @@ class DevOpsViewTests(TestCase):
         preview = response.context['preview']
         self.assertEqual([host.id for host in preview['hosts']], [self.host.id])
         self.assertEqual([alert.message for alert in preview['active_alerts']], ['visible preview risk'])
+        self.assertEqual(preview['visible_host_count'], 1)
+        self.assertEqual(preview['proposed_batch_count'], 1)
+        self.assertEqual(set(preview['evidence_counts']), {
+            'critical_alerts', 'open_incidents', 'exhausted_slos',
+            'unhealthy_deployments', 'failed_ci_deliveries',
+        })
+        self.assertEqual(preview['evidence_counts']['critical_alerts'], 0)
+        self.assertEqual(preview['reasons'], [])
+        self.assertIn('recommendation', preview)
         self.assertNotContains(response, 'hidden preview risk')
+        self.assertNotContains(response, 'visible preview risk')
+        self.assertContains(response, '未恢复告警')
+        self.assertContains(response, '发布风险预览（只读）')
 
         blocked_response = self.client.post(reverse('devops:deployments'), {
             'form_type': 'release',
@@ -6838,6 +6942,92 @@ class ServiceSloHistoryTests(TestCase):
         self.assertTrue(ServiceSloEvaluation.objects.filter(id=recent.id).exists())
 
 
+class PublicStatusPageTests(TestCase):
+    def setUp(self):
+        self.host = NewLinux.objects.create(
+            linux_name='private-production-host', linux_ip='10.88.7.6',
+            linux_hostname='private-hostname', linux_port='22', linux_user='root',
+            linux_passwd='never-render-this-password',
+        )
+        self.service = ServiceCatalog.objects.create(
+            name='payments-api', owner='private-owner', description='internal service details',
+        )
+        self.service.hosts.add(self.host)
+        ServiceSlo.objects.create(
+            service=self.service, metric_kind=ServiceSlo.KIND_AVAILABILITY,
+            target=99.9, last_state=ServiceSlo.STATE_HEALTHY,
+        )
+        AlertEvent.objects.create(
+            host=self.host, level=AlertEvent.LEVEL_CRITICAL,
+            status=AlertEvent.STATUS_OPEN,
+            message=(
+                'private alert body with 10.88.7.6, never-render-this-password, '
+                'https://internal.example.test/runbook and internal-version-v2026'
+            ),
+        )
+        Incident.objects.create(
+            title='private incident title', description='private incident description',
+            owner='private-owner', status=Incident.STATUS_PROCESSING,
+            severity=Incident.SEVERITY_HIGH, host=self.host,
+        )
+        window = MaintenanceWindow.objects.create(
+            name='private maintenance name', reason='private maintenance reason',
+            starts_at=timezone.now() - timedelta(minutes=5),
+            ends_at=timezone.now() + timedelta(minutes=55), enabled=True,
+        )
+        window.services.add(self.service)
+
+    def test_anonymous_public_status_is_derived_and_sanitized(self):
+        from .views import public_status_page
+
+        response = public_status_page(self.client.get('/status/').wsgi_request)
+
+        self.assertEqual(response.status_code, 200)
+        self.assertContains(response, 'payments-api')
+        self.assertContains(response, '维护中')
+        self.assertContains(response, '事件处理中')
+        self.assertContains(response, 'private maintenance name')
+        content = response.content.decode('utf-8')
+        for private_value in (
+                'private-production-host', 'private-hostname', '10.88.7.6',
+                'private alert body', 'private incident title', 'private incident description',
+                'private-owner', 'private maintenance reason',
+                'never-render-this-password', 'internal.example.test',
+                'internal-version-v2026', 'root'):
+            self.assertNotIn(private_value, content)
+
+    def test_public_status_route_is_available_without_login(self):
+        response = self.client.get('/status/')
+
+        self.assertEqual(response.status_code, 200)
+        self.assertTemplateUsed(response, 'devops/public_status.html')
+
+    def test_public_status_uses_only_allowlisted_derived_fields(self):
+        from .public_status import build_public_status
+
+        status = build_public_status(now=timezone.now())
+
+        self.assertEqual(status['overall_state'], 'maintenance')
+        self.assertEqual(status['services'], [{
+            'name': 'payments-api',
+            'state': 'maintenance',
+            'state_label': '维护中',
+            'availability_trend': 'stable',
+            'availability_trend_label': '稳定',
+        }])
+        self.assertEqual(status['maintenance'], [{
+            'title': 'private maintenance name',
+            'state': 'scheduled',
+            'state_label': '计划维护',
+            'service_count': 1,
+            'starts_at': status['maintenance'][0]['starts_at'],
+            'ends_at': status['maintenance'][0]['ends_at'],
+        }])
+        self.assertEqual(status['timeline'][0]['state'], 'investigating')
+        self.assertEqual(status['timeline'][0]['state_label'], '事件处理中')
+        self.assertEqual(set(status['timeline'][0]), {'state', 'state_label', 'occurred_at'})
+
+
 class RunbookTemplateTests(TestCase):
     def setUp(self):
         self.admin = User.objects.create(user='runbook-admin', email='runbook-admin@example.com', password='pwd', confirm_pwd='pwd')
@@ -7056,6 +7246,122 @@ class RunbookTemplateTests(TestCase):
         self.assertNotIn('command_template', payload)
         self.assertNotIn(runbook.command_template, payload)
         self.assertNotIn('output', payload)
+
+    def test_admin_can_configure_safe_rollback_runbook_without_exposing_commands(self):
+        primary = self.make_runbook(name='restart service', version=1)
+        rollback = self.make_runbook(
+            name='restore service', version=1,
+            command_template='systemctl start nginx',
+        )
+        self.login(self.admin)
+        payload = {
+            'name': primary.name, 'version': primary.version,
+            'trigger_kind': primary.trigger_kind,
+            'command_template': primary.command_template,
+            'service': primary.service_id,
+            'allowed_hosts': [self.host.id],
+            'rollback_runbook': rollback.id,
+            'enabled': True, 'requires_approval': True,
+        }
+
+        response = self.client.post(
+            reverse('devops:api_runbook_update', args=[primary.id]),
+            data=json.dumps(payload), content_type='application/json',
+        )
+
+        self.assertEqual(response.status_code, 200)
+        primary.refresh_from_db()
+        self.assertEqual(primary.rollback_runbook_id, rollback.id)
+        result = response.json()['runbook']
+        self.assertEqual(result['rollback_runbook'], {
+            'id': rollback.id, 'name': rollback.name, 'version': rollback.version,
+        })
+        self.assertNotIn(rollback.command_template, json.dumps(result))
+
+    def test_rollback_runbook_must_cover_all_primary_allowed_hosts(self):
+        primary = self.make_runbook(name='restart all service', version=1)
+        primary.allowed_hosts.add(self.other_host)
+        rollback = self.make_runbook(
+            name='restore partial service', version=1,
+            command_template='systemctl start nginx',
+        )
+        self.login(self.admin)
+        payload = {
+            'name': primary.name, 'version': primary.version,
+            'trigger_kind': primary.trigger_kind,
+            'command_template': primary.command_template,
+            'service': primary.service_id,
+            'allowed_hosts': [self.host.id, self.other_host.id],
+            'rollback_runbook': rollback.id,
+            'enabled': True, 'requires_approval': True,
+        }
+
+        response = self.client.post(
+            reverse('devops:api_runbook_update', args=[primary.id]),
+            data=json.dumps(payload), content_type='application/json',
+        )
+
+        self.assertEqual(response.status_code, 400)
+        primary.refresh_from_db()
+        self.assertIsNone(primary.rollback_runbook_id)
+
+    def test_admin_can_link_only_eligible_rollback_runbook_without_command_disclosure(self):
+        rollback = self.make_runbook(
+            name='回滚 nginx', version=1,
+            command_template='systemctl restart nginx',
+        )
+        disabled = self.make_runbook(
+            name='停用回滚 nginx', version=1, enabled=False,
+            command_template='systemctl stop nginx',
+        )
+        self.login(self.admin)
+        payload = {
+            'name': '更新 nginx', 'version': 1,
+            'trigger_kind': RunbookTemplate.TRIGGER_SERVICE,
+            'command_template': 'systemctl reload nginx',
+            'service': self.service.id, 'allowed_hosts': [self.host.id],
+            'enabled': True, 'requires_approval': True,
+            'rollback_runbook': rollback.id,
+        }
+
+        response = self.client.post(
+            reverse('devops:api_runbooks'), data=json.dumps(payload),
+            content_type='application/json',
+        )
+        rejected_payload = dict(payload, name='无效更新 nginx', rollback_runbook=disabled.id)
+        rejected = self.client.post(
+            reverse('devops:api_runbooks'), data=json.dumps(rejected_payload),
+            content_type='application/json',
+        )
+
+        self.assertEqual(response.status_code, 201)
+        runbook = RunbookTemplate.objects.get(name='更新 nginx')
+        self.assertEqual(runbook.rollback_runbook, rollback)
+        item = response.json()['runbook']
+        self.assertEqual(item['rollback_runbook'], {
+            'id': rollback.id, 'name': rollback.name, 'version': rollback.version,
+        })
+        self.assertNotIn(rollback.command_template, json.dumps(item))
+        self.assertEqual(rejected.status_code, 400)
+
+    def test_runbook_page_shows_rollback_identity_without_its_command(self):
+        rollback = self.make_runbook(
+            name='页面回滚 nginx', version=1,
+            command_template='systemctl restart nginx',
+        )
+        primary = self.make_runbook(
+            name='页面更新 nginx', version=1,
+            rollback_runbook=rollback,
+        )
+        self.login(self.admin)
+
+        response = self.client.get(reverse('devops:runbooks'))
+
+        self.assertContains(response, '#%s %s v%s' % (
+            rollback.id, rollback.name, rollback.version,
+        ))
+        self.assertNotContains(response, rollback.command_template)
+        self.assertNotContains(response, primary.command_template)
 
     def test_runbook_command_surfaces_omit_command_output_and_error_but_manual_records_remain_visible(self):
         runbook = self.make_runbook()
@@ -7599,3 +7905,192 @@ class RbacAdministrationClosureTests(TestCase):
         self.assertContains(navigation_response, reverse('devops:file_distributions'))
         self.assertEqual(slo_response.status_code, 403)
         self.assertEqual(runbook_response.status_code, 403)
+
+
+class ChatOpsIngressTests(TestCase):
+    def setUp(self):
+        self.user = User.objects.create(
+            user='chatops-user', email='chatops@example.com',
+            password='plain-password', confirm_pwd='plain-password',
+        )
+        self.identity = ChatOpsIdentity.objects.create(
+            user=self.user, wecom_user_id='wecom-chatops-user',
+        )
+        self.host = NewLinux.objects.create(
+            linux_name='chatops-host', linux_ip='127.0.2.1',
+            linux_hostname='chatops-host', linux_port='22', linux_user='root',
+            linux_passwd='not-a-secret', linux_app='',
+        )
+
+    def post_chatops(self, payload, secret='chatops-test-secret'):
+        body = json.dumps(payload, separators=(',', ':')).encode('utf-8')
+        import hmac
+        import hashlib
+        signature = hmac.new(secret.encode('utf-8'), body, hashlib.sha256).hexdigest()
+        return self.client.post(
+            reverse('devops:api_wecom_chatops'), data=body, content_type='application/json',
+            HTTP_X_WECOM_SIGNATURE='sha256=' + signature,
+        )
+
+    @override_settings(WECOM_CHATOPS_WEBHOOK_SECRET='chatops-test-secret')
+    def test_rejects_invalid_signature_before_processing_body(self):
+        response = self.client.post(
+            '/devops/api/chatops/wecom/',
+            data=b'{"action":"service_status","wecom_user_id":"unknown"}',
+            content_type='application/json',
+            HTTP_X_WECOM_SIGNATURE='sha256=' + ('0' * 64),
+        )
+
+        self.assertEqual(response.status_code, 403)
+        self.assertEqual(response.json()['code'], 'invalid_signature')
+
+    @override_settings(WECOM_CHATOPS_WEBHOOK_SECRET='chatops-test-secret')
+    def test_rejects_oversized_body_before_signature_or_json_processing(self):
+        body = b'x' * 8193
+        import hashlib
+        import hmac
+        signature = hmac.new(b'chatops-test-secret', body, hashlib.sha256).hexdigest()
+
+        response = self.client.post(
+            reverse('devops:api_wecom_chatops'), data=body,
+            content_type='application/json',
+            HTTP_X_WECOM_SIGNATURE='sha256=' + signature,
+        )
+
+        self.assertEqual(response.status_code, 413)
+        self.assertEqual(response.json()['code'], 'payload_too_large')
+
+    @override_settings(WECOM_CHATOPS_WEBHOOK_SECRET='chatops-test-secret')
+    def test_rejects_unknown_and_disabled_identity(self):
+        unknown = self.post_chatops({'action': 'service_status', 'wecom_user_id': 'unknown'})
+        self.identity.enabled = False
+        self.identity.save(update_fields=['enabled'])
+        disabled = self.post_chatops({'action': 'service_status', 'wecom_user_id': self.identity.wecom_user_id})
+
+        self.assertEqual(unknown.status_code, 403)
+        self.assertEqual(unknown.json()['code'], 'identity_forbidden')
+        self.assertEqual(disabled.status_code, 403)
+        self.assertEqual(disabled.json()['code'], 'identity_forbidden')
+
+    @override_settings(WECOM_CHATOPS_WEBHOOK_SECRET='chatops-test-secret')
+    def test_returns_safe_service_and_pending_approval_summaries(self):
+        service = ServiceCatalog.objects.create(name='chatops-service')
+        service.hosts.add(self.host)
+        approval = ApprovalRequest.objects.create(
+            request_type=ApprovalRequest.TYPE_COMMAND, title='do not expose title',
+            reason='do not expose reason', host=self.host,
+        )
+
+        service_response = self.post_chatops({'action': 'service_status', 'wecom_user_id': self.identity.wecom_user_id})
+        approval_response = self.post_chatops({'action': 'pending_approvals', 'wecom_user_id': self.identity.wecom_user_id})
+
+        self.assertEqual(service_response.status_code, 200)
+        self.assertEqual(service_response.json()['results'], [
+            {'id': service.id, 'name': 'chatops-service', 'status': ServiceCatalog.LIFECYCLE_ACTIVE},
+        ])
+        self.assertEqual(approval_response.status_code, 200)
+        result = approval_response.json()['results'][0]
+        self.assertEqual(result['id'], approval.id)
+        self.assertNotIn('title', result)
+        self.assertNotIn('reason', result)
+
+    @override_settings(WECOM_CHATOPS_WEBHOOK_SECRET='chatops-test-secret')
+    def test_acknowledges_visible_open_alert_and_audits_only_safe_summary(self):
+        alert = AlertEvent.objects.create(
+            host=self.host, message='untrusted raw message must never be audited',
+            status=AlertEvent.STATUS_OPEN,
+        )
+
+        response = self.post_chatops({
+            'action': 'acknowledge_alert', 'wecom_user_id': self.identity.wecom_user_id,
+            'target_id': alert.id,
+        })
+
+        self.assertEqual(response.status_code, 200)
+        alert.refresh_from_db()
+        self.assertEqual(alert.status, AlertEvent.STATUS_PROCESSING)
+        self.assertTrue(AlertHistory.objects.filter(alert=alert, to_status=AlertEvent.STATUS_PROCESSING).exists())
+        audit_log = AuditLog.objects.get(action='企业微信ChatOps')
+        self.assertEqual(audit_log.target_id, str(alert.id))
+        self.assertEqual(audit_log.detail, 'action=acknowledge_alert,outcome=success')
+        self.assertNotIn('untrusted raw message', audit_log.detail)
+
+    @override_settings(WECOM_CHATOPS_WEBHOOK_SECRET='chatops-test-secret')
+    def test_denies_alert_acknowledgement_without_operator_alert_permission(self):
+        DevOpsRole.objects.create(user=self.user, role=DevOpsRole.ROLE_VIEWER)
+        alert = AlertEvent.objects.create(host=self.host, message='must remain open')
+
+        response = self.post_chatops({
+            'action': 'acknowledge_alert', 'wecom_user_id': self.identity.wecom_user_id,
+            'target_id': alert.id,
+        })
+
+        self.assertEqual(response.status_code, 403)
+        self.assertEqual(response.json()['code'], 'forbidden')
+        alert.refresh_from_db()
+        self.assertEqual(alert.status, AlertEvent.STATUS_OPEN)
+
+    @override_settings(WECOM_CHATOPS_WEBHOOK_SECRET='chatops-test-secret')
+    def test_mixed_host_deployment_approval_is_hidden_from_scoped_chatops_user(self):
+        """ChatOps links follow the same all-release-hosts visibility rule as decisions."""
+        DevOpsRole.objects.create(user=self.user, role=DevOpsRole.ROLE_VIEWER)
+        visible_group = HostGroup.objects.create(name='chatops-visible-group')
+        visible_group.hosts.add(self.host)
+        scope = DevOpsHostScope.objects.create(user=self.user)
+        scope.groups.add(visible_group)
+        hidden_host = NewLinux.objects.create(
+            linux_name='chatops-hidden-host', linux_ip='127.0.2.2',
+            linux_hostname='chatops-hidden-host', linux_port='22', linux_user='root',
+            linux_passwd='not-a-secret', linux_app='',
+        )
+        app = DeploymentApp.objects.create(name='chatops-scoped-release')
+        release = DeploymentRelease.objects.create(
+            app=app, version='v1', deploy_script='echo internal-deploy-command',
+        )
+        release.hosts.add(self.host, hidden_host)
+        approval = ApprovalRequest.objects.create(
+            request_type=ApprovalRequest.TYPE_DEPLOYMENT,
+            title='do not expose deployment approval title',
+            reason='do not expose deployment approval reason',
+            deployment_release=release,
+        )
+
+        pending_response = self.post_chatops({
+            'action': 'pending_approvals', 'wecom_user_id': self.identity.wecom_user_id,
+        })
+        link_response = self.post_chatops({
+            'action': 'approval_link', 'wecom_user_id': self.identity.wecom_user_id,
+            'target_id': approval.id,
+        })
+
+        self.assertEqual(pending_response.status_code, 200)
+        self.assertEqual(pending_response.json()['results'], [])
+        self.assertEqual(link_response.status_code, 404)
+        self.assertEqual(link_response.json()['code'], 'not_found')
+        safe_response = json.dumps({
+            'pending': pending_response.json(), 'link': link_response.json(),
+        })
+        for private_value in (
+                approval.title, approval.reason, hidden_host.linux_name,
+                hidden_host.linux_ip, release.deploy_script):
+            self.assertNotIn(private_value, safe_response)
+        audit_log = AuditLog.objects.get(
+            action='企业微信ChatOps', target_id=str(approval.id),
+        )
+        self.assertEqual(audit_log.detail, 'action=approval_link,outcome=not_found')
+        for private_value in (approval.title, approval.reason, hidden_host.linux_name):
+            self.assertNotIn(private_value, audit_log.detail)
+
+    @override_settings(WECOM_CHATOPS_WEBHOOK_SECRET='chatops-test-secret')
+    def test_rejects_execution_actions_and_unexpected_message_content(self):
+        deploy = self.post_chatops({'action': 'deploy', 'wecom_user_id': self.identity.wecom_user_id})
+        extra_content = self.post_chatops({
+            'action': 'service_status', 'wecom_user_id': self.identity.wecom_user_id,
+            'message': 'raw external content must not be accepted',
+        })
+
+        self.assertEqual(deploy.status_code, 400)
+        self.assertEqual(deploy.json()['code'], 'validation_error')
+        self.assertEqual(extra_content.status_code, 400)
+        self.assertEqual(extra_content.json()['code'], 'validation_error')
+        self.assertFalse(AuditLog.objects.filter(action='企业微信ChatOps').exists())

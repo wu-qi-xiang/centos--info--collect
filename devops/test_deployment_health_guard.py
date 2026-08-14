@@ -170,6 +170,34 @@ class DeploymentHealthGuardTests(TestCase):
         self.assertEqual(evaluation.score, 100)
         self.assertEqual(evaluation.summary, 'critical_alert=0, failed_command=0, exhausted_slo=0')
 
+    def test_resolved_closed_alerts_and_future_slo_do_not_block_health(self):
+        for status in (AlertEvent.STATUS_RESOLVED, AlertEvent.STATUS_CLOSED):
+            alert = AlertEvent.objects.create(
+                host=self.host,
+                level=AlertEvent.LEVEL_CRITICAL,
+                metric='availability',
+                status=status,
+                message='historical alert',
+            )
+            AlertEvent.objects.filter(pk=alert.pk).update(created_at=self.now)
+        service = ServiceCatalog.objects.create(name='health-guard-future-slo')
+        service.hosts.add(self.host)
+        ServiceSlo.objects.create(
+            service=service,
+            metric_kind=ServiceSlo.KIND_AVAILABILITY,
+            target=99,
+            enabled=True,
+            last_state=ServiceSlo.STATE_EXHAUSTED,
+            last_evaluated_at=self.now + timedelta(minutes=5),
+        )
+
+        evaluation = evaluate_deployment_health(
+            self.release, batch_hosts=[self.host], now=self.now,
+        )
+
+        self.assertEqual(evaluation.status, DeploymentHealthEvaluation.STATUS_HEALTHY)
+        self.assertEqual(evaluation.summary, 'critical_alert=0, failed_command=0, exhausted_slo=0')
+
     @mock.patch('devops.services.execute_command_record')
     def test_unhealthy_batch_blocks_following_hosts_and_creates_rollback_approval(self, execute_command):
         self.release.rollout_batch_size = 1

@@ -99,6 +99,8 @@ from .models import (
     PrometheusRuleRevisionReview,
 )
 from .config_governance import create_prometheus_rule_draft, serialize_revision
+from .governance.status import build_public_status
+from .delivery.releases import build_release_draft_impact_preview
 from .services import (
     COMMAND_ALLOWED,
     audit,
@@ -127,6 +129,7 @@ from .services import (
     service_command,
     latest_metric_map,
     require_deployment_maintenance_approval,
+    require_deployment_risk_approval,
     require_deployment_slo_approval,
     evaluate_service_slo,
     clear_k8s_detail_cache,
@@ -428,6 +431,11 @@ def safe_next_url(request, next_url, fallback):
 @session_login_required
 def dashboard(request):
     return render(request, 'devops/vue_app.html')
+
+
+def public_status_page(request):
+    """Unauthenticated public status surface with an allowlisted read model."""
+    return render(request, 'devops/public_status.html', build_public_status())
 
 
 @session_login_required
@@ -829,15 +837,23 @@ def service_slo_evaluate(request, id):
 
 
 def runbook_queryset(request):
-    return RunbookTemplate.objects.select_related('service').filter(
+    return RunbookTemplate.objects.select_related('service', 'rollback_runbook').filter(
         allowed_hosts__in=visible_hosts_for_request(request)
     ).distinct()
 
 
 def runbook_form(request, *args, **kwargs):
     form = RunbookTemplateForm(*args, **kwargs)
-    form.fields['allowed_hosts'].queryset = visible_hosts_for_request(request)
+    visible_hosts = visible_hosts_for_request(request)
+    form.fields['allowed_hosts'].queryset = visible_hosts
     form.fields['service'].queryset = topology_service_choices(request)
+    form.fields['rollback_runbook'].queryset = RunbookTemplate.objects.filter(
+        allowed_hosts__in=visible_hosts,
+        enabled=True,
+        requires_approval=True,
+    ).distinct()
+    if form.instance and form.instance.pk:
+        form.fields['rollback_runbook'].queryset = form.fields['rollback_runbook'].queryset.exclude(id=form.instance.id)
     return form
 
 
@@ -1211,7 +1227,18 @@ def deployments(request):
             release_form = apply_host_queryset(DeploymentReleaseForm(request.POST), hosts)
             if release_form.is_valid():
                 if request.POST.get('submit_mode') == 'preview':
-                    preview = deployment_risk_preview(release_form.cleaned_data['hosts'])
+                    draft_hosts = release_form.cleaned_data['hosts']
+                    preview = deployment_risk_preview(draft_hosts)
+                    draft_app = release_form.cleaned_data.get('app')
+                    draft_services = topology_service_choices(request).filter(
+                        models.Q(devops_projects__deployment_apps=draft_app) |
+                        models.Q(hosts__in=draft_hosts),
+                    ).distinct()
+                    preview.update(build_release_draft_impact_preview(
+                        draft_services,
+                        draft_hosts,
+                        batch_size=release_form.cleaned_data.get('rollout_batch_size', 0),
+                    ))
                 else:
                     settings_obj = DevOpsSetting.current()
                     submit_for_approval = request.POST.get('submit_mode') == 'approval' or settings_obj.force_deploy_approval
@@ -1237,7 +1264,11 @@ def deployments(request):
                         release,
                         requester=request.session.get('user_name'),
                     )
-                    approval_required = maintenance_approval or slo_approval
+                    risk_approval = require_deployment_risk_approval(
+                        release,
+                        requester=request.session.get('user_name'),
+                    )
+                    approval_required = maintenance_approval or slo_approval or risk_approval
                     if submit_for_approval or approval_required:
                         approval = create_deployment_approval(
                             release,
@@ -2037,8 +2068,9 @@ def integration_health(request):
     denied = require_devops_role(request, DevOpsRole.ROLE_ADMIN, MODULE_SECURITY)
     if denied:
         return denied
-    from monitor.models import AlertmanagerConfig, PrometheusConfig
+    from monitor.models import AlertmanagerConfig, AlertNotificationConfig, PrometheusConfig
     from .api import configured_integration_health, notification_health_summary
+    from .models import IntegrationHealthEscalationPolicy
     return render(request, 'devops/integration_health.html', {
         'github': summarize_integration_health(
             IntegrationHealthEvent.TYPE_GITHUB_INBOUND,
@@ -2053,6 +2085,15 @@ def integration_health(request):
             IntegrationHealthEvent.TYPE_ALERTMANAGER,
         ),
         'notifications': notification_health_summary(),
+        'monitor_notifications': configured_integration_health(
+            AlertNotificationConfig.objects.only('id', 'name', 'enabled', 'provider').filter(
+                enabled=True, provider=AlertNotificationConfig.PROVIDER_WECOM,
+            ).order_by('id'),
+            IntegrationHealthEvent.TYPE_NOTIFICATION,
+            source_name_prefix='monitor-',
+        ),
+        'integration_health_policy': IntegrationHealthEscalationPolicy.current(),
+        'integration_health_channels': NotificationChannel.objects.filter(enabled=True).order_by('name'),
     })
 
 

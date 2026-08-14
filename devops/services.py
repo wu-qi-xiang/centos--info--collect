@@ -88,13 +88,16 @@ from .models import (
     HostGroup,
     HostTag,
     IntegrationHealthEvent,
+    IntegrationHealthEscalationPolicy,
     MaintenanceWindow,
     ServiceCatalog,
+    ServiceDependency,
     ServiceOnCallPolicy,
     ServiceOnCallRotationMember,
     ServiceSlo,
     ServiceSloEvaluation,
     RunbookTemplate,
+    RunbookHealthVerification,
     CloudResourceSummary,
     CloudDailyCostSummary,
     CIDelivery,
@@ -1632,6 +1635,83 @@ def record_integration_health_event(integration_type, source=None,
     )
 
 
+def probe_configured_integrations():
+    """Probe configured monitor integrations and persist only safe outcomes."""
+    from monitor.services import probe_monitor_integrations
+
+    probes = probe_monitor_integrations()
+    groups = (
+        ('prometheus', IntegrationHealthEvent.TYPE_PROMETHEUS),
+        ('alertmanager', IntegrationHealthEvent.TYPE_ALERTMANAGER),
+        ('wecom', IntegrationHealthEvent.TYPE_NOTIFICATION),
+    )
+    summary = {'checked': 0, 'success': 0, 'failed': 0, 'skipped': 0}
+    for key, integration_type in groups:
+        for item in probes.get(key, []):
+            if not isinstance(item, dict) or not item.get('source_id'):
+                summary['skipped'] += 1
+                continue
+            summary['checked'] += 1
+            ok = bool(item.get('ok'))
+            record_integration_health_event(
+                integration_type,
+                source_id=item.get('source_id'),
+                source_name=item.get('source_name'),
+                status=IntegrationHealthEvent.STATUS_SUCCESS if ok else IntegrationHealthEvent.STATUS_FAILED,
+                category=item.get('category') or IntegrationHealthEvent.CATEGORY_INTERNAL_ERROR,
+            )
+            summary['success' if ok else 'failed'] += 1
+    return summary
+
+
+def process_integration_health_escalations(now=None):
+    """Notify once for repeated integration failures and optional recovery."""
+    now = now or timezone.now()
+    policy = IntegrationHealthEscalationPolicy.objects.select_related('channel').first()
+    result = {'checked': 0, 'notified': 0, 'recovered': 0, 'skipped': 0}
+    if not policy or not policy.enabled or not policy.channel or not policy.channel.enabled:
+        return result
+    threshold = max(1, int(policy.consecutive_failures or 1))
+    cooldown = max(0, int(policy.cooldown_minutes or 0))
+    latest_keys = IntegrationHealthEvent.objects.values('integration_type', 'source_id').annotate(last_id=models.Max('id'))
+    for key in latest_keys:
+        event = IntegrationHealthEvent.objects.filter(id=key['last_id']).first()
+        if not event:
+            continue
+        result['checked'] += 1
+        summary = summarize_integration_health(
+            event.integration_type, source_id=event.source_id, source_name=event.source_name,
+        )
+        title = '集成健康：%s/%s' % (event.integration_type, event.source_name or event.source_id or '-')
+        if event.status == IntegrationHealthEvent.STATUS_FAILED and summary['consecutive_failures'] >= threshold:
+            recent = NotificationLog.objects.filter(
+                channel=policy.channel, event_type=NotificationLog.EVENT_INTEGRATION_HEALTH,
+                title=title, content__startswith='状态：失败',
+            ).order_by('-created_at').first()
+            if recent and cooldown and recent.created_at >= now - timezone.timedelta(minutes=cooldown):
+                result['skipped'] += 1
+                continue
+            log = send_notification_channel(
+                policy.channel, NotificationLog.EVENT_INTEGRATION_HEALTH, title,
+                '状态：失败\n连续失败：%s\n分类：%s' % (summary['consecutive_failures'], event.category),
+            )
+            result['notified'] += int(log.status == NotificationLog.STATUS_SUCCESS)
+        elif event.status == IntegrationHealthEvent.STATUS_SUCCESS and policy.notify_recovery:
+            previous_failure = NotificationLog.objects.filter(
+                channel=policy.channel, event_type=NotificationLog.EVENT_INTEGRATION_HEALTH,
+                title=title, status=NotificationLog.STATUS_SUCCESS,
+                content__startswith='状态：已恢复',
+            ).order_by('-created_at').first()
+            if previous_failure:
+                continue
+            log = send_notification_channel(
+                policy.channel, NotificationLog.EVENT_INTEGRATION_HEALTH, title,
+                '状态：已恢复\n最近检查：%s' % (event.occurred_at.strftime('%Y-%m-%d %H:%M:%S')),
+            )
+            result['recovered'] += int(log.status == NotificationLog.STATUS_SUCCESS)
+    return result
+
+
 def summarize_integration_health(integration_type, source=None, source_id=None,
                                  source_name='', recent_since=None):
     """Return safe status counts and latest outcome for one integration reference."""
@@ -2107,7 +2187,12 @@ def create_incident(request, title, severity, description='', host=None, alert=N
 
 
 def create_critical_alert_incident(alert):
-    """Create one bounded incident for an active critical alert, without copying its payload."""
+    """Create or correlate one bounded incident for an active critical alert.
+
+    Critical alerts for the same host that arrive within a short window share an
+    incident.  The alert remains the source of truth; the timeline only records
+    a safe correlation marker and never copies the alert payload.
+    """
     if alert.level != AlertEvent.LEVEL_CRITICAL or alert.status == AlertEvent.STATUS_SILENCED:
         return None
     incident = Incident.objects.filter(
@@ -2116,6 +2201,49 @@ def create_critical_alert_incident(alert):
     ).first()
     if incident:
         return incident
+
+    # Maintenance only suppresses incident creation.  AlertEvent remains the
+    # lifecycle source of truth so operators retain visibility and history.
+    if alert.host_id and active_maintenance_windows_for_host(alert.host).exists():
+        return None
+
+    # Host-level correlation keeps a burst of related symptoms actionable while
+    # retaining separate incidents across hosts or after the correlation window.
+    if alert.host_id:
+        window_seconds = _alert_incident_correlation_window_seconds()
+        cutoff = timezone.now() - timezone.timedelta(seconds=window_seconds)
+        if window_seconds <= 0:
+            return Incident.objects.create(
+                title='严重告警：%s' % (alert.metric or 'general'),
+                severity=Incident.SEVERITY_CRITICAL,
+                host=alert.host,
+                alert=alert,
+                created_by='system',
+            )
+        incident = Incident.objects.filter(
+            host_id=alert.host_id,
+            severity=Incident.SEVERITY_CRITICAL,
+            status__in=(Incident.STATUS_OPEN, Incident.STATUS_PROCESSING),
+            created_at__gte=cutoff,
+        ).order_by('-created_at', '-id').first()
+        if incident:
+            _record_critical_alert_correlation(incident, alert)
+            return incident
+
+        # Dependencies are treated as an undirected component for incident
+        # correlation: either an upstream or downstream service can surface the
+        # first symptom.  Only hosts attached to a connected service qualify.
+        connected_host_ids = _connected_service_host_ids(alert.host)
+        if connected_host_ids:
+            incident = Incident.objects.filter(
+                host_id__in=connected_host_ids,
+                severity=Incident.SEVERITY_CRITICAL,
+                status__in=(Incident.STATUS_OPEN, Incident.STATUS_PROCESSING),
+                created_at__gte=cutoff,
+            ).order_by('-created_at', '-id').first()
+            if incident:
+                _record_critical_alert_correlation(incident, alert)
+                return incident
     return Incident.objects.create(
         title='严重告警：%s' % (alert.metric or 'general'),
         severity=Incident.SEVERITY_CRITICAL,
@@ -2123,6 +2251,42 @@ def create_critical_alert_incident(alert):
         alert=alert,
         created_by='system',
     )
+
+
+def _alert_incident_correlation_window_seconds():
+    window_seconds = getattr(settings, 'ALERT_INCIDENT_CORRELATION_WINDOW_SECONDS', 900)
+    try:
+        return max(0, int(window_seconds))
+    except (TypeError, ValueError):
+        return 900
+
+
+def _record_critical_alert_correlation(incident, alert):
+    """Append a safe marker without copying untrusted alert content."""
+    IncidentTimeline.objects.create(
+        incident=incident,
+        note='关联严重告警 #%s（指标：%s）' % (alert.id, alert.metric or 'general'),
+        created_by='system',
+    )
+
+
+def _connected_service_host_ids(host):
+    """Return hosts in the host service's undirected dependency component."""
+    service_ids = set(ServiceCatalog.objects.filter(hosts=host).values_list('id', flat=True))
+    if not service_ids:
+        return set()
+    adjacency = {}
+    for service_id, upstream_id in ServiceDependency.objects.values_list('service_id', 'upstream_service_id'):
+        adjacency.setdefault(service_id, set()).add(upstream_id)
+        adjacency.setdefault(upstream_id, set()).add(service_id)
+    pending = list(service_ids)
+    while pending:
+        service_id = pending.pop()
+        for neighbor_id in adjacency.get(service_id, set()):
+            if neighbor_id not in service_ids:
+                service_ids.add(neighbor_id)
+                pending.append(neighbor_id)
+    return set(ServiceCatalog.objects.filter(id__in=service_ids).values_list('hosts__id', flat=True)) - {None}
 
 
 def update_incident_status(request, incident, status):
@@ -3607,6 +3771,7 @@ def evaluate_deployment_health(release, batch_hosts, now=None):
     critical_alert_count = AlertEvent.objects.filter(
         host_id__in=batch_host_ids,
         level=AlertEvent.LEVEL_CRITICAL,
+        status__in=(AlertEvent.STATUS_OPEN, AlertEvent.STATUS_PROCESSING, AlertEvent.STATUS_SILENCED),
         created_at__gte=release_started_at,
     ).count()
     failed_command_count = CommandExecution.objects.filter(
@@ -3622,6 +3787,7 @@ def evaluate_deployment_health(release, batch_hosts, now=None):
         enabled=True,
         last_state=ServiceSlo.STATE_EXHAUSTED,
         last_evaluated_at__gte=release_started_at,
+        last_evaluated_at__lte=now,
     ).count()
 
     score = max(0, 100 - (critical_alert_count * 50) -
@@ -3686,6 +3852,65 @@ def require_deployment_slo_approval(release, requester=''):
             return approval
         reason = 'SLO 预算耗尽：%s' % '、'.join(exhausted[:5])
         return create_deployment_approval(release, requester=requester, reason=reason[:500])
+
+
+def require_deployment_risk_approval(release, requester=''):
+    """Create or reuse approval when a release preview has critical signals.
+
+    This is a read-only risk calculation followed by an idempotent approval
+    write.  The preview itself never creates a release, approval, or worker
+    job; only the normal release submission path calls this gate.
+    """
+    from .release_impact import build_release_impact_preview
+
+    with transaction.atomic():
+        release = DeploymentRelease.objects.select_for_update().get(pk=release.pk)
+        services = ServiceCatalog.objects.filter(
+            models.Q(devops_projects__deployment_apps=release.app) |
+            models.Q(hosts__in=release.hosts.all()),
+        ).distinct()
+        # Releases without a mapped service retain the legacy path; there is
+        # no authorized service context from which to derive risk evidence.
+        if not services.exists():
+            return None
+        try:
+            preview = build_release_impact_preview(
+                release, list(services), list(release.hosts.all()),
+                batch_size=release.rollout_batch_size,
+            )
+        except ValueError:
+            # Invalid or incomplete legacy release context must not turn the
+            # optional risk gate into a new deployment failure mode.
+            return None
+        evidence = preview['evidence_counts']
+        AuditLog.objects.create(
+            user=requester or 'system',
+            action='发布风险门禁',
+            target_type='DeploymentRelease',
+            target_id=str(release.id),
+            detail='风险=%s, 原因数=%s, 严重信号=%s' % (
+                preview['risk'], len(preview['reasons']),
+                sum(evidence[key] for key in (
+                    'critical_alerts', 'exhausted_slos',
+                    'unhealthy_deployments', 'failed_ci_deliveries',
+                )),
+            ),
+            ip_address='',
+        )
+        if preview['risk'] != 'critical':
+            return None
+        approval = ApprovalRequest.objects.filter(
+            request_type=ApprovalRequest.TYPE_DEPLOYMENT,
+            deployment_release=release,
+            status__in=(ApprovalRequest.STATUS_PENDING, ApprovalRequest.STATUS_APPROVED),
+        ).order_by('-created_at').first()
+        if approval:
+            return approval
+        return create_deployment_approval(
+            release,
+            requester=requester,
+            reason='发布风险门禁：检测到高风险信号（类别数=%s）' % len(preview['reasons']),
+        )
 
 
 def validate_remote_path(remote_path):
@@ -4085,6 +4310,87 @@ def create_rollback_approval(release, requester='', reason=''):
     return approval
 
 
+def _approved_terminal_runbook_execution(record):
+    return (
+        record.runbook_template_id and
+        record.status in (
+            CommandExecution.STATUS_SUCCESS,
+            CommandExecution.STATUS_FAILED,
+            CommandExecution.STATUS_BLOCKED,
+        ) and
+        ApprovalRequest.objects.filter(
+            request_type=ApprovalRequest.TYPE_COMMAND,
+            command_execution=record,
+            status__in=(
+                ApprovalRequest.STATUS_EXECUTED,
+                ApprovalRequest.STATUS_FAILED,
+            ),
+        ).exists()
+    )
+
+
+def _eligible_rollback_runbook(runbook, host):
+    rollback = runbook.rollback_runbook
+    if not rollback or not rollback.enabled or not rollback.requires_approval:
+        return None
+    if not rollback.allowed_hosts.filter(id=host.id).exists():
+        return None
+    if rollback.service_id and not rollback.service.hosts.filter(id=host.id).exists():
+        return None
+    return rollback
+
+
+def verify_runbook_execution_health(record):
+    """Persist local alert-derived health and optionally queue a fixed rollback approval.
+
+    This intentionally does not probe remote systems, read command output, or execute a
+    rollback.  The one-to-one record makes repeated worker completion idempotent.
+    """
+    if not _approved_terminal_runbook_execution(record):
+        return None
+    with transaction.atomic():
+        existing = RunbookHealthVerification.objects.filter(command_execution=record).first()
+        if existing:
+            return existing
+        active_critical_count = AlertEvent.objects.filter(
+            host_id=record.host_id,
+            level=AlertEvent.LEVEL_CRITICAL,
+            status__in=(AlertEvent.STATUS_OPEN, AlertEvent.STATUS_PROCESSING),
+        ).count()
+        status = (
+            RunbookHealthVerification.STATUS_UNHEALTHY if active_critical_count
+            else RunbookHealthVerification.STATUS_HEALTHY
+        )
+        verification = RunbookHealthVerification.objects.create(
+            command_execution=record,
+            status=status,
+            active_critical_alert_count=active_critical_count,
+            summary='critical_alert=%s' % active_critical_count,
+        )
+        if status != RunbookHealthVerification.STATUS_UNHEALTHY:
+            return verification
+        rollback = _eligible_rollback_runbook(record.runbook_template, record.host)
+        if not rollback:
+            return verification
+        rollback_record = CommandExecution.objects.create(
+            host=record.host,
+            runbook_template=rollback,
+            command=rollback.command_template,
+            created_by=record.created_by,
+        )
+        rollback_approval = create_command_approval(
+            record.host,
+            rollback.command_template,
+            record.created_by,
+            '运行手册健康验证未通过，等待固定回滚运行手册审批',
+        )
+        rollback_approval.command_execution = rollback_record
+        rollback_approval.save(update_fields=['command_execution'])
+        verification.rollback_approval = rollback_approval
+        verification.save(update_fields=['rollback_approval'])
+        return verification
+
+
 def finalize_command_approval(record):
     """Move a queued runbook approval only after its existing command worker reaches a terminal state."""
     if not record.runbook_template_id:
@@ -4103,6 +4409,7 @@ def finalize_command_approval(record):
         approval.executed_at = timezone.now()
         approval.save(update_fields=['status', 'executed_at'])
         notify_approval(approval, '执行')
+    verify_runbook_execution_health(record)
 
 
 def execute_approval_request(approval, role=DevOpsRole.ROLE_ADMIN):

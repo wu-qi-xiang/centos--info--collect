@@ -16,9 +16,10 @@ class ScheduledTask(object):
 
 
 SAFE_RESULT_KEYS = (
-    'alertmanagers', 'attempted', 'cancelled', 'cleaned', 'errors', 'escalated',
+    'alertmanagers', 'attempted', 'cancelled', 'checked', 'cleaned', 'errors', 'escalated',
     'evaluated', 'exhausted', 'firing', 'processed', 'pushed', 'received',
-    'scanned', 'skipped', 'unavailable',
+    'recovered', 'revoked', 'scanned', 'skipped', 'stale', 'offline', 'unavailable',
+    'success', 'failed',
 )
 
 
@@ -31,12 +32,19 @@ def scheduled_task_registry():
         process_due_oncall_escalations_periodically,
         scan_compliance_baselines_daily,
     )
+    from .services import probe_configured_integrations, process_integration_health_escalations
+    from RemoteLinux.agent_health import evaluate_host_agent_health
+    from aiops.operator_mode import run_scheduled_operator_scan
     return (
         ScheduledTask('monitor', settings.DEVOPS_SCHEDULER_MONITOR_INTERVAL_SECONDS, monitor_send_email),
         ScheduledTask('alertmanager', settings.DEVOPS_SCHEDULER_ALERTMANAGER_INTERVAL_SECONDS, poll_alertmanager_notifications),
         ScheduledTask('oncall', settings.DEVOPS_SCHEDULER_ONCALL_INTERVAL_SECONDS, process_due_oncall_escalations_periodically),
         ScheduledTask('service_slo', settings.DEVOPS_SCHEDULER_SERVICE_SLO_INTERVAL_SECONDS, evaluate_service_slos_periodically),
         ScheduledTask('compliance', settings.DEVOPS_SCHEDULER_COMPLIANCE_INTERVAL_SECONDS, scan_compliance_baselines_daily),
+        ScheduledTask('agent_health', settings.DEVOPS_SCHEDULER_AGENT_HEALTH_INTERVAL_SECONDS, evaluate_host_agent_health),
+        ScheduledTask('integration_health', settings.DEVOPS_SCHEDULER_INTEGRATION_HEALTH_INTERVAL_SECONDS, probe_configured_integrations),
+        ScheduledTask('integration_health_escalation', settings.DEVOPS_SCHEDULER_INTEGRATION_HEALTH_INTERVAL_SECONDS, process_integration_health_escalations),
+        ScheduledTask('operator_scan', settings.DEVOPS_SCHEDULER_OPERATOR_SCAN_INTERVAL_SECONDS, run_scheduled_operator_scan),
     )
 
 

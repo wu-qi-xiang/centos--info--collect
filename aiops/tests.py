@@ -10,7 +10,7 @@ from django.utils import timezone
 from unittest import mock
 
 from RemoteLinux.models import NewLinux, User
-from devops.models import AlertEvent, CommandExecution, DevOpsHostScope, HostGroup, MetricSample, RunbookTemplate
+from devops.models import AlertEvent, CommandExecution, DevOpsHostScope, HostGroup, MetricSample, RunbookTemplate, DevOpsRole, DevOpsModulePermission, ApprovalRequest
 from .models import AiopsAlertAnalysis, AiopsIntegration
 from .views import sanitize_alert
 
@@ -44,6 +44,44 @@ class AiopsDashboardTests(TestCase):
 		self.assertContains(response, 'AIOps')
 		self.assertContains(response, '异常检测')
 		self.assertContains(response, 'web-01')
+
+	def test_dashboard_reliability_window_control_is_available(self):
+		DevOpsRole.objects.create(user=self.user, role=DevOpsRole.ROLE_VIEWER)
+		DevOpsModulePermission.objects.create(
+			user=self.user, module=DevOpsModulePermission.MODULE_SERVICE,
+			role=DevOpsRole.ROLE_VIEWER,
+		)
+		response = self.client.get(reverse('aiops:dashboard'))
+		self.assertEqual(
+			response.context['aiops_payload']['service_reliability_endpoint'],
+			reverse('aiops:api_service_reliability'),
+		)
+		static_source = (Path(settings.BASE_DIR) / 'static/js/aiops-vue.js').read_text()
+		for marker in ('serviceReliability.window', 'value="24h"', 'value="7d"', 'value="30d"', 'setInvestigationWindow', 'formatInvestigationDateTime', 'requestId !== this.investigations.requestId', 'investigationResults()', '当前筛选条件没有匹配的调查'):
+			self.assertIn(marker, static_source)
+		self.assertIn('requestId !== this.serviceReliability.requestId', static_source)
+
+	def test_runbook_recommendation_requires_approval_before_execution(self):
+		DevOpsRole.objects.create(user=self.user, role=DevOpsRole.ROLE_OPERATOR)
+		DevOpsModulePermission.objects.create(user=self.user, module=DevOpsModulePermission.MODULE_COMMAND, role=DevOpsRole.ROLE_OPERATOR)
+		group = HostGroup.objects.create(name='aiops-runbook-hosts')
+		group.hosts.add(self.host)
+		scope = DevOpsHostScope.objects.create(user=self.user)
+		scope.groups.add(group)
+		alert = AlertEvent.objects.create(host=self.host, level=AlertEvent.LEVEL_CRITICAL, metric='cpu', message='CPU high')
+		runbook = RunbookTemplate.objects.create(name='restart-nginx-aiops', version=1, command_template='systemctl restart nginx', requires_approval=True)
+		runbook.allowed_hosts.add(self.host)
+		created = self.client.post(reverse('aiops:api_runbook_recommendations'), data={
+			'alert_id': alert.id, 'runbook_id': runbook.id, 'summary': '建议重启服务',
+		}, content_type='application/json')
+		self.assertEqual(created.status_code, 201)
+		recommendation_id = created.json()['recommendation']['id']
+		with mock.patch('devops.services.execute_command_record') as execute:
+			initiated = self.client.post(reverse('aiops:api_runbook_recommendation_initiate', args=[recommendation_id]), data={}, content_type='application/json')
+		self.assertEqual(initiated.status_code, 202)
+		self.assertTrue(initiated.json()['requires_approval'])
+		self.assertEqual(ApprovalRequest.objects.filter(status=ApprovalRequest.STATUS_PENDING).count(), 1)
+		execute.assert_not_called()
 
 	def test_dashboard_exposes_only_safe_diagnostic_entry_metadata(self):
 		response = self.client.get(reverse('aiops:dashboard'))
@@ -104,6 +142,7 @@ class AiopsDashboardTests(TestCase):
 
 		response = self.client.get(reverse('aiops:dashboard'))
 		self.assertIsNone(response.context['aiops_payload']['service_impacts_endpoint'])
+		self.assertIsNone(response.context['aiops_payload']['service_reliability_endpoint'])
 		self.assertIsNone(response.context['aiops_payload']['service_workbench_endpoint_template'])
 
 		permission.role = DevOpsRole.ROLE_VIEWER
@@ -112,6 +151,10 @@ class AiopsDashboardTests(TestCase):
 		self.assertEqual(
 			response.context['aiops_payload']['service_impacts_endpoint'],
 			reverse('aiops:api_service_impacts'),
+		)
+		self.assertEqual(
+			response.context['aiops_payload']['service_reliability_endpoint'],
+			reverse('aiops:api_service_reliability'),
 		)
 		self.assertEqual(
 			response.context['aiops_payload']['service_workbench_endpoint_template'],
@@ -155,6 +198,11 @@ class AiopsDashboardTests(TestCase):
 		self.assertNotContains(response, other.linux_name)
 
 	def test_save_config_updates_aiops_integration(self):
+		DevOpsRole.objects.create(user=self.user, role=DevOpsRole.ROLE_ADMIN)
+		DevOpsModulePermission.objects.create(
+			user=self.user, module=DevOpsModulePermission.MODULE_ALERT,
+			role=DevOpsRole.ROLE_ADMIN,
+		)
 		response = self.client.post(reverse('aiops:config'), {
 			'alertmanager_url': 'http://alertmanager:9093',
 			'llm_url': 'http://llm.example.com',
@@ -171,6 +219,66 @@ class AiopsDashboardTests(TestCase):
 		self.assertEqual(config.decrypted_llm_api_key, 'secret')
 		self.assertTrue(config.llm_api_key.startswith('enc:'))
 		self.assertTrue(config.enabled)
+
+	def test_save_config_denies_non_admin_alert_user_without_modifying_config(self):
+		config = AiopsIntegration.current()
+		config.alertmanager_url = 'https://existing.alertmanager.example'
+		config.enabled = True
+		config.save()
+
+		response = self.client.post(reverse('aiops:config'), {
+			'alertmanager_url': 'https://attacker.example',
+			'llm_url': 'https://attacker-llm.example',
+			'enabled': '',
+		})
+
+		self.assertEqual(response.status_code, 403)
+		config.refresh_from_db()
+		self.assertEqual(config.alertmanager_url, 'https://existing.alertmanager.example')
+		self.assertTrue(config.enabled)
+
+	def test_dashboard_marks_integration_management_only_for_alert_admin(self):
+		response = self.client.get(reverse('aiops:dashboard'))
+		self.assertFalse(response.context['aiops_payload']['integration']['can_manage'])
+
+		DevOpsRole.objects.create(user=self.user, role=DevOpsRole.ROLE_ADMIN)
+		DevOpsModulePermission.objects.create(
+			user=self.user, module=DevOpsModulePermission.MODULE_ALERT,
+			role=DevOpsRole.ROLE_ADMIN,
+		)
+		response = self.client.get(reverse('aiops:dashboard'))
+		self.assertTrue(response.context['aiops_payload']['integration']['can_manage'])
+
+	def test_dashboard_exposes_k8s_refresh_only_to_cluster_admin(self):
+		payload = self.client.get(reverse('aiops:dashboard')).context['aiops_payload']
+		self.assertFalse(payload['k8s_analyzer_can_refresh'])
+
+		DevOpsRole.objects.create(user=self.user, role=DevOpsRole.ROLE_ADMIN)
+		DevOpsModulePermission.objects.create(
+			user=self.user, module=DevOpsModulePermission.MODULE_CLUSTER,
+			role=DevOpsRole.ROLE_ADMIN,
+		)
+		payload = self.client.get(reverse('aiops:dashboard')).context['aiops_payload']
+		self.assertTrue(payload['k8s_analyzer_can_refresh'])
+
+	def test_dashboard_exposes_runbook_initiate_template_only_to_command_operator(self):
+		DevOpsRole.objects.create(user=self.user, role=DevOpsRole.ROLE_VIEWER)
+		DevOpsModulePermission.objects.create(
+			user=self.user, module=DevOpsModulePermission.MODULE_COMMAND,
+			role=DevOpsRole.ROLE_VIEWER,
+		)
+		payload = self.client.get(reverse('aiops:dashboard')).context['aiops_payload']
+		self.assertIsNone(payload['runbook_recommendation_initiate_endpoint_template'])
+
+		DevOpsRole.objects.filter(user=self.user).update(role=DevOpsRole.ROLE_OPERATOR)
+		DevOpsModulePermission.objects.filter(
+			user=self.user, module=DevOpsModulePermission.MODULE_COMMAND,
+		).update(role=DevOpsRole.ROLE_OPERATOR)
+		payload = self.client.get(reverse('aiops:dashboard')).context['aiops_payload']
+		self.assertEqual(
+			payload['runbook_recommendation_initiate_endpoint_template'],
+			'/aiops/api/runbook-recommendations/{recommendation_id}/initiate/',
+		)
 
 	@mock.patch('aiops.views.requests.post')
 	def test_alertmanager_webhook_stores_llm_suggestion(self, post):
@@ -210,6 +318,11 @@ class AiopsDataGovernanceTests(TestCase):
 		session.save()
 
 	def test_config_encrypts_key_and_blank_update_preserves_existing_key(self):
+		DevOpsRole.objects.create(user=self.user, role=DevOpsRole.ROLE_ADMIN)
+		DevOpsModulePermission.objects.create(
+			user=self.user, module=DevOpsModulePermission.MODULE_ALERT,
+			role=DevOpsRole.ROLE_ADMIN,
+		)
 		response = self.client.post(reverse('aiops:config'), {
 			'alertmanager_url': '',
 			'llm_url': '',
@@ -364,7 +477,16 @@ class AiopsDataGovernanceTests(TestCase):
 			self.assertNotIn('data.integration.%s' % removed_field, script)
 		self.assertIn('name="csrfmiddlewaretoken"', script)
 		self.assertIn('data.integration.alertmanager_configured', script)
+		self.assertIn('data.integration.can_manage', script)
+		self.assertIn('当前账号没有接入配置管理权限', script)
 		self.assertIn('data.integration.llm_configured', script)
+		self.assertIn('investigation_feedback_endpoint_template', script)
+		self.assertIn('submitInvestigationFeedback', script)
+		self.assertIn('runbook_recommendation_initiate_endpoint_template', script)
+		self.assertIn('initiateRunbookRecommendation', script)
+		self.assertIn("query.set('refresh', '1')", script)
+		self.assertIn('note_present', script)
+		self.assertNotIn('[[ feedback.note ]]', script)
 		self.assertNotIn('保存原始内容', script)
 		self.assertNotIn('调用大模型生成处理建议', script)
 

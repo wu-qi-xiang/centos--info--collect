@@ -1,0 +1,68 @@
+{% load static %}
+<!DOCTYPE html>
+<html lang="zh-cn">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>服务状态</title>
+    <link rel="stylesheet" href="{% static 'bootstrap/css/bootstrap.css' %}">
+    <link rel="stylesheet" href="{% static 'css/geist-classic-pages.css' %}?v=20260804-public-status">
+</head>
+<body class="public-status-page">
+    <main class="public-status-shell">
+        <header class="public-status-header">
+            <div>
+                <p class="public-status-kicker">SERVICE STATUS</p>
+                <h1>服务状态</h1>
+                <p class="public-status-updated">最近更新：{{ generated_at|date:"Y-m-d H:i" }}</p>
+            </div>
+            <span class="public-state public-state-{{ overall_state }}">{{ overall_state_label }}</span>
+        </header>
+
+        <section aria-labelledby="services-heading">
+            <div class="public-status-section-title">
+                <h2 id="services-heading">服务概览</h2>
+                <span>{{ services|length }} 项服务</span>
+            </div>
+            <div class="public-service-list">
+                {% for service in services %}
+                <article class="public-service-row">
+                    <h3>{{ service.name }}</h3>
+                    <div class="public-service-meta">
+                        <span class="public-state public-state-{{ service.state }}">{{ service.state_label }}</span>
+                        <span>{{ service.availability_trend_label }}</span>
+                    </div>
+                </article>
+                {% empty %}
+                <p class="public-empty-state">暂无公开服务状态。</p>
+                {% endfor %}
+            </div>
+        </section>
+
+        <div class="public-status-grid">
+            <section aria-labelledby="maintenance-heading">
+                <div class="public-status-section-title"><h2 id="maintenance-heading">维护公告</h2></div>
+                <div class="public-status-panel">
+                    {% for item in maintenance %}
+                    <article class="public-event-row">
+                        <div><h3>{{ item.title }}</h3><p>{{ item.state_label }}{% if item.service_count %} · {{ item.service_count }} 项服务{% endif %}</p></div>
+                        <time datetime="{{ item.starts_at|date:'c' }}">{{ item.starts_at|date:"m-d H:i" }} - {{ item.ends_at|date:"m-d H:i" }}</time>
+                    </article>
+                    {% empty %}<p class="public-empty-state">当前没有维护安排。</p>{% endfor %}
+                </div>
+            </section>
+            <section aria-labelledby="incidents-heading">
+                <div class="public-status-section-title"><h2 id="incidents-heading">事件动态</h2></div>
+                <div class="public-status-panel">
+                    {% for item in timeline %}
+                    <article class="public-event-row">
+                        <div><h3>{{ item.state_label }}</h3></div>
+                        <time datetime="{{ item.occurred_at|date:'c' }}">{{ item.occurred_at|date:"m-d H:i" }}</time>
+                    </article>
+                    {% empty %}<p class="public-empty-state">当前没有公开事件。</p>{% endfor %}
+                </div>
+            </section>
+        </div>
+    </main>
+</body>
+</html>

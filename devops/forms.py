@@ -242,7 +242,21 @@ class RunbookTemplateForm(forms.ModelForm):
 
     class Meta:
         model = RunbookTemplate
-        fields = ('name', 'version', 'trigger_kind', 'command_template', 'service', 'allowed_hosts', 'enabled', 'requires_approval')
+        fields = (
+            'name', 'version', 'trigger_kind', 'command_template', 'service',
+            'allowed_hosts', 'rollback_runbook', 'enabled', 'requires_approval',
+        )
+
+    def clean(self):
+        cleaned = super(RunbookTemplateForm, self).clean()
+        rollback = cleaned.get('rollback_runbook')
+        allowed_hosts = cleaned.get('allowed_hosts')
+        if rollback and allowed_hosts is not None:
+            rollback_host_ids = set(rollback.allowed_hosts.values_list('id', flat=True))
+            missing_host_ids = set(host.id for host in allowed_hosts) - rollback_host_ids
+            if missing_host_ids:
+                self.add_error('rollback_runbook', '回滚运行手册必须覆盖当前运行手册的所有允许主机')
+        return cleaned
 
 
 class FileDistributionForm(forms.ModelForm):

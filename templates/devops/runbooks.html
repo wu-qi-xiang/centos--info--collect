@@ -16,6 +16,7 @@
             <div class="col-md-3"><label class="form-label">关联服务</label>{{ form.service }}{{ form.service.errors }}</div>
             <div class="col-md-3"><label class="form-label">固定命令</label>{{ form.command_template }}{{ form.command_template.errors }}</div>
             <div class="col-md-8"><label class="form-label">允许主机</label>{{ form.allowed_hosts }}{{ form.allowed_hosts.errors }}</div>
+            <div class="col-md-4"><label class="form-label">固定回滚运行手册</label>{{ form.rollback_runbook }}{{ form.rollback_runbook.errors }}</div>
             <div class="col-md-2"><label class="form-label">启用</label>{{ form.enabled }}</div>
             <div class="col-md-2"><label class="form-label">必须审批</label>{{ form.requires_approval }}{{ form.requires_approval.errors }}</div>
             <div class="col-md-12"><button class="btn btn-primary" type="submit">保存运行手册</button>{% if editing_runbook %}<a class="btn btn-outline-secondary" href="{% url 'devops:runbooks' %}">取消</a>{% endif %}</div>
@@ -24,14 +25,14 @@
     {% endif %}
     <div class="card ops-legacy-card ops-runbook-records"><div class="card-header">可用运行手册</div><div class="card-body table-responsive ops-legacy-table-wrap">
         <table class="table table-sm align-middle">
-            <tr><th>名称</th><th>版本</th><th>触发</th><th>服务</th><th>启用</th><th>审批</th><th>更新时间</th>{% if can_manage or can_initiate %}<th>操作</th>{% endif %}</tr>
+            <tr><th>名称</th><th>版本</th><th>触发</th><th>服务</th><th>固定回滚</th><th>启用</th><th>审批</th><th>更新时间</th>{% if can_manage or can_initiate %}<th>操作</th>{% endif %}</tr>
             {% for runbook in runbooks %}
             <tr>
-                <td>{{ runbook.name }}</td><td>{{ runbook.version }}</td><td>{{ runbook.get_trigger_kind_display }}</td><td>{{ runbook.service.name|default:"-" }}</td>
+                <td>{{ runbook.name }}</td><td>{{ runbook.version }}</td><td>{{ runbook.get_trigger_kind_display }}</td><td>{{ runbook.service.name|default:"-" }}</td><td>{% if runbook.rollback_runbook_id %}#{{ runbook.rollback_runbook_id }} {{ runbook.rollback_runbook.name }} v{{ runbook.rollback_runbook.version }}{% else %}-{% endif %}</td>
                 <td>{% if runbook.enabled %}是{% else %}否{% endif %}</td><td>{% if runbook.requires_approval %}是{% else %}否{% endif %}</td><td>{{ runbook.updated_at|date:"Y-m-d H:i:s" }}</td>
                 {% if can_manage or can_initiate %}<td class="text-nowrap">{% if can_manage %}<a class="btn btn-outline-primary btn-sm" href="{% url 'devops:runbooks' %}?edit={{ runbook.id }}">编辑</a>{% endif %}{% if can_initiate and runbook.enabled %}<form method="post" action="{% url 'devops:runbook_initiate' runbook.id %}" class="d-inline ops-runbook-initiation">{% csrf_token %}<select name="host_id" class="form-select form-select-sm d-inline-block w-auto">{% for host in runbook.allowed_hosts.all %}{% if host.id in visible_host_ids %}<option value="{{ host.id }}">{{ host.linux_name }}</option>{% endif %}{% endfor %}</select><button class="btn btn-outline-secondary btn-sm" type="submit">发起审批</button></form>{% endif %}</td>{% endif %}
             </tr>
-            {% empty %}<tr><td colspan="8" class="text-muted">当前授权范围内没有运行手册</td></tr>{% endfor %}
+            {% empty %}<tr><td colspan="9" class="text-muted">当前授权范围内没有运行手册</td></tr>{% endfor %}
         </table>
     </div></div>
 </div>
